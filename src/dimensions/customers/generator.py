@@ -1112,14 +1112,24 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
         org_region_rng = np.random.default_rng(seed + 77777)
         Region = org_region_rng.choice(region_labels, size=len(customers_df), p=region_probs)
 
+        geography, _ = load_dimension("geography", parquet_dims_folder, cfg.geography)
+        geo_lookup = geography.set_index("GeographyKey")[["City", "State", "Country"]]
+
         # Copy head's home address columns to household members
         moved, head_of = head_indices_for_members(HouseholdKey, HouseholdRole)
         if moved.any():
             Region[moved] = Region[head_of]
-            for col in ("HomeAddress", "PostalCode", "Latitude", "Longitude", "CurrentCity"):
-                vals = customers_df[col].to_numpy()
+            for col in ("HomeAddress", "PostalCode", "Latitude", "Longitude"):
+                vals = customers_df[col].to_numpy().copy()
                 vals[moved] = vals[head_of]
                 customers_df[col] = vals
+            # CurrentCity lives in profile_df (person-only), not customers_df
+            full_city = geo_lookup["City"].reindex(
+                customers_df["GeographyKey"]
+            ).to_numpy(dtype=object)
+            full_city[moved] = full_city[head_of]
+            person_mask_p = (customers_df["CustomerType"] != "Organization").to_numpy()
+            profile_df["CurrentCity"] = full_city[person_mask_p]
 
         n_multi = int((HouseholdRole == "Spouse").sum() + (HouseholdRole == "Dependent").sum()
                       + (HouseholdRole == "Relative").sum())
@@ -1180,8 +1190,6 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
                 unchanged_df = customers_df[~_change_mask]
                 changed_df = customers_df[_change_mask]
 
-                geography, _ = load_dimension("geography", parquet_dims_folder, cfg.geography)
-                geo_lookup = geography.set_index("GeographyKey")[["City", "State", "Country"]]
                 geo_keys = geography["GeographyKey"].to_numpy()
                 loyalty_dim = read_parquet_dim(parquet_dims_folder, "loyalty_tiers")
                 loyalty_key_col = first_existing_col(loyalty_dim, ["LoyaltyTierKey", "TierKey", "Key"])
