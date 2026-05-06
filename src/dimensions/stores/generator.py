@@ -880,28 +880,33 @@ def generate_store_table(
     open_end_d   = _as_date64d(opening_end)
     close_end_d  = _as_date64d(closing_end)
 
-    # All stores must open before the data window starts — stores that open
-    # after global_start would have no employees or sales for their pre-open period.
-    if dataset_start:
-        ds_start_d = _as_date64d(dataset_start)
-        one_day = np.timedelta64(1, "D")
-        if open_end_d >= ds_start_d:
-            debug(
-                f"opening_end ({opening_end}) >= dataset_start ({dataset_start}); "
-                f"clamping all store opening dates to before {dataset_start}."
-            )
-            open_end_d = ds_start_d - one_day
-
-    # Validate date ordering
     if open_end_d < open_start_d:
         warn(
             f"opening_end ({opening_end}) < opening_start ({opening_start}); "
             "swapping to fix reversed date range."
         )
         open_start_d, open_end_d = open_end_d, open_start_d
+
+    # Stores opening after dataset_start would have no employees or sales for
+    # their pre-open period; shift the window (preserving width) to fit before it.
+    if dataset_start:
+        ds_start_d = _as_date64d(dataset_start)
+        one_day = np.timedelta64(1, "D")
+        target_end = ds_start_d - one_day
+        if open_end_d > target_end:
+            width = open_end_d - open_start_d
+            new_start = target_end - width
+            debug(
+                f"opening window [{open_start_d}, {open_end_d}] extends into "
+                f"dataset range (starts {dataset_start}); shifting to "
+                f"[{new_start}, {target_end}]."
+            )
+            open_start_d = new_start
+            open_end_d = target_end
+
     if close_end_d < open_end_d:
         warn(
-            f"closing_end ({closing_end}) < opening_end ({opening_end}); "
+            f"closing_end ({close_end_d}) < opening_end ({open_end_d}); "
             "closed stores may have unrealistic ClosingDates."
         )
 
