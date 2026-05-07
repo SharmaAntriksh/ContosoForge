@@ -104,15 +104,12 @@ def _generate_parallel_enrichment(
     )
 
     try:
-        chunk_results = []
-        for result in iter_imap_unordered(
+        for _ in iter_imap_unordered(
             tasks=tasks,
             task_fn=product_enrich_chunk_worker,
             spec=pool_spec,
         ):
-            chunk_results.append(result)
-
-        chunk_results.sort(key=lambda r: r["chunk_idx"])
+            pass
 
         # Merge enriched chunks (read in order for determinism)
         enriched_dfs = []
@@ -142,7 +139,6 @@ def load_product_dimension(config, output_folder: Path, *, log_skip: bool = True
       - Scale to target row count via expand_contoso_products():
           * stratified trim by SubcategoryKey when target < base_count
           * repeat/variants when target > base_count
-      - Apply lifecycle (Launch/Discontinued) from products.lifecycle (date-typed)
       - Apply pricing from products.pricing (ListPrice/UnitCost finalized here)
       - Enrich attributes (merch/channel/logistics/quality)
       - Assign SupplierKey (optional)
@@ -225,16 +221,6 @@ def load_product_dimension(config, output_folder: Path, *, log_skip: bool = True
         seed=seed,
     )
 
-    # Variant pricing consistency: all variants share the base variant's prices.
-    # After SCD2 drift, prices diverge naturally per variant.
-    if "BaseProductKey" in df.columns and "VariantIndex" in df.columns:
-        vi = df["VariantIndex"].to_numpy()
-        if len(vi) > 0 and vi.max() > 0:
-            base_rows = df.loc[vi == 0].set_index("ProductKey")[["ListPrice", "UnitCost"]]
-            bpk = df["BaseProductKey"]
-            df["ListPrice"] = bpk.map(base_rows["ListPrice"]).fillna(df["ListPrice"])
-            df["UnitCost"] = bpk.map(base_rows["UnitCost"]).fillna(df["UnitCost"])
-
     # Enrichment columns (parallel when above threshold)
     from multiprocessing import cpu_count
     from src.defaults import PRODUCT_PARALLEL_THRESHOLD
@@ -284,6 +270,8 @@ def load_product_dimension(config, output_folder: Path, *, log_skip: bool = True
     # -----------------------------------------------------------------
     # SCD Type 2 metadata (always present for consistent schema)
     # -----------------------------------------------------------------
+    # ProductID is the stable cross-version identity (preserved by SCD2);
+    # ProductKey gets reassigned per-version downstream. See CLAUDE.md gotcha #25.
     N = len(df)
     df["ProductID"] = df["ProductKey"].copy()
     df["VersionNumber"] = np.ones(N, dtype=np.int32)
@@ -317,41 +305,7 @@ def load_product_dimension(config, output_folder: Path, *, log_skip: bool = True
     # -----------------------------------------------------------------
     # Split into Products (core) and ProductProfile (analytical)
     # -----------------------------------------------------------------
-    _PRODUCTS_CORE_COLS = [
-        "ProductKey", "ProductID",
-        "VersionNumber", "EffectiveStartDate", "EffectiveEndDate", "IsCurrent",
-        "ProductCode", "ProductName", "ProductDescription",
-        "SubcategoryKey", "Brand", "Class", "Color",
-        "StockTypeCode", "StockType",
-        "UnitCost", "ListPrice",
-        "BaseProductKey", "VariantIndex",
-        "Source",
-    ]
-
-    core_cols = [c for c in _PRODUCTS_CORE_COLS if c in df.columns]
-    # ProductProfile: one row per product (IsCurrent=1 only).
-    # Analytical attributes are static across SCD2 versions — keyed on the
-    # current version's ProductKey for a clean 1:1 FK to Products.
-    profile_cols = ["ProductKey"] + [c for c in df.columns if c not in core_cols]
-
-    products_df = df[core_cols].copy()
-    if "IsCurrent" in df.columns:
-        profile_df = df.loc[df["IsCurrent"] == 1, profile_cols].copy().reset_index(drop=True)
-        if profile_df.empty:
-            raise DimensionError("No IsCurrent=1 rows in products — cannot build ProductProfile")
-    else:
-        profile_df = df[profile_cols].drop_duplicates(subset=["ProductKey"]).reset_index(drop=True)
-
-    # Reorder profile columns to match static_schemas.py (SQL CREATE TABLE order).
-    # BULK INSERT is positional — CSV column order must match the schema exactly.
-    from src.utils.static_schemas import STATIC_SCHEMAS
-    schema_cols = [name for name, _ in STATIC_SCHEMAS.get("ProductProfile", ())]
-    if schema_cols:
-        # Keep only columns present in both schema and DataFrame, in schema order
-        ordered = [c for c in schema_cols if c in profile_df.columns]
-        # Append any extra DataFrame columns not in schema (future-proof)
-        extra = [c for c in profile_df.columns if c not in schema_cols]
-        profile_df = profile_df[ordered + extra]
+    products_df, profile_df = _split_products_and_profile(df)
 
     profile_path = output_folder / "product_profile.parquet"
     write_parquet_with_date32(products_df, parquet_path, cast_all_datetime=True)
@@ -359,6 +313,71 @@ def load_product_dimension(config, output_folder: Path, *, log_skip: bool = True
 
     save_version("products", version_key, parquet_path)
     return products_df, profile_df, True
+
+
+_PRODUCTS_CORE_COLS = (
+    "ProductKey", "ProductID",
+    "VersionNumber", "EffectiveStartDate", "EffectiveEndDate", "IsCurrent",
+    "ProductCode", "ProductName", "ProductDescription",
+    "SubcategoryKey", "Brand", "Class", "Color",
+    "StockTypeCode", "StockType",
+    "UnitCost", "ListPrice",
+    "BaseProductKey", "VariantIndex",
+    "Source",
+)
+
+
+def _split_products_and_profile(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split the enriched (and optionally SCD2-expanded) DataFrame into
+    Products (core) and ProductProfile (analytical) tables.
+
+    ProductProfile carries one row per Products row (same grain).  Under
+    SCD2 this means one row per (ProductID, VersionNumber); historical
+    sales/inventory rows that store a non-current ProductKey still resolve
+    against profile.  ProductID is included so consumers can roll up
+    analytical attributes across versions when desired.
+    """
+    if df.empty:
+        raise DimensionError("Products dataframe is empty — cannot build ProductProfile")
+
+    core_cols = [c for c in _PRODUCTS_CORE_COLS if c in df.columns]
+    profile_cols = ["ProductKey", "ProductID"] + [c for c in df.columns if c not in core_cols]
+
+    # df[list] already returns a fresh frame; no extra .copy() needed.
+    products_df = df[core_cols]
+    profile_df = df[profile_cols].reset_index(drop=True)
+
+    # Reorder profile columns to match static_schemas.py (SQL CREATE TABLE order).
+    # BULK INSERT is positional — CSV column order must match the schema exactly.
+    from src.utils.static_schemas import STATIC_SCHEMAS
+    schema_cols = [name for name, _ in STATIC_SCHEMAS.get("ProductProfile", ())]
+    if schema_cols:
+        ordered = [c for c in schema_cols if c in profile_df.columns]
+        extra = [c for c in profile_df.columns if c not in schema_cols]
+        profile_df = profile_df[ordered + extra]
+
+    return products_df, profile_df
+
+
+def _archetype_hash() -> str:
+    """Stable hash of subcategory archetypes so edits trigger products regen.
+
+    Imported lazily to avoid pulling product_profile (and its heavy validation)
+    at module import time.
+    """
+    import hashlib
+    import json
+    from .product_profile import _SUBCATEGORY_ARCHETYPES, _DEFAULT_ARCHETYPE, _SIZE_DIMS
+    payload = json.dumps(
+        {
+            "archetypes": _SUBCATEGORY_ARCHETYPES,
+            "default": _DEFAULT_ARCHETYPE,
+            "size_dims": _SIZE_DIMS,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _version_key(p: dict) -> dict:
@@ -371,7 +390,9 @@ def _version_key(p: dict) -> dict:
         "seed": p.get("seed"),
         "pricing": p.get("pricing"),
         # bump whenever you add/remove enrichment columns (forces one regen)
-        "enrichment_v": 6,
+        "enrichment_v": 9,
+        # Auto-detect archetype edits (Material/Style/ProductLine/dims/season)
+        "archetype_hash": _archetype_hash(),
     }
     # SCD2 settings affect output shape
     scd2 = p.get("scd2")
@@ -381,5 +402,6 @@ def _version_key(p: dict) -> dict:
             "revision_frequency": scd2.get("revision_frequency", 12),
             "price_drift": scd2.get("price_drift", 0.05),
             "max_versions": scd2.get("max_versions", 4),
+            "revision_probability": scd2.get("revision_probability", 0.40),
         }
     return key

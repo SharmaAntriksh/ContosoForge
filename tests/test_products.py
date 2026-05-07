@@ -27,7 +27,9 @@ from src.dimensions.products.pricing import (
     apply_product_pricing,
     _rescale_to_range,
     _snap_unit_price_to_points,
+    _round_to_step,
     DEFAULT_PRICE_BANDS,
+    DEFAULT_COST_BANDS,
     DEFAULT_PRICE_ENDING,
 )
 from src.dimensions.products.product_profile import (
@@ -449,6 +451,40 @@ class TestApplyProductPricing:
         npt.assert_array_equal(lp, np.round(lp, 2))
         npt.assert_array_equal(uc, np.round(uc, 2))
 
+    def test_margin_mode_variants_share_cost(self):
+        """All variants of the same BaseProductKey must share UnitCost so
+        catalog-level pricing is consistent (SCD2 drift later diverges them)."""
+        df = pd.DataFrame({
+            "ProductKey": np.arange(1, 7, dtype=np.int64),
+            # 2 bases, 3 variants each
+            "BaseProductKey": np.array([1, 1, 1, 4, 4, 4], dtype=np.int64),
+            "VariantIndex": np.array([0, 1, 2, 0, 1, 2], dtype=np.int64),
+            "SubcategoryKey": np.array([10, 10, 10, 20, 20, 20], dtype=np.int64),
+            "ListPrice": np.array([99.99, 99.99, 99.99, 49.99, 49.99, 49.99]),
+            "UnitCost": np.array([50.0, 50.0, 50.0, 25.0, 25.0, 25.0]),
+        })
+        cfg = self._margin_cfg()
+        result = apply_product_pricing(df, cfg, seed=42)
+        for _, grp in result.groupby("BaseProductKey"):
+            assert grp["UnitCost"].nunique() == 1, "variants of same base must share UnitCost"
+            assert grp["ListPrice"].nunique() == 1
+
+    def test_margin_mode_different_bases_get_different_costs(self):
+        """Per-base sampling should still produce variance across bases."""
+        n_bases = 50
+        df = pd.DataFrame({
+            "ProductKey": np.arange(1, n_bases + 1, dtype=np.int64),
+            "BaseProductKey": np.arange(1, n_bases + 1, dtype=np.int64),
+            "VariantIndex": np.zeros(n_bases, dtype=np.int64),
+            "SubcategoryKey": np.full(n_bases, 10, dtype=np.int64),
+            "ListPrice": np.full(n_bases, 100.0),
+            "UnitCost": np.full(n_bases, 60.0),
+        })
+        result = apply_product_pricing(df, self._margin_cfg(), seed=42)
+        # With 50 distinct bases sampled in [0.20, 0.40], we expect many
+        # distinct UnitCost values — definitely more than 5.
+        assert result["UnitCost"].nunique() > 5
+
 
 # ===================================================================
 # TestRescaleToRange (internal helper)
@@ -492,6 +528,43 @@ class TestSnapUnitPriceToPoints:
         # Fractional parts should be 0.99 for non-zero values
         frac = result[result > 1.0] % 1.0
         npt.assert_allclose(frac, 0.99, atol=0.011)
+
+
+# ===================================================================
+# TestRoundToStep (internal helper)
+# ===================================================================
+
+class TestRoundToStep:
+    """Tests for pricing._round_to_step()."""
+
+    def test_cheap_costs_not_inflated_to_step(self):
+        """Sub-step costs (e.g., $0.50 snacks) stay below the smallest band
+        step instead of being snapped up to it. Only zero/negative values
+        get floored, and only to a penny."""
+        cheap = np.array([0.05, 0.50, 1.20, 1.80])
+        out = _round_to_step(cheap, DEFAULT_COST_BANDS)
+        assert out.min() >= 0.01
+        assert (out < 2.50).any()
+
+    def test_zero_floored_to_penny(self):
+        out = _round_to_step(np.array([0.0]), DEFAULT_COST_BANDS)
+        assert out[0] == 0.01
+
+    def test_normal_costs_round_to_step(self):
+        """Costs above the smallest step still round cleanly to the step grid."""
+        normal = np.array([23.7, 51.2, 197.0])
+        out = _round_to_step(normal, DEFAULT_COST_BANDS)
+        # Each output should be a multiple of its band step within tolerance
+        for v in out:
+            assert v > 1.0  # well above penny floor
+            # divisible by 2.50 or 5.0 or 10.0 (matching DEFAULT_COST_BANDS)
+            assert any(abs((v / step) - round(v / step)) < 1e-9
+                       for step in (2.50, 5.0, 10.0))
+
+    def test_nan_preserved(self):
+        out = _round_to_step(np.array([np.nan, 5.0]), DEFAULT_COST_BANDS)
+        assert np.isnan(out[0])
+        assert np.isfinite(out[1])
 
 
 # ===================================================================
@@ -640,6 +713,32 @@ class TestEnrichProductsAttributes:
         )
         # BrandTier is computed in apply_post_merge_enrichment
         assert "BrandTier" not in df.columns
+
+    def test_avg_customer_rating_no_ceiling_pile_up(self, subcategory_parquet):
+        """AvgCustomerRating must spread across the band rather than clip
+        at 5.0; Premium + low-defect rows are the historical pile-up source."""
+        n = 500
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({
+            "ProductKey": np.arange(1, n + 1, dtype=np.int64),
+            "BaseProductKey": np.arange(1, n + 1, dtype=np.int64),
+            "SubcategoryKey": rng.choice([10, 20, 30, 40], size=n).astype(np.int64),
+            "ListPrice": rng.uniform(20.0, 200.0, n),
+            "UnitCost": rng.uniform(10.0, 100.0, n),
+            "ProductName": [f"Item {i}" for i in range(1, n + 1)],
+            "Color": rng.choice(["Red", "Blue", "Green", "Black"], size=n),
+            "VariantIndex": np.zeros(n, dtype=np.int32),
+        })
+        out = enrich_products_attributes(
+            df, {}, seed=42, output_folder=subcategory_parquet,
+        )
+        ratings = out["AvgCustomerRating"].to_numpy()
+        # Cap ceiling-share well below 1% to catch any future over-pull toward 5.0.
+        ceiling_share = (ratings >= 4.95).mean()
+        assert ceiling_share < 0.01, f"too many ratings near ceiling: {ceiling_share:.1%}"
+        # Sanity: still a reasonable spread across the band.
+        assert ratings.max() > 4.0
+        assert ratings.std() > 0.15
 
 
 # ===================================================================

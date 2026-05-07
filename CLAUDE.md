@@ -312,6 +312,12 @@ CLI flags > config.yaml values (one-time, not persisted).
     - **Hash functions:** Use `_to_dict(obj)` helper (calls `model_dump()` on Pydantic, pass-through for dicts) before `json.dumps()` for config hashing
     - **Schema location:** All Pydantic models live in `src/engine/config/config_schema.py`. `AppConfig.from_raw_dict(d)` and `ModelsConfig.from_raw_dict(d)` are the canonical constructors
 
+25. **`Products.BaseProductKey` references `ProductID`, not `ProductKey`, under SCD2:** The column is set during `expand_contoso_products()` to the post-expansion `ProductKey` of each variant's `VariantIndex=0` row. After SCD2 expansion (`scd2.generate_scd2_versions`) reassigns `ProductKey` to a fresh `1..total_rows` sequence, the values stored in `BaseProductKey` no longer match any current `ProductKey` — but they DO still match `ProductID` (which `generator.py` sets to the pre-SCD2 `ProductKey` and SCD2 preserves). Practical implications:
+    - To group all SCD2 versions of a product family: use `ProductID`, not `ProductKey` or `BaseProductKey`.
+    - To find variants of a base product: filter `Products` where `BaseProductKey == <some ProductID>`.
+    - A self-join `Products.BaseProductKey = Products.ProductKey` only works when SCD2 is disabled. With SCD2 on, use `Products.BaseProductKey = Products.ProductID`.
+    - The column name predates SCD2 and is kept for SQL/Power BI backward compatibility. Renaming to `BaseProductID` would be more honest but ripples through DDL, BULK INSERT positional ordering, `static_schemas.py`, and Power BI relationships.
+
 ## Testing
 
 ```bash

@@ -136,9 +136,14 @@ class TestStaticSchemas:
             assert len(cols) == len(set(cols)), f"{table} has duplicate columns"
 
     def test_column_counts_are_reasonable(self):
-        """Each table should have between 2 and 120 columns."""
+        """Each table should have between 2 and 200 columns.
+
+        Dates legitimately runs ~131 columns once calendar + ISO + fiscal +
+        weekly fiscal + as-of offsets are all included; the historical 120
+        cap was set before those subsystems landed.
+        """
         for table, schema in STATIC_SCHEMAS.items():
-            assert 2 <= len(schema) <= 120, (
+            assert 2 <= len(schema) <= 200, (
                 f"{table} has {len(schema)} columns, outside reasonable range"
             )
 

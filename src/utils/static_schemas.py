@@ -340,6 +340,7 @@ DIM_SCHEMAS: Dict[str, Schema] = {
     ),
     "ProductProfile": (
         ("ProductKey", INT_NN),
+        ("ProductID", INT_NN),
         ("ColorFamily", VARCHAR(20, not_null=True)),
         ("Material", VARCHAR(30, not_null=True)),
         ("Style", VARCHAR(20, not_null=True)),

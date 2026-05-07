@@ -129,9 +129,10 @@ def _round_to_step(x: np.ndarray, bands) -> np.ndarray:
 
     step = _step_for_value(a, bands)
     rounded = np.round(a / step) * step
-    # Floor at the smallest step to prevent zero-cost items
-    rounded = np.maximum(rounded, step)
-    return rounded
+    # Penny floor — keeps sub-step positives positive without snapping them up
+    # to a full step (a $0.50 snack would otherwise become $2.50). np.maximum
+    # propagates NaN so missing inputs stay missing.
+    return np.maximum(rounded, 0.01)
 
 
 def snap_drifted_prices(
@@ -189,14 +190,49 @@ def _sample_margin(rng: np.random.Generator, n: int, min_margin: float, max_marg
     return rng.uniform(lo, hi, size=n).astype(np.float64)
 
 
+def _sample_margin_per_base(
+    rng: np.random.Generator,
+    base_keys: np.ndarray | None,
+    n_rows: int,
+    min_margin: float,
+    max_margin: float,
+) -> np.ndarray:
+    """Sample one margin per unique base key, broadcast back to per-row.
+
+    When ``base_keys`` is None, falls back to per-row sampling (used for
+    callers that don't carry BaseProductKey, e.g., direct unit tests).
+    All variants of the same base get the same margin, so per-variant
+    UnitCost is consistent at catalog generation time — divergence only
+    happens later via SCD2 price drift.
+    """
+    if base_keys is None or n_rows == 0:
+        return _sample_margin(rng, n_rows, min_margin, max_margin)
+    uniq, inv = np.unique(base_keys, return_inverse=True)
+    base_margins = _sample_margin(rng, len(uniq), min_margin, max_margin)
+    return base_margins[inv]
+
+
+def _resolve_base_keys(out: pd.DataFrame) -> np.ndarray | None:
+    """Return BaseProductKey as int64 array, or None if column missing."""
+    if "BaseProductKey" not in out.columns:
+        return None
+    arr = pd.to_numeric(out["BaseProductKey"], errors="coerce")
+    if arr.isna().any():
+        return None
+    return arr.to_numpy(dtype=np.int64, copy=False)
+
+
 def _sanitize_unit_cost_from_price(
     out: pd.DataFrame,
     rng: np.random.Generator,
     min_margin: float | None,
     max_margin: float | None,
+    base_keys: np.ndarray | None = None,
 ) -> None:
     """
     If UnitCost has NaN/inf/negative values, fill using ListPrice and a margin band.
+    Margin is sampled per BaseProductKey (when supplied) so variants of
+    the same base get identical fills.
     """
     up = out["ListPrice"].to_numpy(dtype=np.float64, copy=False)
     uc = out["UnitCost"].to_numpy(dtype=np.float64, copy=False)
@@ -211,7 +247,10 @@ def _sanitize_unit_cost_from_price(
     if not (np.isfinite(mm_lo) and np.isfinite(mm_hi) and 0.0 < mm_lo < mm_hi < 1.0):
         mm_lo, mm_hi = 0.20, 0.35
 
-    m = _sample_margin(rng, int(bad.sum()), mm_lo, mm_hi)
+    if base_keys is None:
+        base_keys = _resolve_base_keys(out)
+    bad_bases = base_keys[bad] if base_keys is not None else None
+    m = _sample_margin_per_base(rng, bad_bases, int(bad.sum()), mm_lo, mm_hi)
     fill = up[bad] * (1.0 - m)
 
     uc2 = uc.copy()
@@ -312,11 +351,12 @@ def _scale_unit_cost_keep_mode(
     new_up: np.ndarray,
     min_margin: float | None,
     max_margin: float | None,
+    base_keys: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     KEEP mode, but sane:
       - scale UnitCost by (new_up / orig_up) so costs track ListPrice transformations
-      - fill missing/invalid with margin-derived cost
+      - fill missing/invalid with margin-derived cost (per-base when keys provided)
       - optionally clip into configured margin band if provided
     """
     oup = np.asarray(orig_up, dtype=np.float64)
@@ -341,7 +381,8 @@ def _scale_unit_cost_keep_mode(
         mm_lo, mm_hi = 0.20, 0.35
 
     if bad.any():
-        m = _sample_margin(rng, int(bad.sum()), mm_lo, mm_hi)
+        bad_bases = base_keys[bad] if base_keys is not None else None
+        m = _sample_margin_per_base(rng, bad_bases, int(bad.sum()), mm_lo, mm_hi)
         uc = uc.copy()
         uc[bad] = nup[bad] * (1.0 - m)
 
@@ -463,12 +504,14 @@ def apply_product_pricing(df: pd.DataFrame, pricing_cfg: dict, seed: int | None 
         else:
             mode = "keep" if out["UnitCost"].notna().any() else "margin"
 
+    base_keys = _resolve_base_keys(out)
+
     if mode == "margin":
         if min_margin is None or max_margin is None:
             raise DimensionError("products.pricing.cost: min_margin_pct and max_margin_pct must be provided for mode=margin")
         if not (0.0 < float(min_margin) < float(max_margin) < 1.0):
             raise DimensionError("products.pricing.cost: require 0 < min_margin_pct < max_margin_pct < 1")
-        m = _sample_margin(rng, len(out), float(min_margin), float(max_margin))
+        m = _sample_margin_per_base(rng, base_keys, len(out), float(min_margin), float(max_margin))
         out["UnitCost"] = out["ListPrice"].to_numpy(dtype=np.float64, copy=False) * (1.0 - m)
     else:
         # Keep-but-scale: cost tracks ListPrice changes (scale/rescale/brand/snap)
@@ -480,10 +523,11 @@ def apply_product_pricing(df: pd.DataFrame, pricing_cfg: dict, seed: int | None 
             new_up=new_up,
             min_margin=min_margin,
             max_margin=max_margin,
+            base_keys=base_keys,
         )
 
     # Never round NaNs -> 0; fill first
-    _sanitize_unit_cost_from_price(out, rng=rng, min_margin=min_margin, max_margin=max_margin)
+    _sanitize_unit_cost_from_price(out, rng=rng, min_margin=min_margin, max_margin=max_margin, base_keys=base_keys)
 
     # ----------------------------
     # Round UnitCost to bands (no pennies)
@@ -500,7 +544,7 @@ def apply_product_pricing(df: pd.DataFrame, pricing_cfg: dict, seed: int | None 
     out["UnitCost"] = pd.to_numeric(out["UnitCost"], errors="coerce").astype("float64")
 
     _sanitize_unit_price(out, min_price, max_price)
-    _sanitize_unit_cost_from_price(out, rng=rng, min_margin=min_margin, max_margin=max_margin)
+    _sanitize_unit_cost_from_price(out, rng=rng, min_margin=min_margin, max_margin=max_margin, base_keys=base_keys)
 
     out["ListPrice"] = out["ListPrice"].clip(lower=0.0)
     out["UnitCost"] = out["UnitCost"].clip(lower=0.0)

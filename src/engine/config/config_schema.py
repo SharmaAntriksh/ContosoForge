@@ -407,6 +407,11 @@ class ProductsSCD2Config(_Base):
     revision_frequency: int = Field(default=12, ge=1)   # months between price revisions
     price_drift: float = 0.05                            # ~5% price change per revision
     max_versions: int = Field(default=4, ge=1)           # max version rows per product
+    # Probability a product accrues an additional revision (geometric draw).
+    # Default 0.40 yields roughly 60/24/10/6 across versions 1..4 — most
+    # products keep V1 only and a tail accumulates history, mirroring real
+    # repricing patterns. Lower → more concentrated at V1; higher → more revisions.
+    revision_probability: float = Field(default=0.40, ge=0.0, le=0.99)
 
 
 # -- Products --

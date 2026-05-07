@@ -130,29 +130,45 @@ def _update_product_profile_abc(
 ) -> None:
     """Write volume-based ABC back to product_profile.parquet.
 
-    ProductProfile has one row per product (IsCurrent=1 version only),
-    keyed on ProductKey. Sales demand arrays use the same ProductKey,
-    so the lookup is direct — no ProductID mapping needed.
+    Under SCD2 the profile carries one row per (ProductID, VersionNumber),
+    but sales demand only ever references the current ProductKey of a
+    family. Map by ProductID so historical version rows inherit the same
+    ABC class as their current sibling — otherwise non-current rows
+    silently default to C and contradict the live classification.
     """
     pp_path = parquet_dims / "product_profile.parquet"
     if not pp_path.exists():
         return
 
-    # Build ProductKey -> ABC from demand-recomputed attrs
     new_abc = product_attrs_arrays["ABCClassification"]
     pa_pk = product_attrs_arrays["ProductKey"]
-    abc_by_pk: Dict[int, str] = dict(zip(pa_pk, new_abc))
 
     table = pq.read_table(str(pp_path))
-    pk_arr = np.array(table.column("ProductKey").to_pylist(), dtype=np.int64)
+    schema_names = set(table.schema.names)
 
-    # Default to C (consistent with _recompute_abc_from_demand)
-    updated_abc = [abc_by_pk.get(int(pk), "C") for pk in pk_arr]
+    if "ProductID" in schema_names:
+        # Translate sales-keyed ABC (ProductKey of current version) into
+        # ProductID-keyed ABC, then broadcast across every profile row.
+        pp_pk = np.array(table.column("ProductKey").to_pylist(), dtype=np.int64)
+        pp_pid = np.array(table.column("ProductID").to_pylist(), dtype=np.int64)
+        pid_by_pk = dict(zip(pp_pk.tolist(), pp_pid.tolist()))
+        abc_by_pid: Dict[int, str] = {}
+        for pk, abc in zip(pa_pk, new_abc):
+            pid = pid_by_pk.get(int(pk))
+            if pid is not None:
+                abc_by_pid[pid] = abc
+        updated_abc = [abc_by_pid.get(int(pid), "C") for pid in pp_pid]
+        lookup_arr = pp_pid
+    else:
+        abc_by_pk: Dict[int, str] = dict(zip(pa_pk, new_abc))
+        lookup_arr = np.array(table.column("ProductKey").to_pylist(), dtype=np.int64)
+        updated_abc = [abc_by_pk.get(int(pk), "C") for pk in lookup_arr]
+
     idx = table.schema.get_field_index("ABCClassification")
     table = table.set_column(idx, "ABCClassification", pa.array(updated_abc, type=pa.large_string()))
 
     pq.write_table(table, str(pp_path), compression="snappy")
-    info("Updated product_profile.parquet with volume-based ABC")
+    info(f"Updated product_profile.parquet with volume-based ABC ({len(lookup_arr):,} rows)")
 
 
 def run_inventory_pipeline(

@@ -31,6 +31,7 @@ def generate_scd2_versions(
     revision_freq = int(getattr(prod_cfg, "revision_frequency", 12))
     price_drift = float(getattr(prod_cfg, "price_drift", 0.05))
     max_versions = int(getattr(prod_cfg, "max_versions", 4))
+    revision_prob = float(getattr(prod_cfg, "revision_probability", 0.40))
 
     N = len(base_df)
     if max_versions <= 1 or revision_freq <= 0:
@@ -42,8 +43,14 @@ def generate_scd2_versions(
     if max_possible_versions <= 1:
         return base_df
 
-    # How many versions each product gets (1-based)
-    n_versions = rng.integers(1, max_possible_versions + 1, size=N, dtype=np.int64)
+    # How many versions each product gets (1-based). Geometric draw skews
+    # the mass toward V1 (~60/24/10/6 across V1..V4 at default p=0.40),
+    # mirroring real repricing cadence — most SKUs hold their launch price.
+    p_stop = max(1e-3, 1.0 - revision_prob)  # geometric needs strictly >0
+    n_versions = np.clip(
+        rng.geometric(p_stop, size=N).astype(np.int64),
+        1, max_possible_versions,
+    )
 
     # Random offset for first revision (months from start_date)
     first_offsets = rng.integers(1, max(2, revision_freq), size=N, dtype=np.int64)
@@ -155,14 +162,14 @@ def generate_scd2_versions(
     result["EffectiveEndDate"] = eff_end_arr
     result["IsCurrent"] = is_current_arr
 
-    # Reassign ProductKey sequentially
+    # ProductKey becomes the per-version surrogate; ProductID/BaseProductKey
+    # retain pre-SCD2 values for cross-version joins. See CLAUDE.md gotcha #25.
     result["ProductKey"] = np.arange(1, total_rows + 1, dtype="int64")
 
-    # BaseProductKey retains its pre-SCD2 value (== ProductID of the
-    # VariantIndex=0 base product).  This is a stable reference to the
-    # product identity, independent of which SCD2 version row it lands on.
-
-    n_with_history = int((n_versions > 1).sum())
+    # Count realized history (post end_date filter) rather than n_versions
+    # intent — some sampled versions land past end_date and get dropped above.
+    _, _pid_counts = np.unique(pid_arr, return_counts=True)
+    n_with_history = int((_pid_counts > 1).sum())
     info(f"Products SCD2: {n_with_history:,}/{N:,} products have price history "
          f"({total_rows:,} total rows, max {max_possible_versions} versions)")
 

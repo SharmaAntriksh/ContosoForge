@@ -716,9 +716,11 @@ def apply_post_merge_enrichment(df: pd.DataFrame, seed: int) -> pd.DataFrame:
     out["SafetyStockUnits"] = pd.Series(SafetyStockUnits, index=out.index).astype("int32")
 
     # --- Market & Customer Perception (BrandTier-dependent) ---
+    # Center base at 3.6 so Premium + low-defect items land near 4.5
+    # instead of saturating at the 5.0 clip ceiling.
     u_rat = _base_uniform(b_u64, seed, 0x9A9A9A9A)[inv]
     defect_arr = out["DefectRateBase"].to_numpy(dtype=np.float64, copy=False)
-    rat_base = 4.2 - defect_arr * 30
+    rat_base = 3.6 - defect_arr * 30
     tier_rat_bonus = np.where(bt == "Premium", 0.3, np.where(bt == "Value", -0.2, 0.0))
     AvgCustomerRating = np.clip(
         np.round((rat_base + tier_rat_bonus + u_rat * 0.6), 1), 1.0, 5.0
