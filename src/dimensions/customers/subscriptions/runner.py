@@ -42,7 +42,7 @@ def run_subscriptions(cfg: Any, parquet_folder: Path) -> Dict[str, Any]:
     from src.utils.config_helpers import as_dict
     st = os.stat(customers_fp)
     version_cfg = as_dict(cfg.subscriptions)
-    version_cfg["_schema_version"] = 4
+    version_cfg["_schema_version"] = 5
     version_cfg["_upstream_customers_sig"] = {
         "path": str(customers_fp),
         "size": int(st.st_size),
@@ -67,6 +67,15 @@ def run_subscriptions(cfg: Any, parquet_folder: Path) -> Dict[str, Any]:
         n_rows = 0
         if c.generate_bridge:
             customers = pd.read_parquet(customers_fp)
+            # Dedup SCD2 history: subscriptions are entity-level (one customer ->
+            # 1..N plans over their lifetime), not per-version, so collapse to the
+            # current row when SCD2 is active.
+            if "IsCurrent" in customers.columns:
+                _n_before = len(customers)
+                customers = customers[customers["IsCurrent"] == 1].reset_index(drop=True)
+                if len(customers) < _n_before:
+                    info(f"Subscriptions SCD2: dedup {_n_before:,} -> {len(customers):,} "
+                         f"rows (IsCurrent=1 pool)")
             if customers.empty:
                 skip("No customers found — skipping subscription bridge")
                 return {

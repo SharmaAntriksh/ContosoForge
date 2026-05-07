@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from src.utils import info
+from src.utils.config_helpers import region_from_iso_code
 from src.defaults import (
     SCD2_END_OF_TIME,
     CUSTOMER_INCOME_MIN as INCOME_MIN,
@@ -45,8 +46,8 @@ def _available_events(state: dict, tier_keys: np.ndarray) -> list:
     if ms == "Married" and nc < MAX_CHILDREN:
         events.append(("family_growth", 0.15))
 
-    # Home purchase — if not already owning
-    if ho in ("Rent", "Other"):
+    # Home purchase — renters and mortgage holders can transition to outright ownership
+    if ho in ("Rent", "Mortgage"):
         events.append(("home_purchase", 0.10))
 
     # Relocation — always available
@@ -63,8 +64,33 @@ def _available_events(state: dict, tier_keys: np.ndarray) -> list:
     return events
 
 
+def _resolve_geo(gk, geo_lookup, _geo_cache: dict = None):
+    """Return (country, city, state, region) for a GeographyKey.
+
+    Prefers the pre-built dict cache, then a dict-shaped geo_lookup, then a
+    DataFrame-indexed geo_lookup. Returns ("", "Unknown", "Unknown", None)
+    on miss; region is None when the upstream cache predates ISOCode.
+    """
+    cache = _geo_cache if _geo_cache is not None else (
+        geo_lookup if isinstance(geo_lookup, dict) else None
+    )
+    if cache is not None:
+        entry = cache.get(gk)
+        if entry is None:
+            return ("", "Unknown", "Unknown", None)
+        country, city, st = entry[0], entry[1], entry[2]
+        region = entry[3] if len(entry) >= 4 else None
+        return (country, city, st, region)
+    # DataFrame fallback (legacy)
+    if hasattr(geo_lookup, "index") and gk in geo_lookup.index:
+        row = geo_lookup.loc[gk]
+        return (str(row["Country"]), str(row["City"]), str(row["State"]), None)
+    return ("", "Unknown", "Unknown", None)
+
+
 def _relocate(rng: np.random.Generator, state: dict,
-              geo_keys: np.ndarray, geo_lookup, _geo_cache: dict = None) -> None:
+              geo_keys: np.ndarray, geo_lookup, _geo_cache: dict = None,
+              region_pools: dict = None) -> None:
     """Change GeographyKey and regenerate address columns to match.
 
     HomeAddress always changes on relocation.  WorkAddress only changes
@@ -73,37 +99,27 @@ def _relocate(rng: np.random.Generator, state: dict,
     workplace is still reachable).
 
     geo_lookup can be a pd.DataFrame (legacy) or a dict (fast path).
-    _geo_cache is an optional pre-built dict {GeographyKey: (Country, City, State)}.
+    _geo_cache is an optional pre-built dict
+        {GeographyKey: (Country, City, State, region_code)}.
+    region_pools is an optional dict
+        {region_code: (gk_array, weights_array)} — when present, the new
+        GeographyKey is sampled from the customer's current region with
+        population weights (matches initial-assignment behavior); else falls
+        back to uniform sampling over all geo_keys.
     """
     old_gk = state.get("GeographyKey")
-    new_gk = int(rng.choice(geo_keys))
+    old_country, _, _, old_region = _resolve_geo(old_gk, geo_lookup, _geo_cache)
+
+    if region_pools and old_region in region_pools:
+        pool_keys, pool_weights = region_pools[old_region]
+        new_gk = int(rng.choice(pool_keys, p=pool_weights))
+    else:
+        new_gk = int(rng.choice(geo_keys))
     state["GeographyKey"] = new_gk
 
-    # Fast path: dict lookup instead of DataFrame.loc
-    if _geo_cache is not None:
-        old_country = _geo_cache.get(old_gk, ("", "", ""))[0]
-        new_entry = _geo_cache.get(new_gk, ("", "Unknown", "Unknown"))
-        new_country, city, st = new_entry
-    elif isinstance(geo_lookup, dict):
-        old_country = geo_lookup.get(old_gk, ("", "", ""))[0]
-        new_entry = geo_lookup.get(new_gk, ("", "Unknown", "Unknown"))
-        new_country, city, st = new_entry
-    else:
-        # Legacy DataFrame path
-        old_country = (
-            str(geo_lookup.loc[old_gk, "Country"])
-            if old_gk in geo_lookup.index else ""
-        )
-        if new_gk in geo_lookup.index:
-            row = geo_lookup.loc[new_gk]
-            new_country = str(row["Country"])
-            city = str(row["City"])
-            st = str(row["State"])
-        else:
-            new_country, city, st = "", "Unknown", "Unknown"
+    new_country, city, st, new_region = _resolve_geo(new_gk, geo_lookup, _geo_cache)
     cross_country = old_country != new_country
 
-    # --- Helper: generate a single address string ---
     def _make_address(c, s):
         sn = str(rng.integers(1, 9999))
         sname = str(rng.choice(_STREET_NAMES))
@@ -112,20 +128,14 @@ def _relocate(rng: np.random.Generator, state: dict,
         unum = str(state.get("CustomerID", 0))
         return f"{sn} {sname} {stype}, {ulabel} {unum}, {c}, {s}"
 
-    # Regenerate home address (always)
     state["HomeAddress"] = _make_address(city, st)
-
-    # Regenerate work address only on cross-country moves
     if cross_country:
         state["WorkAddress"] = _make_address(city, st)
 
-    # Map country to region code for lat/lon and postal code generation
-    _country_to_region = {
-        "United States": "US", "India": "IN",
-        "United Kingdom": "EU", "Germany": "EU", "France": "EU",
-        "Japan": "AS", "China": "AS", "Australia": "AS",
-    }
-    rc = _country_to_region.get(new_country, "US")
+    # Region code drives lat/lon center and postal code format. Sourced from
+    # ISO code via the cache so it covers every country in the geography dim,
+    # not just the eight in the legacy hardcoded map.
+    rc = new_region or "US"
 
     # Regenerate lat/lon
     clat, clon = _REGION_LAT_LON_CENTER.get(rc, (39.8, -98.5))
@@ -156,6 +166,7 @@ def _apply_life_event(
     geo_lookup,
     *,
     _geo_cache: dict = None,
+    region_pools: dict = None,
 ) -> None:
     """Apply a life event to the customer state dict (mutates in place)."""
 
@@ -175,23 +186,26 @@ def _apply_life_event(
         state["MaritalStatus"] = "Married"
         # 30% chance of relocation with marriage
         if rng.random() < 0.30:
-            _relocate(rng, state, geo_keys, geo_lookup, _geo_cache=_geo_cache)
+            _relocate(rng, state, geo_keys, geo_lookup,
+                      _geo_cache=_geo_cache, region_pools=region_pools)
 
     elif event == "family_growth":
         nc = int(state.get("NumberOfChildren") or 0)
         state["NumberOfChildren"] = nc + 1
         # 40% chance of buying home when having kids
-        if state.get("HomeOwnership") in ("Rent", "Other") and rng.random() < 0.40:
+        if state.get("HomeOwnership") in ("Rent", "Mortgage") and rng.random() < 0.40:
             state["HomeOwnership"] = "Own"
         # 20% chance of relocation
         if rng.random() < 0.20:
-            _relocate(rng, state, geo_keys, geo_lookup, _geo_cache=_geo_cache)
+            _relocate(rng, state, geo_keys, geo_lookup,
+                      _geo_cache=_geo_cache, region_pools=region_pools)
 
     elif event == "home_purchase":
         state["HomeOwnership"] = "Own"
 
     elif event == "relocation":
-        _relocate(rng, state, geo_keys, geo_lookup, _geo_cache=_geo_cache)
+        _relocate(rng, state, geo_keys, geo_lookup,
+                  _geo_cache=_geo_cache, region_pools=region_pools)
 
     elif event == "divorce":
         state["MaritalStatus"] = "Divorced"
@@ -203,7 +217,8 @@ def _apply_life_event(
             state["IncomeGroup"] = _income_to_group(new_income)
         # 60% chance of relocation
         if rng.random() < 0.60:
-            _relocate(rng, state, geo_keys, geo_lookup, _geo_cache=_geo_cache)
+            _relocate(rng, state, geo_keys, geo_lookup,
+                      _geo_cache=_geo_cache, region_pools=region_pools)
         # 35% chance of losing home
         if state.get("HomeOwnership") == "Own" and rng.random() < 0.35:
             state["HomeOwnership"] = "Rent"
@@ -215,16 +230,69 @@ def _apply_life_event(
                 state["LoyaltyTierKey"] = int(tier_keys[current_idx + 1])
 
 
+def _vectorize_iso_to_region(iso_arr: np.ndarray) -> np.ndarray:
+    """Map an ISO-code array to region codes, memoizing the per-unique lookup.
+
+    region_from_iso_code is a chained-if over sets — fast per call but called
+    Python-side. Memoize across the unique values so a 7K-row geography only
+    does ~30 lookups instead of 7K.
+    """
+    uniq = pd.unique(iso_arr)
+    table = {c: region_from_iso_code(c) for c in uniq}
+    return np.array([table[c] for c in iso_arr], dtype=object)
+
+
 def _build_geo_cache(geo_lookup) -> dict:
-    """Build {GeographyKey: (Country, City, State)} cache for fast lookups."""
-    cache: dict = {}
-    if isinstance(geo_lookup, pd.DataFrame) and not geo_lookup.empty:
-        for gk in geo_lookup.index:
-            row = geo_lookup.loc[gk]
-            cache[gk] = (str(row["Country"]), str(row["City"]), str(row["State"]))
-    elif isinstance(geo_lookup, dict):
-        cache = geo_lookup
-    return cache
+    """Build {GeographyKey: (Country, City, State, region_code)} cache.
+
+    region_code is derived from ISOCode via region_from_iso_code so the cache
+    covers every country in the geography dim. Falls back to a 3-tuple when
+    geo_lookup lacks ISOCode (legacy callers).
+    """
+    if isinstance(geo_lookup, dict):
+        return geo_lookup
+    if not isinstance(geo_lookup, pd.DataFrame) or geo_lookup.empty:
+        return {}
+
+    keys = geo_lookup.index.to_numpy()
+    country = geo_lookup["Country"].astype(str).to_numpy()
+    city = geo_lookup["City"].astype(str).to_numpy()
+    state = geo_lookup["State"].astype(str).to_numpy()
+    if "ISOCode" in geo_lookup.columns:
+        region = _vectorize_iso_to_region(geo_lookup["ISOCode"].astype(str).to_numpy())
+        return dict(zip(keys, zip(country, city, state, region)))
+    return dict(zip(keys, zip(country, city, state)))
+
+
+def _build_region_pools(geography: pd.DataFrame) -> dict:
+    """Build {region_code: (gk_array, normalized_pop_weights)} for relocation.
+
+    Used both for the initial customer→geography assignment and for SCD2
+    relocations so the two paths can never drift. Returns an empty dict if
+    geography lacks ISOCode (caller should fall back to uniform sampling).
+    """
+    pools: dict = {}
+    if not isinstance(geography, pd.DataFrame) or geography.empty:
+        return pools
+    if "ISOCode" not in geography.columns or "GeographyKey" not in geography.columns:
+        return pools
+
+    gk_arr = geography["GeographyKey"].to_numpy()
+    iso_arr = geography["ISOCode"].astype(str).to_numpy()
+    if "Population" in geography.columns:
+        pop_arr = geography["Population"].to_numpy(dtype=np.float64)
+    else:
+        pop_arr = np.ones(len(geography), dtype=np.float64)
+    pop_arr = np.maximum(pop_arr, 1.0)
+
+    region_arr = _vectorize_iso_to_region(iso_arr)
+    for rc in np.unique(region_arr):
+        mask = region_arr == rc
+        keys = gk_arr[mask]
+        weights = pop_arr[mask]
+        weights = weights / weights.sum()
+        pools[str(rc)] = (keys, weights)
+    return pools
 
 
 def expand_changed_customers(
@@ -235,6 +303,7 @@ def expand_changed_customers(
     tier_keys: np.ndarray,
     end_date: pd.Timestamp,
     geo_lookup,
+    region_pools: dict = None,
 ) -> pd.DataFrame:
     """Expand pre-selected changed customers with SCD2 version rows.
 
@@ -332,7 +401,8 @@ def expand_changed_customers(
             weights_arr = weights_arr / weights_arr.sum()
             chosen = event_names[int(rng.choice(len(event_names), p=weights_arr))]
             _apply_life_event(rng, new_state, chosen, geo_keys, tier_keys,
-                              geo_lookup, _geo_cache=_geo_cache)
+                              geo_lookup, _geo_cache=_geo_cache,
+                              region_pools=region_pools)
 
             current_state = new_state
 
@@ -343,7 +413,14 @@ def expand_changed_customers(
         _row_count += 1
 
     new_rows = new_rows[:_row_count]
-    return pd.DataFrame(new_rows)
+    out = pd.DataFrame(new_rows)
+    # Mixing pd.Timestamp (SCD2_END_OF_TIME on current rows) and np.datetime64
+    # (event_date_np - 1 day on closed rows) leaves these columns as dtype=object,
+    # which pyarrow refuses to write. Normalize to datetime64[ns].
+    for _dt_col in ("EffectiveStartDate", "EffectiveEndDate"):
+        if _dt_col in out.columns:
+            out[_dt_col] = pd.to_datetime(out[_dt_col])
+    return out
 
 
 def generate_scd2_versions(
@@ -354,6 +431,7 @@ def generate_scd2_versions(
     tier_keys: np.ndarray,
     end_date: pd.Timestamp,
     geo_lookup: pd.DataFrame,
+    region_pools: dict = None,
 ) -> pd.DataFrame:
     """
     Expand customer rows with SCD Type 2 version history.
@@ -388,6 +466,7 @@ def generate_scd2_versions(
         tier_keys=tier_keys,
         end_date=end_date,
         geo_lookup=geo_lookup,
+        region_pools=region_pools,
     )
 
     expanded_df = pd.concat(

@@ -229,6 +229,7 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("HouseholdRole", VARCHAR(20, not_null=False)),
         ("LoyaltyTierKey", INT_NN),
         ("CustomerAcquisitionChannelKey", INT_NN),
+        ("CustomerBaseWeight", FLOAT(not_null=True)),
         ("YearlyIncome", FLOAT(not_null=False)),
         ("IncomeGroup", VARCHAR(10, not_null=False)),
         ("MaritalStatus", VARCHAR(20, not_null=False)),

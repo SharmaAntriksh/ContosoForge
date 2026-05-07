@@ -88,7 +88,12 @@ from src.dimensions.customers.helpers import (
 )
 from src.dimensions.customers.org_profile import generate_org_profile
 from src.dimensions.customers.households import assign_households, head_indices_for_members
-from src.dimensions.customers.scd2 import generate_scd2_versions
+from src.dimensions.customers.scd2 import (
+    generate_scd2_versions,
+    _build_region_pools,
+    _build_geo_cache,
+    expand_changed_customers,
+)
 
 _PAYMENT_METHOD_LABELS = np.array([
     "Credit Card", "Debit Card", "Cash", "Digital Wallet", "Bank Transfer",
@@ -115,6 +120,14 @@ def _labels_to_codes(values: np.ndarray, labels: Sequence) -> np.ndarray:
     for i, lbl in enumerate(labels):
         codes[values == lbl] = i
     return codes
+
+
+def _geo_lookup_with_iso(geography: pd.DataFrame) -> pd.DataFrame:
+    """Index geography by GeographyKey, keeping the columns SCD2 relocation needs."""
+    cols = ["City", "State", "Country"]
+    if "ISOCode" in geography.columns:
+        cols.append("ISOCode")
+    return geography.set_index("GeographyKey")[cols]
 
 
 def _vectorized_cdf_sample(cdfs: np.ndarray, brackets: np.ndarray, u: np.ndarray) -> np.ndarray:
@@ -176,30 +189,12 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
     geography, _ = load_dimension("geography", parquet_dims_folder, cfg.geography)
     geo_keys = geography["GeographyKey"].to_numpy()
 
-    geo_lookup = geography.set_index("GeographyKey")[["City", "State", "Country"]]
+    geo_lookup = _geo_lookup_with_iso(geography)
 
-    # Build per-region geography pools (keys + population weights)
-    # so customers are assigned to cities in their own region,
-    # weighted by population for realistic distribution.
-    _geo_region_pools: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    if "ISOCode" in geography.columns:
-        geo_iso = geography["ISOCode"].astype(str).to_numpy()
-        geo_pop = (
-            geography["Population"].to_numpy(dtype=np.float64)
-            if "Population" in geography.columns
-            else np.ones(len(geography), dtype=np.float64)
-        )
-        geo_pop = np.maximum(geo_pop, 1.0)  # avoid zero weights
-
-        geo_region = np.array(
-            [region_from_iso_code(iso) for iso in geo_iso], dtype=object,
-        )
-        for region_code in np.unique(geo_region):
-            mask = geo_region == region_code
-            pool_keys = geo_keys[mask]
-            pool_weights = geo_pop[mask]
-            pool_weights = pool_weights / pool_weights.sum()
-            _geo_region_pools[region_code] = (pool_keys, pool_weights)
+    # Per-region geography pools (keys + population weights) so customers are
+    # assigned to cities in their own region. Same helper drives SCD2 relocation
+    # so initial assignment and life-event moves can never drift apart.
+    _geo_region_pools = _build_region_pools(geography)
 
     N = int(total_customers)
     if N <= 0:
@@ -615,6 +610,10 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
     # Add random day-of-month offset (0-27 days) so dates aren't always the 1st
     day_offsets = rng.integers(0, 28, size=N).astype("timedelta64[D]")
     CustomerStartDate = CustomerStartDate + day_offsets
+    # Clamp to end_date so customers never appear to start past the timeline
+    # (CustomerStartMonth=T-1 + day_offset can otherwise overshoot a mid-month end_date)
+    _end_dt64 = np.datetime64(end_date.normalize().to_datetime64(), "ns")
+    CustomerStartDate = np.minimum(CustomerStartDate, _end_dt64)
 
     if enable_churn:
         _cem = pd.to_numeric(CustomerEndMonth, errors="coerce")
@@ -626,7 +625,7 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
             end_base = month_idx_to_date(start_month0, end_idx[has_end])
             n_with_end = int(has_end.sum())
             end_offsets = rng.integers(0, 28, size=n_with_end).astype("timedelta64[D]")
-            CustomerEndDate[has_end] = end_base + end_offsets
+            CustomerEndDate[has_end] = np.minimum(end_base + end_offsets, _end_dt64)
     else:
         CustomerEndDate = np.empty(N, dtype="datetime64[ns]")
         CustomerEndDate[:] = np.datetime64("NaT")
@@ -749,6 +748,7 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
     start_dates_ts = pd.to_datetime(CustomerStartDate)
     days_after_start = rng.integers(0, 90, size=N)
     MemberSinceDate = (start_dates_ts + pd.to_timedelta(days_after_start, unit="D")).to_numpy("datetime64[ns]")
+    MemberSinceDate = np.minimum(MemberSinceDate, _end_dt64)
 
     IsEmployee = rng.random(N) < 0.02
     IsEmployee[IsOrg] = False
@@ -868,6 +868,8 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
             "HouseholdRole": HouseholdRole,
             "LoyaltyTierKey": pd.Series(LoyaltyTierKey, dtype=np.int32),
             "CustomerAcquisitionChannelKey": pd.Series(CustomerAcquisitionChannelKey, dtype=np.int32),
+            # --- Demand weight (drives weighted customer sampling in sales) ---
+            "CustomerBaseWeight": CustomerWeight.astype(np.float64),
             # --- Columns moved from CustomerProfile (SCD2 tracked) ---
             "YearlyIncome": YearlyIncome,
             "IncomeGroup": IncomeGroup,
@@ -879,6 +881,14 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
             "CustomerEndDate": pd.to_datetime(CustomerEndDate),
         }
     )
+
+    if _skip_post_phases:
+        # Transient columns piped through to the parallel orchestrator so
+        # household assignment + org_profile see the real chunk-time values
+        # instead of fresh random draws / np.ones approximations. Stripped
+        # from customers_df before the final parquet write.
+        customers_df["_Region"] = Region
+        customers_df["_CustomerChurnBias"] = CustomerChurnBias.astype(np.float64)
 
     # =====================================================
     # Build CustomerProfile dataframe (analytical slicers — minus moved cols)
@@ -949,6 +959,7 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
         scd2_cfg = getattr(cust_cfg, "scd2", None)
         scd2_enabled = bool(getattr(scd2_cfg, "enabled", False)) if scd2_cfg else False
         if scd2_enabled:
+            _scd2_region_pools = _build_region_pools(geography)
             customers_df = generate_scd2_versions(
                 rng=rng,
                 base_df=customers_df,
@@ -957,6 +968,7 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
                 tier_keys=tier_keys,
                 end_date=end_date,
                 geo_lookup=geo_lookup,
+                region_pools=_scd2_region_pools,
             )
 
             # Remap profile/org-profile CustomerKey → IsCurrent=1 version's CustomerKey
@@ -984,7 +996,6 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
     from multiprocessing import cpu_count
     from src.utils.pool import PoolRunSpec, iter_imap_unordered
     from src.dimensions.customers.worker import customer_chunk_worker, scd2_chunk_worker
-    from src.dimensions.customers.scd2 import expand_changed_customers, _build_geo_cache
 
     cust_cfg = cfg.customers
     N = int(cust_cfg.total_customers)
@@ -1062,11 +1073,6 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
         ].to_numpy()
         profile_df["CustomerKey"] = person_keys
 
-        # Collect active customer keys
-        active_customer_keys = set()
-        for r in chunk_results:
-            active_customer_keys.update(r["active_keys"])
-
         # Run household assignment on merged data (serial — shared state)
         household_pct_cfg = getattr(cust_cfg, "household_pct", None)
         household_pct = float(household_pct_cfg) if household_pct_cfg is not None else _HOUSEHOLD_PCT_DEFAULT
@@ -1100,20 +1106,15 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
         customers_df["HouseholdRole"] = HouseholdRole
         customers_df["GeographyKey"] = GeographyKey  # may have been mutated
 
-        # Re-derive Region (not stored in parquet) for address rebuild + org_profile
-        pct_asia = float(getattr(cust_cfg, "pct_asia", 0.0))
-        enable_asia = pct_asia > 0.0
-        p_in, p_us, p_eu, p_as = validate_percentages(
-            float(cust_cfg.pct_india), float(cust_cfg.pct_us),
-            float(cust_cfg.pct_eu), pct_asia,
-        )
-        region_labels = ["IN", "US", "EU"] + (["AS"] if enable_asia else [])
-        region_probs = [p_in, p_us, p_eu] + ([p_as] if enable_asia else [])
-        org_region_rng = np.random.default_rng(seed + 77777)
-        Region = org_region_rng.choice(region_labels, size=len(customers_df), p=region_probs)
+        # Recover real per-customer Region and ChurnBias emitted by chunk workers
+        # (transient columns prefixed with `_`). Stripped from customers_df below
+        # before the final parquet write.
+        Region = customers_df["_Region"].to_numpy(dtype=object)
+        CustomerChurnBias = customers_df["_CustomerChurnBias"].to_numpy(dtype=np.float64)
+        enable_asia = bool((Region == "AS").any())
 
         geography, _ = load_dimension("geography", parquet_dims_folder, cfg.geography)
-        geo_lookup = geography.set_index("GeographyKey")[["City", "State", "Country"]]
+        geo_lookup = _geo_lookup_with_iso(geography)
 
         # Copy head's home address columns to household members
         moved, head_of = head_indices_for_members(HouseholdKey, HouseholdRole)
@@ -1148,10 +1149,6 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
         CustomerStartDate = customers_df["CustomerStartDate"].to_numpy()
         CustomerKey = customers_df["CustomerKey"].to_numpy()
 
-        # Derive churn_bias and customer_weight from existing columns
-        CustomerWeight = np.ones(len(customers_df), dtype="float64")  # approx
-        CustomerChurnBias = np.ones(len(customers_df), dtype="float64")  # approx
-
         org_profile_df = generate_org_profile(
             rng=org_rng,
             customer_key=CustomerKey,
@@ -1163,6 +1160,10 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
             people_pools=people_pools,
             end_date=end_date,
         )
+
+        # Drop chunk-time transient columns; downstream SCD2 + final write
+        # should never see them.
+        customers_df = customers_df.drop(columns=["_Region", "_CustomerChurnBias"])
 
         # Phase 4: Parallel SCD2 (if enabled)
         scd2_cfg = getattr(cust_cfg, "scd2", None)
@@ -1196,6 +1197,7 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
                 tier_keys = loyalty_dim[loyalty_key_col].dropna().astype("int64").sort_values().to_numpy()
 
                 geo_cache = _build_geo_cache(geo_lookup)
+                scd2_region_pools = _build_region_pools(geography)
 
                 # Parallelize SCD2 if enough changed customers
                 if len(changed_df) > 10_000 and n_actual_workers > 1:
@@ -1216,6 +1218,7 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
                             geo_keys.tolist(), tier_keys.tolist(),
                             str(end_date), geo_cache,
                             out_path,
+                            scd2_region_pools,
                         ))
 
                     scd2_spec = PoolRunSpec(
@@ -1249,6 +1252,7 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
                         tier_keys=tier_keys,
                         end_date=end_date,
                         geo_lookup=geo_lookup,
+                        region_pools=scd2_region_pools,
                     )
                     expanded_df = pd.concat([unchanged_df, expanded_rows], ignore_index=True)
 
@@ -1275,8 +1279,10 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
         import shutil
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
-    active_customer_set = active_customer_keys
-    return customers_df, profile_df, org_profile_df, active_customer_set
+    # Parallel path doesn't track an active-customer set — sales derives
+    # it independently from active_ratio + seed (see sales.py). Returning
+    # an empty set keeps the 4-tuple shape consistent with the serial path.
+    return customers_df, profile_df, org_profile_df, set()
 
 
 # ---------------------------------------------------------
@@ -1290,12 +1296,14 @@ def run_customers(cfg: Dict, parquet_folder: Path):
     cust_cfg = cfg.customers
 
     version_cfg = dict(cust_cfg)
-    version_cfg["_schema_version"] = 6
+    version_cfg["_schema_version"] = 8
     version_cfg["_has_loyalty_tier"] = True
     version_cfg["_has_acquisition_channel"] = True
     version_cfg["_has_customer_profile"] = True
     version_cfg["_has_org_profile"] = True
     version_cfg["_has_scd2"] = True
+    version_cfg["_has_customer_base_weight"] = True
+    version_cfg["_has_region_weighted_relocation"] = True
 
     if not should_regenerate("customers", version_cfg, out_path):
         skip("Customers up-to-date")

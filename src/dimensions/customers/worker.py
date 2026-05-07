@@ -61,11 +61,9 @@ def customer_chunk_worker(args: Tuple) -> Dict[str, Any]:
     write_parquet_with_date32(customers_df, f"{output_base}_customers.parquet", cast_all_datetime=True)
     write_parquet_with_date32(profile_df, f"{output_base}_profile.parquet", cast_all_datetime=True)
 
-    # Return arrays needed for household assignment (Phase 3)
     return {
         "chunk_idx": chunk_idx,
         "n_customers": chunk_n,
-        "active_keys": _active,
     }
 
 
@@ -78,6 +76,7 @@ def scd2_chunk_worker(args: Tuple) -> Dict[str, Any]:
         geo_keys_list, tier_keys_list,
         end_date_str, geo_lookup_dict,
         output_path,
+        region_pools,
     ) = args
 
     chunk_rng = np.random.default_rng(
@@ -99,6 +98,7 @@ def scd2_chunk_worker(args: Tuple) -> Dict[str, Any]:
         tier_keys=tier_keys,
         end_date=end_date,
         geo_lookup=geo_lookup_dict,
+        region_pools=region_pools,
     )
 
     write_parquet_with_date32(expanded_df, output_path, cast_all_datetime=True)

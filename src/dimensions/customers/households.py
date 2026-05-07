@@ -30,22 +30,29 @@ def _match_sorted_1to1(
     len(head_ages) where result[i] is the index into cand_ages matched to
     head i, or -1 if no match.  Each candidate is used at most once.
 
-    O(n_heads + n_cands) — single pass, no inner scan.
+    O(n_heads log n_cands) for the bulk searchsorted, plus a Python loop
+    over heads. Faster than the original per-head while-loop because the
+    inner advance is replaced by a single bulk searchsorted call.
     """
     n_h = len(head_ages)
     n_c = len(cand_ages)
     result = np.full(n_h, -1, dtype=np.intp)
-    ci = 0
-    for hi in range(n_h):
-        lo = max(head_ages[hi] - max_gap, min_cand_age)
-        hi_age = head_ages[hi] + max_gap
-        # Advance past candidates below the window
-        while ci < n_c and cand_ages[ci] < lo:
-            ci += 1
-        # Take the first candidate in the window
-        if ci < n_c and cand_ages[ci] <= hi_age:
-            result[hi] = ci
-            ci += 1
+    if n_h == 0 or n_c == 0:
+        return result
+
+    # Bulk window bounds: lo[i] is the leftmost cand index with age >= head[i]-gap;
+    # hi[i] is the leftmost cand index with age >  head[i]+gap (exclusive upper).
+    lo_vals = np.maximum(head_ages - max_gap, min_cand_age)
+    hi_vals = head_ages + max_gap
+    lo_idx = np.searchsorted(cand_ages, lo_vals, side="left")
+    hi_idx = np.searchsorted(cand_ages, hi_vals, side="right")
+
+    avail = 0
+    for i in range(n_h):
+        s = lo_idx[i] if lo_idx[i] > avail else avail
+        if s < hi_idx[i]:
+            result[i] = s
+            avail = s + 1
     return result
 
 
