@@ -45,6 +45,7 @@ class _SubWorkerTask(NamedTuple):
     trial_conversion_rate: float
     trial_days: int
     out_chunk_path: str
+    sub_key_start: int
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,7 @@ def _subscription_worker_task(args: _SubWorkerTask) -> Dict[str, Any]:
         trial_conversion_rate=args.trial_conversion_rate,
         trial_days=args.trial_days,
         rng=rng,
+        sub_key_start=args.sub_key_start,
     )
 
     n_rows = len(table)
@@ -188,6 +190,7 @@ def write_bridge_parallel(
     scratch_dir.mkdir(parents=True, exist_ok=True)
 
     tasks = []
+    sub_key_cursor = 1
     for idx, indices in enumerate(chunk_boundaries):
         if len(indices) == 0:
             continue
@@ -214,7 +217,12 @@ def write_bridge_parallel(
             trial_conversion_rate=c.trial_conversion_rate,
             trial_days=c.trial_days,
             out_chunk_path=chunk_path,
+            sub_key_start=sub_key_cursor,
         ))
+        # Reserve a non-overlapping SubscriptionKey range per chunk based on the
+        # per-customer worst case (max_subs). Actual usage may be smaller, leaving
+        # gaps — that's fine, the PK only needs uniqueness, not contiguity.
+        sub_key_cursor += int(len(indices)) * int(max_subs)
 
     actual_n_chunks = len(tasks)
 

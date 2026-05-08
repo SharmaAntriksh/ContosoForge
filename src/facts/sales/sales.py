@@ -1991,10 +1991,6 @@ def generate_sales_fact(
     returns_reason_probs = [_weight_overrides.get(k, _RR_DEFAULTS[k]) for k in _RR_KEYS]
     returns_logistics_keys = list(_RR_LOGISTICS)
 
-    # Event key capacity per chunk (for globally unique sequential keys)
-    _chunk_size = _int_or(getattr(sales_cfg, "chunk_size", None), 1_000_000)
-    returns_event_key_capacity = int(_chunk_size * max(returns_rate, 0.01) * max(returns_max_splits, 1)) + 1000
-
     # Keep "requested" vs "effective" separate so we can warn+continue.
     returns_enabled_requested = bool(returns_enabled)
     returns_enabled_effective = bool(returns_enabled)
@@ -2065,6 +2061,18 @@ def generate_sales_fact(
         chunk_size = suggest_chunk_size(total_rows, target_workers=n_workers_planned, preferred_chunks_per_worker=2)
 
     chunk_size = max(1_000, _int_or(chunk_size, 1_000_000))
+
+    # Structural upper bound on returns events per chunk:
+    #   chunk_size_orders * max_lines_per_order * max_splits
+    # Independent of returns_rate / split_return_rate, so ReturnEventKey
+    # ranges stay disjoint across chunks even under chunk auto-tuning.
+    _max_lines_per_order = _int_or(getattr(sales_cfg, "max_lines_per_order", 5), 5)
+    returns_event_key_capacity = (
+        int(chunk_size)
+        * max(_max_lines_per_order, 1)
+        * max(returns_max_splits, 1)
+        + 1
+    )
 
     # Load dimensions
     _cust = _load_customers(parquet_folder_p, cfg, start_date, seed)
