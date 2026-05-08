@@ -325,6 +325,35 @@ Tables with 5 or fewer files are skipped automatically (dimensions, small facts)
 
 ---
 
+## Delta Lake Repartitioning
+
+Change the partition layout of an already-generated Delta Lake dataset without regenerating data. Useful for switching between `Year`, `Year+Month`, or unpartitioned layouts after a run, or recompressing while repartitioning. Tables are streamed partition-by-partition to keep memory low; unpartitioned tables (dimensions, etc.) are skipped automatically.
+
+```powershell
+# Demote Year+Month -> Year (fewer, larger files)
+python scripts/repartition_delta.py `
+  "generated_datasets\2026-03-29 07_11_29 PM Customers 43K Sales 1M DELTAPARQUET" `
+  --partition-by year
+
+# Promote Year -> Year+Month (finer pruning)
+python scripts/repartition_delta.py "<dataset_folder>" --partition-by year-month
+
+# Remove partitions entirely (single consolidated table)
+python scripts/repartition_delta.py "<dataset_folder>" --partition-by none
+
+# Recompress while repartitioning
+python scripts/repartition_delta.py "<dataset_folder>" --partition-by year --compression ZSTD
+```
+
+| Flag | Description |
+|---|---|
+| <code>&#8209;&#8209;partition&#8209;by</code> | Target layout: `none`, `year`, or `year-month` (required) |
+| <code>&#8209;&#8209;compression</code> | Optional recompression codec: `UNCOMPRESSED`, `SNAPPY`, `GZIP`, `BROTLI`, `LZ4`, `ZSTD`, `LZ4_RAW` (default: keep existing) |
+
+Tables already at the requested layout are skipped. After repartitioning, run `optimize_delta.py` if you also want to compact small files within the new partitions.
+
+---
+
 ## SQL Server Import (CSV mode)
 
 When generating in CSV mode, the output includes auto-generated SQL scripts for bootstrapping a SQL Server database. Use the import script to load everything in one step.
