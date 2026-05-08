@@ -2312,8 +2312,6 @@ def generate_sales_fact(
 
     pool_spec = PoolRunSpec(
         processes=n_workers,
-        chunksize=1,            # keep existing behavior; tune later if needed
-        maxtasksperchild=None,  # leave None; can set later for long runs
         label="sales",
     )
 

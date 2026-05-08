@@ -220,7 +220,6 @@ def write_bridge_parallel(
 
     pool_spec = PoolRunSpec(
         processes=n_workers,
-        chunksize=1,
         label="subscriptions",
     )
 

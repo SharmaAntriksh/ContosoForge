@@ -404,7 +404,6 @@ def _run_parallel(
 
     pool_spec = PoolRunSpec(
         processes=n_workers,
-        chunksize=1,
         label="inventory",
     )
 

@@ -673,7 +673,6 @@ def _generate_complaints_parallel(
 
     pool_spec = PoolRunSpec(
         processes=actual_workers,
-        chunksize=1,
         label="complaints",
     )
 

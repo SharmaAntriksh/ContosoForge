@@ -1038,7 +1038,6 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
 
         pool_spec = PoolRunSpec(
             processes=n_actual_workers,
-            chunksize=1,
             label="customers",
         )
 
@@ -1223,7 +1222,6 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
 
                     scd2_spec = PoolRunSpec(
                         processes=min(n_actual_workers, n_scd2_chunks),
-                        chunksize=1,
                         label="scd2",
                     )
 

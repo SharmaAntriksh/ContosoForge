@@ -2,7 +2,8 @@
 
 Provides ``PoolRunSpec`` (frozen dataclass describing pool configuration) and
 ``iter_imap_unordered`` (high-level runner that yields results in completion
-order with optional per-task timeout).
+order with optional per-task timeout). Built on
+``concurrent.futures.ProcessPoolExecutor``.
 
 These are layer-agnostic — used by both dimension generators and fact
 generators for parallel chunk processing.
@@ -12,10 +13,9 @@ from __future__ import annotations
 import os
 import signal
 import time
-from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
-from multiprocessing import Pool
-from typing import Any, Callable, Iterator, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
 
 def _worker_init_wrapper(user_init, user_args):
@@ -68,91 +68,10 @@ class _suppress_ctrl_c:
 @dataclass(frozen=True)
 class PoolRunSpec:
     processes: int
-    chunksize: int = 1
-    maxtasksperchild: Optional[int] = None
-    timeout_s: Optional[float] = None  # per-task timeout (None disables)
-    poll_interval_s: float = 0.05
+    maxtasksperchild: Optional[int] = None   # forwarded to ProcessPoolExecutor.max_tasks_per_child
+    timeout_s: Optional[float] = None        # per-task timeout (None disables)
+    poll_interval_s: float = 0.05            # cadence for timeout polling
     label: str = ""
-
-
-def _check_worker_health(pool: Pool, label: str) -> None:
-    """Raise immediately if any worker process has crashed."""
-    for p in getattr(pool, "_pool", ()) or ():
-        if p.exitcode is not None and p.exitcode != 0:
-            tag = f" label={label!r}" if label else ""
-            raise RuntimeError(
-                f"Worker process exited unexpectedly (exitcode={p.exitcode}).{tag}"
-            )
-
-
-def _iter_fast(
-    pool: Pool,
-    tasks: Sequence[Any],
-    task_fn: Callable[[Any], Any],
-    spec: PoolRunSpec,
-) -> Iterator[Any]:
-    """Yield results via imap_unordered — no timeout overhead, native batching."""
-    yield from pool.imap_unordered(task_fn, tasks, chunksize=spec.chunksize)
-
-
-def _iter_with_timeout(
-    pool: Pool,
-    tasks: Sequence[Any],
-    task_fn: Callable[[Any], Any],
-    spec: PoolRunSpec,
-) -> Iterator[Any]:
-    """Sliding-window submission with per-task timeout enforcement.
-
-    Instead of submitting every task upfront, only ``window_size`` tasks are
-    in-flight at once.  This caps IPC queue depth and serialised-payload memory
-    to a bounded multiple of the worker count.
-    """
-    timeout_s = spec.timeout_s
-    poll = max(spec.poll_interval_s, 0.001)
-    window_size = spec.processes * 2
-
-    task_iter = iter(tasks)
-    pending: deque[Tuple[Any, float]] = deque()  # (AsyncResult, submit_time)
-    exhausted = False
-
-    def _fill_window() -> None:
-        nonlocal exhausted
-        while len(pending) < window_size and not exhausted:
-            t = next(task_iter, _SENTINEL)
-            if t is _SENTINEL:
-                exhausted = True
-                break
-            ar = pool.apply_async(task_fn, (t,))
-            pending.append((ar, time.monotonic()))
-
-    _fill_window()
-
-    while pending:
-        _check_worker_health(pool, spec.label)
-
-        reaped = False
-        now = time.monotonic()
-        remaining: deque[Tuple[Any, float]] = deque()
-
-        for ar, submit_t in pending:
-            if ar.ready():
-                yield ar.get()
-                reaped = True
-            else:
-                if timeout_s is not None and (now - submit_t) > timeout_s:
-                    tag = f" label={spec.label!r}" if spec.label else ""
-                    raise RuntimeError(
-                        f"Task timed out after {timeout_s} seconds{tag}"
-                    )
-                remaining.append((ar, submit_t))
-
-        pending = remaining
-
-        if reaped:
-            _fill_window()
-            continue
-
-        time.sleep(poll)
 
 
 _SENTINEL = object()
@@ -173,42 +92,82 @@ def iter_imap_unordered(
     - 'task_fn' and 'initializer' must be top-level functions (importable) for Windows spawn
     - Yields results in completion order (unordered).
 
-    When no per-task timeout is configured (the common case), delegates directly
-    to ``Pool.imap_unordered`` which batches tasks via *chunksize*, avoiding the
-    overhead of individual ``apply_async`` calls and busy-wait polling.
+    Submission uses a bounded sliding window of ``2 × processes`` so that at
+    most that many serialised payloads sit in the IPC queue at any time. This
+    caps memory and avoids overwhelming the executor's queue-management thread.
 
-    When a timeout is set, uses a bounded sliding window of ``apply_async``
-    submissions so that at most ``2 × processes`` payloads sit in the IPC queue
-    at any time.
+    When ``spec.timeout_s`` is set, each in-flight task must complete within
+    that many seconds (measured from its submission); otherwise a RuntimeError
+    is raised and the executor is shut down.
     """
     if spec.processes <= 0:
         raise ValueError("spec.processes must be >= 1")
 
-    use_timeout = spec.timeout_s is not None and spec.timeout_s > 0
+    timeout_s = spec.timeout_s if (spec.timeout_s is not None and spec.timeout_s > 0) else None
+    poll = max(spec.poll_interval_s, 0.001)
 
-    # Suppress CTRL_C in main process during pool creation so spawned
+    executor_kwargs: Dict[str, Any] = {
+        "max_workers": spec.processes,
+        "initializer": _worker_init_wrapper,
+        "initargs": (initializer, initargs),
+    }
+    if spec.maxtasksperchild is not None:
+        executor_kwargs["max_tasks_per_child"] = spec.maxtasksperchild
+
+    # Suppress CTRL_C in main process during executor creation so spawned
     # workers inherit the ignore flag and survive stray console events
     # (e.g. VS Code venv activation on Windows).
     with _suppress_ctrl_c():
-        pool = Pool(
-            processes=spec.processes,
-            initializer=_worker_init_wrapper,
-            initargs=(initializer, initargs),
-            maxtasksperchild=spec.maxtasksperchild,
-        )
+        executor = ProcessPoolExecutor(**executor_kwargs)
 
-    _terminated = False
+    window_size = spec.processes * 2
+    task_iter = iter(tasks)
+    pending: Dict[Any, float] = {}  # future -> submit_time
+
+    def _submit_next() -> bool:
+        t = next(task_iter, _SENTINEL)
+        if t is _SENTINEL:
+            return False
+        f = executor.submit(task_fn, t)
+        pending[f] = time.monotonic()
+        return True
+
+    # Prime the window
+    for _ in range(window_size):
+        if not _submit_next():
+            break
+
+    # When timeouts are enabled we wake periodically to check elapsed times;
+    # otherwise we block until any future completes.
+    wait_timeout: Optional[float] = poll if timeout_s is not None else None
+
     try:
-        if use_timeout:
-            yield from _iter_with_timeout(pool, tasks, task_fn, spec)
-        else:
-            yield from _iter_fast(pool, tasks, task_fn, spec)
-    except Exception:  # intentionally broad — pool must terminate on any failure
-        _terminated = True
-        pool.terminate()
-        pool.join()
+        while pending:
+            done, _not_done = wait(
+                pending.keys(),
+                timeout=wait_timeout,
+                return_when=FIRST_COMPLETED,
+            )
+
+            for fut in done:
+                pending.pop(fut, None)
+                yield fut.result()  # surfaces worker exceptions
+                _submit_next()
+
+            # Timeout scan runs after popping done futures, so it only
+            # measures elapsed time on still-running tasks.
+            if timeout_s is not None:
+                now = time.monotonic()
+                for fut, submit_t in pending.items():
+                    if (now - submit_t) > timeout_s:
+                        tag = f" label={spec.label!r}" if spec.label else ""
+                        raise RuntimeError(
+                            f"Task timed out after {timeout_s} seconds{tag}"
+                        )
+    except BaseException:  # intentionally broad — executor must shut down on any failure
+        for fut in list(pending):
+            fut.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
         raise
-    finally:
-        if not _terminated:
-            pool.close()
-            pool.join()
+    else:
+        executor.shutdown(wait=True)

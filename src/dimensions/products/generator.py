@@ -99,7 +99,6 @@ def _generate_parallel_enrichment(
 
     pool_spec = PoolRunSpec(
         processes=n_actual_workers,
-        chunksize=1,
         label="product_enrichment",
     )
 
