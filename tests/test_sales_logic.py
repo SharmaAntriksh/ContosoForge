@@ -27,10 +27,7 @@ from src.facts.sales.sales_logic.core.orders import (
     build_orders,
 )
 from src.facts.sales.sales_logic.core.pricing import compute_prices
-from src.facts.sales.sales_logic.core.promotions import (
-    _sanitize_weights,
-    apply_promotions,
-)
+from src.facts.sales.sales_logic.core.promotions import apply_promotions
 from src.facts.sales.sales_logic.core.delivery import (
     _yyyymmdd_from_days,
     compute_dates,
@@ -336,24 +333,6 @@ class TestComputePrices:
 # 3. Promotions
 # ===================================================================
 
-class TestSanitizeWeights:
-    def test_none_returns_none(self):
-        assert _sanitize_weights(None, np.array([True])) is None
-
-    def test_all_invalid_returns_none(self):
-        w = np.array([0.0, 0.0])
-        valid = np.array([True, True])
-        assert _sanitize_weights(w, valid) is None
-
-    def test_masked_weights_zeroed(self):
-        w = np.array([1.0, 2.0, 3.0])
-        valid = np.array([True, False, True])
-        result = _sanitize_weights(w, valid)
-        assert result[1] == 0.0
-        assert result[0] > 0.0
-        assert result[2] > 0.0
-
-
 class TestApplyPromotions:
     def test_zero_n(self):
         result = apply_promotions(_rng(), 0, [], None, None, None)
@@ -400,36 +379,6 @@ class TestApplyPromotions:
             no_discount_key=1,
         )
         np.testing.assert_array_equal(result, np.ones(10, dtype=np.int32))
-
-    def test_weighted_promo_assignment(self):
-        dates = np.array(["2023-01-15"] * 100, dtype="datetime64[D]")
-        promo_keys = np.array([1, 10, 20], dtype=np.int32)
-        promo_start = np.array(["2023-01-01"] * 3, dtype="datetime64[D]")
-        promo_end = np.array(["2023-01-31"] * 3, dtype="datetime64[D]")
-        weights = np.array([0.0, 0.9, 0.1])  # key=1 is no_discount, weight 0
-
-        result = apply_promotions(
-            _rng(), 100, dates, promo_keys, promo_start, promo_end,
-            no_discount_key=1, promo_weight_all=weights,
-        )
-        # Most should be promo 10 due to high weight
-        count_10 = np.sum(result == 10)
-        assert count_10 > 50
-
-    def test_cdf_normalization_no_oob(self):
-        """CDF boundary clamping prevents out-of-bounds searchsorted."""
-        dates = np.array(["2023-01-15"] * 1000, dtype="datetime64[D]")
-        promo_keys = np.array([1, 10], dtype=np.int32)
-        promo_start = np.array(["2023-01-01", "2023-01-01"], dtype="datetime64[D]")
-        promo_end = np.array(["2023-01-31", "2023-01-31"], dtype="datetime64[D]")
-        weights = np.array([0.0, 1.0])
-
-        # Should not raise IndexError
-        result = apply_promotions(
-            _rng(), 1000, dates, promo_keys, promo_start, promo_end,
-            no_discount_key=1, promo_weight_all=weights,
-        )
-        assert result.shape == (1000,)
 
     def test_length_mismatch_raises(self):
         dates = _date_pool(days=5)

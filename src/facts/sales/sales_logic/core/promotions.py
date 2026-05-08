@@ -1,4 +1,4 @@
-"""Promotion assignment: date-windowed, optionally weighted promo selection.
+"""Promotion assignment: date-windowed promo selection.
 
 Assigns a PromotionKey to each sales row based on which promotions are
 active on that row's order date.  Discount amounts are never computed
@@ -28,26 +28,6 @@ def _as_date32(x):
     return a.astype("datetime64[D]", copy=False)
 
 
-def _sanitize_weights(promo_weight_all, promo_valid_glob):
-    """
-    Returns:
-      weights: float64 array aligned with promo_keys_all, or None if unusable
-    """
-    if promo_weight_all is None:
-        return None
-
-    w = np.asarray(promo_weight_all, dtype=np.float64)
-    w = np.where(np.isfinite(w), w, 0.0)
-    w = np.maximum(w, 0.0)
-    w[~promo_valid_glob] = 0.0
-
-    return w if w.sum() > 0.0 else None
-
-
-# ----------------------------------------------------------------
-# Main promotion assignment
-# ----------------------------------------------------------------
-
 def apply_promotions(
     rng,
     n,
@@ -56,7 +36,6 @@ def apply_promotions(
     promo_start_all,
     promo_end_all,
     no_discount_key=1,
-    promo_weight_all=None,
     *,
     channel_keys=None,
     promo_channel_group=None,
@@ -64,7 +43,7 @@ def apply_promotions(
     """
     Assign at most one PromotionKey per row.
 
-    For each row, picks uniformly (or weighted) among promotions whose
+    For each row, picks uniformly among promotions whose
     [StartDate, EndDate] window covers that row's order date.
 
     CORRELATION #5: When channel_keys and promo_channel_group are provided,
@@ -102,16 +81,9 @@ def apply_promotions(
     if promo_start_all.shape[0] != P or promo_end_all.shape[0] != P:
         raise SalesError("promo_start_all/promo_end_all must align with promo_keys_all length")
 
-    # Import once per call (not per inner-loop iteration); lazy to avoid circular import
-    from . import _normalize_cdf
-
     promo_valid_glob = (promo_keys_all != int(no_discount_key))
     if not promo_valid_glob.any():
         return promo_keys
-
-    weights = _sanitize_weights(promo_weight_all, promo_valid_glob)
-    if promo_weight_all is not None and weights is None:
-        weights = None
 
     # ------------------------------------------------------------
     # Group rows by unique date (fast path for month-sliced generation)
@@ -192,35 +164,10 @@ def apply_promotions(
                 if _filtered.size == 0:
                     continue  # keep no_discount_key
 
-                # Vectorized batch sample for all rows in this channel type
-                if weights is None:
-                    _chosen = _filtered[rng.integers(0, _filtered.size, size=_ct_count)]
-                else:
-                    _w = weights[_filtered]
-                    _s = float(_w.sum())
-                    if _s <= 0.0:
-                        _chosen = _filtered[rng.integers(0, _filtered.size, size=_ct_count)]
-                    else:
-                        _cdf = _normalize_cdf(_w)
-                        _u = rng.random(_ct_count)
-                        _j = np.searchsorted(_cdf, _u, side="right")
-                        _chosen = _filtered[np.minimum(_j, _filtered.size - 1)]
-
+                _chosen = _filtered[rng.integers(0, _filtered.size, size=_ct_count)]
                 promo_keys[_ct_rows] = promo_keys_all[_chosen]
         else:
-            if weights is None:
-                chosen = idx[rng.integers(0, idx.size, size=count)]
-            else:
-                w = weights[idx]
-                s = float(w.sum())
-                if s <= 0.0:
-                    chosen = idx[rng.integers(0, idx.size, size=count)]
-                else:
-                    cdf = _normalize_cdf(w)
-                    u = rng.random(count)
-                    j = np.searchsorted(cdf, u, side="right")
-                    chosen = idx[np.minimum(j, idx.size - 1)]
-
+            chosen = idx[rng.integers(0, idx.size, size=count)]
             promo_keys[rows] = promo_keys_all[chosen]
 
     return promo_keys

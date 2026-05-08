@@ -489,17 +489,19 @@ def build_weighted_date_pool(start: str, end: str, seed: int = 42) -> Tuple[np.n
     weekdays = _as_np(dates.weekday)
 
     # Weekday effect (0=Mon..6=Sun) — within-month date distribution only.
+    # Retail-typical pattern: midweek soft, Friday strong, weekend peaks.
     # Year growth, monthly seasonality, promotional spikes, and one-off trends
     # are controlled by macro_demand settings in models.yaml.
-    weekday_w = np.array([0.86, 0.91, 1.00, 1.12, 1.19, 1.08, 0.78], dtype=np.float64)
+    weekday_w = np.array([0.85, 0.85, 0.90, 0.95, 1.10, 1.20, 1.15], dtype=np.float64)
     wdw = weekday_w[weekdays]
 
     noise = rng.uniform(0.98, 1.02, size=n).astype(np.float64)
 
     weights = wdw * noise
 
-    # Random blackout days (scalar blackout rate)
-    blackout_rate = rng.uniform(0.10, 0.18)
+    # Occasional zero-sales days (outages / closures); kept low so day-level
+    # charts don't show a dead day every week.
+    blackout_rate = rng.uniform(0.01, 0.03)
     blackout = rng.random(n) < blackout_rate
     weights[_bool_mask(blackout)] = 0.0
 
@@ -991,6 +993,16 @@ def _load_products(
             product_seasonality = np.zeros(len(_sea_str), dtype=np.int8)
             for _sname, _scode in _SEASON_ENCODE.items():
                 product_seasonality[_sea_str == _sname] = _scode
+            # Warn on unmapped profiles so typos / new categories don't get
+            # silently bucketed as "no seasonal boost".
+            _known = set(_SEASON_ENCODE) | {"None", "nan"}
+            _unknown = [s for s in np.unique(_sea_str).tolist() if s not in _known]
+            if _unknown:
+                warn(
+                    f"Unknown SeasonalityProfile values in product_profile.parquet "
+                    f"(no boost applied): {_unknown}. "
+                    f"Expected one of: {sorted(_SEASON_ENCODE)}."
+                )
         except (KeyError, ValueError, TypeError, OSError) as exc:
             info(f"Could not load product profile ({type(exc).__name__}: {exc}); using uniform product sampling.")
             product_popularity = None

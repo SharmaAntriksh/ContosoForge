@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import warnings
 from collections.abc import Mapping
 
 import numpy as np
 
 from src.exceptions import SalesError
+
+
+def _stable_seed(*parts: object) -> int:
+    """Deterministic 31-bit seed from arbitrary parts, suitable for `default_rng`."""
+    return int(
+        hashlib.md5("_".join(str(p) for p in parts).encode()).hexdigest(),
+        16,
+    ) & 0x7FFFFFFF
 
 
 # ----------------------------------------------------------------
@@ -251,29 +260,22 @@ def macro_month_weights(rng: np.random.Generator, T: int, cfg: dict) -> np.ndarr
     else:
         s = 1.0
 
-    # month-to-month noise — use a deterministic seed derived from
-    # noise_std so all chunks share the same noise vector.
-    # Without this, multi-chunk generation averages out the noise
-    # (each chunk draws independent noise, sum converges to mean).
+    # Noise and shocks use seeds derived from their own params (not the
+    # chunk RNG) so every chunk draws the same vector — otherwise per-chunk
+    # randomness averages out and the configured volatility disappears.
     if noise_std > 0.0:
-        import hashlib
-        noise_seed = int(hashlib.md5(
-            f"macro_noise_{noise_std}_{T}".encode()
-        ).hexdigest(), 16) & 0x7FFFFFFF
-        noise_rng = np.random.default_rng(noise_seed)
-        n = noise_rng.normal(loc=1.0, scale=noise_std, size=T)
-        n = np.clip(n, 0.5, 1.5)
+        noise_rng = np.random.default_rng(_stable_seed("macro_noise", noise_std, T))
+        n = np.clip(noise_rng.normal(loc=1.0, scale=noise_std, size=T), 0.5, 1.5)
     else:
         n = 1.0
 
-    # shocks: occasional multiplicative hits
     if shock_p > 0.0:
+        shock_rng = np.random.default_rng(_stable_seed("macro_shock", shock_p, shock_lo, shock_hi, T))
         shock = np.ones(T, dtype="float64")
-        hit = rng.random(T) < shock_p
+        hit = shock_rng.random(T) < shock_p
         if hit.any():
-            shock[hit] = 1.0 + rng.uniform(shock_lo, shock_hi, size=int(hit.sum()))
-            upper = max(1.0, 1.0 + shock_hi)  # allow positive shocks
-            shock = np.clip(shock, 0.1, upper)
+            shock[hit] = 1.0 + shock_rng.uniform(shock_lo, shock_hi, size=int(hit.sum()))
+            shock = np.clip(shock, 0.1, max(1.0, 1.0 + shock_hi))
     else:
         shock = 1.0
 

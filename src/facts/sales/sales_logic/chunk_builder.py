@@ -767,6 +767,8 @@ def _apply_geo_bias_store_sampling(
         _unique_countries = np.unique(_cust_countries)
         _max_cid = int(_unique_countries.max()) + 1
 
+        _countries_no_local = np.zeros(_max_cid, dtype=bool)
+
         _local_pools = [None] * _max_cid
         _max_pool_len = 0
         for _cid_v in _unique_countries:
@@ -778,6 +780,7 @@ def _apply_geo_bias_store_sampling(
                 _lp = np.array([], dtype=np.int32)
             if _lp.size == 0:
                 _lp = month_stores
+                _countries_no_local[_cid_int] = True
             _local_pools[_cid_int] = _lp
             if _lp.size > _max_pool_len:
                 _max_pool_len = _lp.size
@@ -795,6 +798,11 @@ def _apply_geo_bias_store_sampling(
         _rand_idx = rng.integers(0, np.iinfo(np.int64).max, size=_n_to_sample).astype(np.int64)
         _local_pick = _pool_2d[_cust_countries, _rand_idx % _pool_lens[_cust_countries]]
         _global_pick = month_stores[rng.integers(0, len(month_stores), size=_n_to_sample)]
+
+        # Without local stores, the 70/30 local-vs-global split is meaningless
+        # (both pools are identical) — turn off the split for those customers.
+        if _countries_no_local.any():
+            _use_local[_countries_no_local[_cust_countries]] = False
 
         order_store = np.where(_use_local, _local_pick, _global_pick).astype(np.int32)
     else:
@@ -1393,6 +1401,8 @@ def build_chunk_table(
             discovery_cfg=disc_cfg_local,
             base_weight=base_weight,
             target_distinct=target_distinct,
+            end_month_norm=end_month_norm,
+            m_offset=int(m_offset),
         )
 
 
@@ -1502,11 +1512,13 @@ def build_chunk_table(
             getattr(State, "country_to_store_keys", None),
         )
 
-        # DAY-LEVEL STORE ELIGIBILITY: resample for open/close + renovation
+        # DAY-LEVEL STORE ELIGIBILITY: resample for open/close + renovation.
+        # Replacement candidates are drawn from the per-month eligible set
+        # so a store filtered out by the month set isn't reintroduced here.
         store_key_arr = _resample_stores_for_open_close(
             rng, store_key_arr, order_dates,
             store_open_day, store_close_day,
-            store_keys, order_idx,
+            _month_stores, order_idx,
             store_reno_start_day=store_reno_start_day,
             store_reno_end_day=store_reno_end_day,
         )

@@ -587,11 +587,23 @@ def _build_brand_prob_by_month_rotate_winner(
         rng.shuffle(chunk)
     winner_sequence = winner_sequence[:n_years]
 
+    # Tapered co-winners ensure short runs (where year_idx never reaches most
+    # brands, e.g. B=70 with n_years=3) still show popularity variation across
+    # a meaningful slice of the catalog.
+    boost = float(winner_boost)
+    last = len(winner_sequence) - 1
+    tapers = (1.0, 0.5, 0.25)
     for t in range(T):
         year_idx = t // year_len
-        winner = int(winner_sequence[min(year_idx, len(winner_sequence) - 1)])
         v = base.copy()
-        v[winner] *= float(winner_boost)
+        seen: set[int] = set()
+        for offset, taper in enumerate(tapers):
+            idx = int(winner_sequence[min(year_idx + offset, last)])
+            if idx in seen:
+                continue
+            seen.add(idx)
+            v[idx] *= 1.0 + taper * (boost - 1.0)
+
         if noise_sd > 0:
             v *= np.exp(rng.normal(loc=0.0, scale=float(noise_sd), size=B))
         if min_share > 0:

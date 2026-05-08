@@ -297,7 +297,8 @@ def _load_appearance_cfg() -> dict:
         d_round = "floor"
     d_max, d_step = _parse_bands(
         d_cfg.get("bands", None),
-        default=[(100.0, 50.0), (1e18, 100.0)],
+        default=[(10.0, 0.5), (100.0, 1.0), (1000.0, 5.0),
+                 (10000.0, 25.0), (1e18, 50.0)],
     )
 
     out = {
