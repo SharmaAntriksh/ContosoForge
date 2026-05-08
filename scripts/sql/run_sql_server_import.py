@@ -119,6 +119,31 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--drop-pk-before-load",
+        action="store_true",
+        help=(
+            "Drop primary key and foreign key constraints BEFORE the data load "
+            "so BULK INSERT runs into pure heaps. Removes per-row PK maintenance "
+            "and FK validation, which is the main bottleneck for parallel loads "
+            "on fact tables (especially Sales with 11+ FKs). Definitions are "
+            "saved to [admin].[_PK_Backup]. Pair with --restore-pk-after-load "
+            "to re-add them automatically once the load is done."
+        ),
+    )
+
+    parser.add_argument(
+        "--restore-pk-after-load",
+        action="store_true",
+        help=(
+            "Restore primary keys and foreign keys from [admin].[_PK_Backup] "
+            "after the data load (and after CCI apply if --apply-cci). Use "
+            "together with --drop-pk-before-load for the canonical pattern: "
+            "fast parallel BULK INSERT into heaps, then re-add constraints. "
+            "Cannot be combined with --drop-pk (conflicting end-state)."
+        ),
+    )
+
+    parser.add_argument(
         "--verify",
         action="store_true",
         help=(
@@ -131,6 +156,18 @@ def main() -> int:
         "--odbc-driver",
         default=None,
         help="Override ODBC driver name (default: ODBC Driver 17 for SQL Server).",
+    )
+
+    parser.add_argument(
+        "--load-workers",
+        type=int,
+        default=4,
+        help=(
+            "Number of parallel BULK INSERT workers for multi-chunk fact tables. "
+            "Each worker holds its own connection and loads chunks concurrently "
+            "into the same heap (TABLOCK allows this). 1 disables parallelism. "
+            "Default: 4. Diminishing returns past ~8 on a single NVMe."
+        ),
     )
 
     parser.add_argument(
@@ -155,6 +192,26 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    if args.load_workers < 1:
+        print("VALIDATION ERROR: --load-workers must be >= 1", file=sys.stderr)
+        return 2
+
+    if args.restore_pk_after_load and args.drop_pk:
+        print(
+            "VALIDATION ERROR: --restore-pk-after-load and --drop-pk are mutually "
+            "exclusive (one re-adds PKs/FKs, the other drops them — pick one).",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.restore_pk_after_load and not args.drop_pk_before_load:
+        print(
+            "VALIDATION ERROR: --restore-pk-after-load requires --drop-pk-before-load "
+            "(nothing to restore otherwise).",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         run_dir = _resolve_run_dir(args.run_path)
         connection_string = build_connection_string(args)
@@ -174,10 +231,13 @@ def main() -> int:
             connection_string=connection_string,
             apply_cci=bool(args.apply_cci),
             drop_pk=bool(args.drop_pk),
+            drop_pk_before_load=bool(args.drop_pk_before_load),
+            restore_pk_after_load=bool(args.restore_pk_after_load),
             verify=bool(args.verify),
             provision_tabular_user=bool(args.provision_tabular_user),
             tabular_login=args.tabular_login,
             tabular_password=tabular_password,
+            load_workers=int(args.load_workers),
         )
 
     except ValueError as exc:

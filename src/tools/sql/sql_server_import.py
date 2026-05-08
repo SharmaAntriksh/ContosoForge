@@ -156,6 +156,28 @@ def _cci_count(cursor: "pyodbc.Cursor", schema: str, table: str) -> int:
     return int(cursor.fetchone()[0])
 
 
+def _count_user_pks_fks(cursor: "pyodbc.Cursor") -> tuple[int, int]:
+    """Count PKs and FKs on user tables (excludes sys/INFORMATION_SCHEMA/admin).
+
+    Returns (pk_count, fk_count) in a single round-trip.
+    """
+    cursor.execute(
+        "SELECT "
+        "  (SELECT COUNT(*) FROM sys.key_constraints kc "
+        "   JOIN sys.tables t ON t.object_id = kc.parent_object_id "
+        "   JOIN sys.schemas s ON s.schema_id = t.schema_id "
+        "   WHERE kc.type = 'PK' AND t.is_ms_shipped = 0 "
+        "     AND s.name NOT IN ('sys','INFORMATION_SCHEMA','admin')), "
+        "  (SELECT COUNT(*) FROM sys.foreign_keys fk "
+        "   JOIN sys.tables t ON t.object_id = fk.parent_object_id "
+        "   JOIN sys.schemas s ON s.schema_id = t.schema_id "
+        "   WHERE t.is_ms_shipped = 0 "
+        "     AND s.name NOT IN ('sys','INFORMATION_SCHEMA','admin'));"
+    )
+    row = cursor.fetchone()
+    return int(row[0]), int(row[1])
+
+
 def _print_cci_summary(cursor: "pyodbc.Cursor", *, tables: list[str]) -> None:
     cursor.execute("SELECT COUNT(*) FROM sys.indexes WHERE type_desc = 'CLUSTERED COLUMNSTORE';")
     total_ccis = int(cursor.fetchone()[0])
@@ -349,6 +371,76 @@ _BULK_INSERT_SPLIT_RE = re.compile(
 )
 
 
+def _run_parallel_chunks(
+    db_conn_str: str,
+    statements: list[str],
+    n_workers: int,
+    on_chunk_done=None,
+) -> None:
+    """Execute BULK INSERT chunks across n_workers dedicated connections.
+
+    Each worker holds one autocommit pyodbc connection and pulls statements
+    from a shared queue until drained or until any worker reports an error.
+    Safe for HEAP loads with TABLOCK: SQL Server's bulk-update lock allows
+    concurrent BULK INSERTs into the same heap.
+
+    on_chunk_done: optional thread-safe callable invoked once per successfully
+    completed chunk. Used by callers to drive a live progress display.
+    """
+    import queue
+    import threading as _t
+
+    task_q: "queue.Queue[str]" = queue.Queue()
+    for stmt in statements:
+        task_q.put(stmt)
+
+    errors: list[BaseException] = []
+    errors_lock = _t.Lock()
+    stop_event = _t.Event()
+
+    def _worker() -> None:
+        try:
+            conn = pyodbc.connect(db_conn_str, autocommit=True)
+        except pyodbc.Error as exc:
+            with errors_lock:
+                errors.append(exc)
+            stop_event.set()
+            return
+
+        try:
+            _try_disable_query_timeout(conn)
+            cur = conn.cursor()
+            while not stop_event.is_set():
+                try:
+                    stmt = task_q.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    cur.execute(stmt)
+                    _drain_results(cur)
+                except pyodbc.Error as exc:
+                    with errors_lock:
+                        errors.append(exc)
+                    stop_event.set()
+                    return
+                if on_chunk_done is not None:
+                    on_chunk_done()
+        finally:
+            try:
+                conn.close()
+            except pyodbc.Error:
+                pass
+
+    threads = [_t.Thread(target=_worker, daemon=True) for _ in range(n_workers)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    if errors:
+        raise errors[0]
+
+
 def _split_load_statements(sql_text: str) -> list[tuple[str, str]]:
     """Split a load script into individual BULK INSERT statements.
 
@@ -390,7 +482,13 @@ def _split_load_statements(sql_text: str) -> list[tuple[str, str]]:
 
 
 def _execute_load_with_progress(
-    cursor, sql_file: Path, *, base: Path = None, label: str = "Loading",
+    cursor,
+    sql_file: Path,
+    *,
+    base: Path = None,
+    label: str = "Loading",
+    db_conn_str: str | None = None,
+    load_workers: int = 1,
 ) -> None:
     """Execute a load script with a live spinner, aggregating per table.
 
@@ -398,6 +496,10 @@ def _execute_load_with_progress(
     chunks of the same table together, and shows one spinner per
     logical table (not per chunk).  Tables under 0.2s are grouped
     into a single "N others" summary line.
+
+    When ``load_workers > 1`` and ``db_conn_str`` is provided, multi-chunk
+    table groups are loaded in parallel across dedicated worker connections.
+    Single-chunk groups and preamble batches still run on the outer cursor.
     """
     time = _time
     threading = _threading
@@ -429,22 +531,41 @@ def _execute_load_with_progress(
     _FRAMES = ["-", "\\", "|", "/"]
     _SMALL_THRESHOLD = 0.2  # seconds — tables faster than this are grouped
 
+    parallel_enabled = load_workers > 1 and db_conn_str is not None
+
     # Two-pass: execute all, collect results, then print (so we can group small ones)
     results: list[tuple[str, float, int]] = []  # (table_name, elapsed, n_chunks)
 
     for table_name, sql_stmts in grouped:
         n_chunks = len(sql_stmts)
-        chunk_suffix = f" ({n_chunks} chunks)" if n_chunks > 1 else ""
+        run_parallel = parallel_enabled and n_chunks > 1
+        n_active = min(load_workers, n_chunks) if run_parallel else 1
+
+        # Live chunk counter (thread-safe via GIL on int read; lock guards increment).
+        done_count = [0]
+        done_lock = threading.Lock()
+
+        def _on_chunk_done(_d=done_count, _l=done_lock):
+            with _l:
+                _d[0] += 1
+
+        def _suffix(_n=n_chunks, _na=n_active, _rp=run_parallel, _d=done_count):
+            if _n <= 1:
+                return ""
+            progress = _d[0]
+            if _rp:
+                return f" ({progress}/{_n} chunks, {_na} workers)"
+            return f" ({progress}/{_n} chunks)"
 
         stop_event = threading.Event()
         t0 = time.time()
 
-        def _spin(_tbl=table_name, _cs=chunk_suffix, _t0=t0, _stop=stop_event):
+        def _spin(_tbl=table_name, _t0=t0, _stop=stop_event, _suf=_suffix):
             i = 0
             while not _stop.is_set():
                 elapsed = time.time() - _t0
                 frame = _FRAMES[i % len(_FRAMES)]
-                sys.stdout.write(f"\r    [{frame}] {_tbl}{_cs}  {elapsed:.0f}s  ")
+                sys.stdout.write(f"\r    [{frame}] {_tbl}{_suf()}  {elapsed:.0f}s  ")
                 sys.stdout.flush()
                 i += 1
                 _stop.wait(0.15)
@@ -454,9 +575,13 @@ def _execute_load_with_progress(
 
         error = None
         try:
-            for stmt in sql_stmts:
-                cursor.execute(stmt)
-                _drain_results(cursor)
+            if run_parallel:
+                _run_parallel_chunks(db_conn_str, sql_stmts, n_active, on_chunk_done=_on_chunk_done)
+            else:
+                for stmt in sql_stmts:
+                    cursor.execute(stmt)
+                    _drain_results(cursor)
+                    _on_chunk_done()
         except pyodbc.Error as exc:
             error = exc
         finally:
@@ -479,7 +604,11 @@ def _execute_load_with_progress(
 
         # Print immediately for tables that take significant time
         if elapsed >= _SMALL_THRESHOLD:
-            chunk_note = f", {n_chunks} chunks" if n_chunks > 1 else ""
+            chunk_note = ""
+            if n_chunks > 1:
+                chunk_note = f", {n_chunks} chunks"
+                if run_parallel:
+                    chunk_note += f", {n_active} workers"
             _log("WORK", f"    {table_name} ({elapsed:.1f}s{chunk_note})")
 
     # Print grouped summary for small tables
@@ -806,10 +935,13 @@ def import_sql_server(
     connection_string: str,
     apply_cci: bool = False,
     drop_pk: bool = False,
+    drop_pk_before_load: bool = False,
+    restore_pk_after_load: bool = False,
     verify: bool = False,
     provision_tabular_user: bool = False,
     tabular_login: str = TABULAR_LOGIN_DEFAULT,
     tabular_password: str | None = None,
+    load_workers: int = 4,
 ) -> None:
     if pyodbc is None:
         raise SqlServerImportError(
@@ -892,7 +1024,47 @@ def import_sql_server(
                 _log("WORK", f"    {f.name}")
             execute_sql_files(cursor, all_schema_files)
 
+            # Commit so parallel load workers (separate connections) can see the tables.
+            conn.commit()
+
             _log("DONE", f"  Creating Schema completed in {_time.time() - _t_schema:.1f}s")
+
+            # --- 2.1b Pre-load PK/FK drop (parallel-safe loads) ---
+            if drop_pk_before_load:
+                _t_predrop = _time.time()
+                _log("INFO", "  Dropping PKs/FKs before load (enables parallel BULK INSERT scaling)")
+                try:
+                    with pyodbc.connect(db_conn_str, autocommit=True) as predrop_conn:
+                        _try_disable_query_timeout(predrop_conn)
+                        pre_cur = predrop_conn.cursor()
+
+                        # Install the management proc here so we can use it before the
+                        # post-import phase that normally installs it.
+                        if pk_proc_file.is_file():
+                            execute_sql_batches(pre_cur, pk_proc_file)
+                        else:
+                            raise SqlServerImportError(
+                                f"PK proc not found: {pk_proc_file}. "
+                                "Cannot honor --drop-pk-before-load."
+                            )
+
+                        pk_count_before, fk_count_before = _count_user_pks_fks(pre_cur)
+
+                        if pk_count_before == 0 and fk_count_before == 0:
+                            _log("INFO", "    No PKs or FKs found to drop")
+                        else:
+                            pre_cur.execute("EXEC [admin].[ManagePrimaryKeys] @Action = 'DROP'")
+                            _drain_results(pre_cur)
+                            _log(
+                                "DONE",
+                                f"  Dropped {pk_count_before} PKs, {fk_count_before} FKs in "
+                                f"{_time.time() - _t_predrop:.1f}s",
+                            )
+                            _log("INFO", "    Definitions saved to [admin].[_PK_Backup]")
+                except pyodbc.Error as exc:
+                    raise SqlServerImportError(
+                        f"Failed pre-load PK/FK drop in '{database}'. Details: {exc.args}"
+                    ) from exc
 
             # --- 2.2 Data loading ---
             load_files = list_sql_files(load_dir)
@@ -929,7 +1101,18 @@ def import_sql_server(
                 _t_load = _time.time()
                 _log("INFO", f"  Loading {section} ({n_tables} tables)")
                 _log("WORK", f"    {load_file.name}")
-                _execute_load_with_progress(cursor, load_file, base=run_dir, label=section)
+                # Dimensions are tiny and single-chunk; only parallelize facts.
+                file_workers = load_workers if not is_dims else 1
+                _execute_load_with_progress(
+                    cursor,
+                    load_file,
+                    base=run_dir,
+                    label=section,
+                    db_conn_str=db_conn_str,
+                    load_workers=file_workers,
+                )
+                # Release any outer-cursor work between load files.
+                conn.commit()
                 _log("DONE", f"  Loading {section} completed in {_time.time() - _t_load:.1f}s")
 
             # --- 2.3 Row count verification ---
@@ -972,7 +1155,7 @@ def import_sql_server(
         ) from exc
 
     # Step 3: CCI + optional PK/FK drop (share one connection)
-    if drop_pk or apply_cci:
+    if drop_pk or apply_cci or restore_pk_after_load:
         _log("INFO", "=" * 60)
     try:
         with pyodbc.connect(db_conn_str, autocommit=True) as conn:
@@ -1057,6 +1240,34 @@ def import_sql_server(
                         raise SqlServerImportError(
                             "CCI apply completed without errors, but no CLUSTERED COLUMNSTORE index exists."
                         )
+
+            # 3.4 Restore PKs/FKs from backup (only when --restore-pk-after-load is set)
+            if restore_pk_after_load:
+                if apply_cci or drop_pk:
+                    _log("INFO", "=" * 60)
+                _t_restore = _time.time()
+                _log("INFO", "  Restoring Primary Keys & Foreign Keys")
+
+                cursor.execute(
+                    "SELECT "
+                    "  SUM(CASE WHEN constraint_type = 'PK' THEN 1 ELSE 0 END), "
+                    "  SUM(CASE WHEN constraint_type = 'FK' THEN 1 ELSE 0 END) "
+                    "FROM [admin].[_PK_Backup]"
+                )
+                row = cursor.fetchone()
+                pk_backup_count = int(row[0] or 0) if row else 0
+                fk_backup_count = int(row[1] or 0) if row else 0
+
+                if pk_backup_count == 0 and fk_backup_count == 0:
+                    _log("INFO", "    No backup definitions found in [admin].[_PK_Backup] — nothing to restore")
+                else:
+                    cursor.execute("EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'")
+                    _drain_results(cursor)
+                    _log(
+                        "DONE",
+                        f"  Restored {pk_backup_count} primary keys, {fk_backup_count} foreign keys "
+                        f"in {_time.time() - _t_restore:.1f}s",
+                    )
 
     except pyodbc.Error as exc:
         raise SqlServerImportError(

@@ -360,7 +360,7 @@ When generating in CSV mode, the output includes auto-generated SQL scripts for 
 
 > If the target database already exists, the import is skipped automatically.
 
-**Windows Authentication:**
+**Windows Authentication (fast-load preset, recommended for large fact tables):**
 
 ```powershell
 .\scripts\run_sql_server_import.ps1 `
@@ -369,7 +369,9 @@ When generating in CSV mode, the output includes auto-generated SQL scripts for 
   -Database Sales1M `
   -TrustedConnection `
   -ApplyCCI $true `
-  -DropPK $true `
+  -DropPKBeforeLoad `
+  -RestorePKAfterLoad `
+  -LoadWorkers 8 `
   -Verify
 ```
 
@@ -391,13 +393,29 @@ When generating in CSV mode, the output includes auto-generated SQL scripts for 
 | `-TrustedConnection` | Windows Authentication |
 | `-User`&nbsp;/&nbsp;`-Password` | SQL Authentication |
 | `-ApplyCCI $true` | Create clustered columnstore indexes after load |
-| `-DropPK $true` | Drop PKs and FKs before CCI (saved to `[admin].[_PK_Backup]` for restore) |
-| `-Verify` | Run post-import data integrity checks |
-| `-ProvisionTabularUser` | After import, ensure a SQL login + DB user exists with `DB_OWNER` (for SSAS Tabular / Power BI) |
+| `-DropPKBeforeLoad` | Drop PKs and FKs **before** the data load so parallel `BULK INSERT` runs into pure heaps. Removes per-row PK maintenance and FK validation — the main bottleneck for parallel loads. Definitions saved to `[admin].[_PK_Backup]`. |
+| `-RestorePKAfterLoad` | Restore PKs and FKs from `[admin].[_PK_Backup]` after load (and after CCI apply). Requires `-DropPKBeforeLoad`. Cannot be combined with `-DropPK`. |
+| `-DropPK $true` | Drop PKs and FKs **after** load (analytics-only end state, smallest DB). Keeps PKs and FKs active **during** the load, so SQL Server validates every row as it arrives. Slower than `-DropPKBeforeLoad` but fails fast on duplicate keys or orphan FKs — useful when loading manually-edited CSVs or debugging generator changes where the data may be untrusted. |
+| `-LoadWorkers <N>` | Parallel `BULK INSERT` worker count for multi-chunk fact tables (default `4`). Each worker holds its own pyodbc connection. Diminishing returns past ~8 on a single NVMe. |
+| `-Verify` | Run post-import data integrity checks (`verify.RunAll`) |
+| <nobr>`-ProvisionTabularUser`</nobr> | After import, ensure a SQL login + DB user exists with `DB_OWNER` (for SSAS Tabular / Power BI) |
 | `-TabularLogin` | Login name for the tabular user (default: `tabular_user`) |
 | `-TabularPassword` | `SecureString` password for the tabular user (alternative: `$env:SYNDATA_TABULAR_PASSWORD`) |
 
-The import creates all dimension and fact tables, applies PK/FK constraints, and creates analytical views. Dropped constraints can be restored with `EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'`.
+The import creates all dimension and fact tables, applies PK/FK constraints, and creates analytical views.
+
+### Pick the right flag combination for your end-state
+
+| Goal | Flags | Notes |
+|---|---|---|
+| **Fast load + PKs/FKs intact + CCI** (recommended for SSAS / Power BI) | `-ApplyCCI $true -DropPKBeforeLoad -RestorePKAfterLoad -LoadWorkers 8` | Fastest end-to-end. Pre-drops constraints, parallel-loads heaps, applies CCI, re-adds PKs/FKs. |
+| **Fast load, analytics-only, smallest DB** | `-ApplyCCI $true -DropPKBeforeLoad -LoadWorkers 8` | Same fast load, but PKs/FKs stay dropped. Smallest final size. Can be restored later with `EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'`. |
+| **Safe load with row-by-row constraint validation** | (no PK flags) | Default behavior. PKs/FKs validated as data arrives. Slowest at scale, but defensive. |
+| **Defensive load + analytics-only end state** | `-ApplyCCI $true -DropPK $true` | Validates every row against PKs/FKs as it loads, then drops constraints for a small final DB. Use when CSVs are untrusted (manually edited, debugging generator changes, third-party data) — fails immediately on duplicates or orphan FKs instead of late at the restore step. Trades load speed for early-failure feedback. |
+
+For a 200M-row Sales fact table on a typical NVMe box with 8 cores, the fast-load preset cuts total import time from ~25 min (default behavior) to **~10 min** end-to-end. The biggest contributor is dropping FKs before load — Sales has 11 FK constraints, each adding per-row dimension lookups during `BULK INSERT`.
+
+Constraints can also be restored manually at any point with `EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'`.
 
 ### Provisioning a Tabular User
 
@@ -412,7 +430,9 @@ When importing into SSAS Tabular or Power BI, a dedicated SQL login is usually e
   -Database Sales2M `
   -TrustedConnection `
   -ApplyCCI $true `
-  -DropPK $false `
+  -DropPKBeforeLoad `
+  -RestorePKAfterLoad `
+  -LoadWorkers 8 `
   -Verify `
   -ProvisionTabularUser `
   -TabularLogin tabular_user
@@ -430,7 +450,9 @@ $sec = Read-Host -AsSecureString "Tabular password"
   -Database Sales2M `
   -TrustedConnection `
   -ApplyCCI $true `
-  -DropPK $false `
+  -DropPKBeforeLoad `
+  -RestorePKAfterLoad `
+  -LoadWorkers 8 `
   -Verify `
   -ProvisionTabularUser `
   -TabularLogin tabular_user `
@@ -448,7 +470,9 @@ $env:SYNDATA_TABULAR_PASSWORD = "..."
   -Database Sales2M `
   -TrustedConnection `
   -ApplyCCI $true `
-  -DropPK $false `
+  -DropPKBeforeLoad `
+  -RestorePKAfterLoad `
+  -LoadWorkers 8 `
   -Verify `
   -ProvisionTabularUser `
   -TabularLogin analytics_user

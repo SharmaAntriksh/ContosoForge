@@ -29,6 +29,17 @@ param (
     # Drop primary key and foreign key constraints after import (reduces size)
     [bool]$DropPK = $false,
 
+    # Drop PKs and FKs BEFORE the load so BULK INSERT runs into pure heaps.
+    # Removes per-row PK maintenance and FK validation that bottlenecks
+    # parallel loads. Definitions are saved to [admin].[_PK_Backup]; pair
+    # with -RestorePKAfterLoad to re-add them automatically post-load.
+    [switch]$DropPKBeforeLoad,
+
+    # Restore PKs/FKs from [admin].[_PK_Backup] after the load (and after
+    # CCI apply if -ApplyCCI). Requires -DropPKBeforeLoad. Cannot be
+    # combined with -DropPK (conflicting end-state).
+    [switch]$RestorePKAfterLoad,
+
     # Run data verification after import (EXEC verify.RunAll)
     [switch]$Verify,
 
@@ -47,6 +58,12 @@ param (
 
     # e.g. "ODBC Driver 18 for SQL Server"
     [string]$OdbcDriver,
+
+    # Number of parallel BULK INSERT workers for multi-chunk fact tables.
+    # Each worker holds its own connection and loads chunks concurrently
+    # into the same heap (TABLOCK allows this). 1 disables parallelism.
+    # Default 4. Diminishing returns past ~8 on a single NVMe.
+    [int]$LoadWorkers = 4,
 
     # Override python executable (defaults to active venv python if venv is activated)
     [string]$PythonExe = "python",
@@ -109,6 +126,8 @@ try {
 
     if ($ApplyCCI) { $argsList += "--apply-cci" }
     if ($DropPK)   { $argsList += "--drop-pk" }
+    if ($DropPKBeforeLoad)  { $argsList += "--drop-pk-before-load" }
+    if ($RestorePKAfterLoad) { $argsList += "--restore-pk-after-load" }
     if ($Verify)   { $argsList += "--verify" }
     if ($ProvisionTabularUser) {
         # Validate login name (must match the Python-side regex)
@@ -135,6 +154,11 @@ try {
         $argsList += @("--provision-tabular-user", "--tabular-login", $TabularLogin)
     }
     if ($OdbcDriver) { $argsList += @("--odbc-driver", $OdbcDriver) }
+
+    if ($LoadWorkers -lt 1) {
+        throw "-LoadWorkers must be >= 1 (got $LoadWorkers)."
+    }
+    $argsList += @("--load-workers", $LoadWorkers.ToString())
 
     # Log the command
     # Mask password in logged output
@@ -164,9 +188,12 @@ try {
         $flags = @()
         if ($ApplyCCI) { $flags += "apply-cci" }
         if ($DropPK)   { $flags += "drop-pk" }
+        if ($DropPKBeforeLoad)  { $flags += "drop-pk-before-load" }
+        if ($RestorePKAfterLoad) { $flags += "restore-pk-after-load" }
         if ($Verify)   { $flags += "verify" }
         if ($ProvisionTabularUser) { $flags += ("provision-tabular-user=" + $TabularLogin) }
         if ($OdbcDriver) { $flags += ("odbc=" + $OdbcDriver) }
+        $flags += ("load-workers=" + $LoadWorkers)
 
         $flagText = if ($flags.Count -gt 0) { " [" + ($flags -join ", ") + "]" } else { "" }
 
