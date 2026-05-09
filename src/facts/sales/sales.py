@@ -732,6 +732,23 @@ def _load_customers(
 
     customer_keys = _as_np(cust_df["CustomerKey"], np.int32)
 
+    # CustomerKey -> first EffectiveStartDate (epoch days) lookup. Eligibility
+    # is month-granular but EffectiveStartDate is day-granular (random 0-27 day
+    # offset within CustomerStartMonth), so without a per-row clamp the chunk
+    # builder can place orders earlier in the start month than the customer's
+    # actual join date. INT64_MIN fills unknown-key slots so np.maximum against
+    # OrderDate is a natural no-op there. Used by chunk_builder.py.
+    if "CustomerStartDate" in cust_df.columns:
+        _cust_start_days = pd.to_datetime(
+            cust_df["CustomerStartDate"], errors="coerce"
+        ).values.astype("datetime64[D]").astype(np.int64)
+        customer_first_eff_start_by_key = np.full(
+            int(customer_keys.max()) + 1, np.iinfo(np.int64).min, dtype=np.int64,
+        )
+        customer_first_eff_start_by_key[customer_keys] = _cust_start_days
+    else:
+        customer_first_eff_start_by_key = None
+
     # --- Derive month indices from dates ---
     config_start = pd.to_datetime(start_date).to_period("M")
 
@@ -826,6 +843,7 @@ def _load_customers(
         "is_active_in_sales": is_active_in_sales,
         "customer_base_weight": customer_base_weight,
         "customer_geo_key": customer_geo_key,
+        "customer_first_eff_start_by_key": customer_first_eff_start_by_key,
         "customer_scd2_active": _customer_scd2_active,
         "customer_scd2_starts": _customer_scd2_starts,
         "customer_scd2_keys": _customer_scd2_keys,
@@ -1300,6 +1318,7 @@ def _build_worker_cfg(
         customer_start_month=cust["customer_start_month"],
         customer_end_month=cust["customer_end_month"],
         customer_base_weight=cust["customer_base_weight"],
+        customer_first_eff_start_by_key=cust["customer_first_eff_start_by_key"],
 
         store_to_geo=stores["store_to_geo"],
         geo_to_currency=stores["geo_to_currency"],
@@ -2276,6 +2295,7 @@ def generate_sales_fact(
         "customer_start_month",
         "customer_end_month",
         "customer_base_weight",
+        "customer_first_eff_start_by_key",
         "product_subcat_key",
         "product_popularity",
         "date_pool",

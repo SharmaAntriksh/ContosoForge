@@ -58,6 +58,26 @@ def _as_datetime64_D(x):
     # Fallback
     return np.asarray(x, dtype="datetime64[D]")
 
+def _clamp_order_dates_to_customer_start(
+    order_dates: np.ndarray,
+    customer_keys: np.ndarray,
+) -> np.ndarray:
+    """Push OrderDate forward to the customer's first EffectiveStartDate.
+
+    Eligibility is month-granular (CustomerStartMonth) but EffectiveStartDate
+    is day-granular (random 0-27 day offset within the start month), so a
+    customer who joined Dec 28 can otherwise be sampled for a Dec 20 order.
+    The lookup table fills unknown-key slots with INT64_MIN so np.maximum is
+    a no-op for those rows.
+    """
+    lut = getattr(State, "customer_first_eff_start_by_key", None)
+    if lut is None or order_dates is None or customer_keys.size == 0:
+        return order_dates
+    od_days = np.asarray(order_dates, dtype="datetime64[D]").astype(np.int64)
+    np.maximum(od_days, lut[customer_keys], out=od_days)
+    return od_days.view("datetime64[D]")
+
+
 # Cached partition cols (immutable after State.seal(); avoids per-chunk getattr).
 _cached_delta_pcols: set[str] | None = None
 
@@ -1431,6 +1451,8 @@ def build_chunk_table(
             order_dates = orders["order_dates"]
             line_num = orders["line_num"]
 
+            order_dates = _clamp_order_dates_to_customer_start(order_dates, customer_keys_out)
+
             if _use_day_ids:
                 _oc = orders["_order_count"]
                 _reps = orders["_repeats"]
@@ -1472,6 +1494,7 @@ def build_chunk_table(
         else:
             customer_keys_out = customer_keys_for_orders
             order_dates = month_date_pool[rng.integers(0, len(month_date_pool), size=n_orders)]
+            order_dates = _clamp_order_dates_to_customer_start(order_dates, customer_keys_out)
             order_ids_int = None
             line_num = None
 

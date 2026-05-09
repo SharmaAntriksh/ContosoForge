@@ -146,6 +146,7 @@ class SalesContext:
     customer_scd2_starts: Any = None    # (N_pool, max_ver) int64: version start epoch days
     customer_scd2_keys: Any = None      # (N_pool, max_ver) int32: CustomerKey per version
     cust_key_to_pool_idx: Any = None    # dense int32: IsCurrent CustomerKey → pool index
+    customer_first_eff_start_by_key: Any = None  # dense int64: CustomerKey → first EffectiveStartDate epoch days; INT64_MIN for unknown keys
 
     # -- Output config --
     file_format: Optional[str] = None
@@ -311,6 +312,7 @@ class State(metaclass=_SealableMeta):
     customer_scd2_starts = None     # np.ndarray (N_pool, max_ver) — version start epoch days
     customer_scd2_keys = None       # np.ndarray (N_pool, max_ver) — CustomerKey per version
     cust_key_to_pool_idx = None     # np.ndarray (max_key+1,) — IsCurrent CustomerKey → pool index
+    customer_first_eff_start_by_key = None  # np.ndarray (max_key+1,) — CustomerKey → first EffectiveStartDate epoch days; INT64_MIN for unknown keys
 
     # --------------------------------------------------------------
     # Output configuration

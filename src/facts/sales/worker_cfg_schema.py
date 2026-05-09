@@ -59,6 +59,7 @@ class SalesWorkerCfg(TypedDict, total=False):
     customer_end_month: Optional[np.ndarray]
     customer_base_weight: Optional[np.ndarray]
     customer_geo_key: Optional[np.ndarray]
+    customer_first_eff_start_by_key: Optional[np.ndarray]
 
     # -- Geography / currency ------------------------------------------------
     geo_to_currency: Optional[Dict[int, int]]
