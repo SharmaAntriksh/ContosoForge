@@ -239,7 +239,7 @@ def load_product_dimension(config, output_folder: Path, *, log_skip: bool = True
     # SupplierKey (deterministic)
     if sup_enabled:
         n_sup = int(supplier_keys.size)
-        base = pd.to_numeric(df.get("BaseProductKey", df["ProductKey"]), errors="coerce").fillna(0).astype("int64").to_numpy()
+        base = pd.to_numeric(df.get("BaseProductID", df["ProductKey"]), errors="coerce").fillna(0).astype("int64").to_numpy()
 
         if sup_strategy == "by_subcategory" and "SubcategoryKey" in df.columns:
             sub = pd.to_numeric(df["SubcategoryKey"], errors="coerce").fillna(0).astype("int64").to_numpy()
@@ -255,7 +255,7 @@ def load_product_dimension(config, output_folder: Path, *, log_skip: bool = True
     # Minimal required fields for Sales
     required = [
         "ProductKey",
-        "BaseProductKey",
+        "BaseProductID",
         "VariantIndex",
         "SubcategoryKey",
         "ListPrice",
@@ -321,7 +321,7 @@ _PRODUCTS_CORE_COLS = (
     "SubcategoryKey", "Brand", "Class", "Color",
     "StockTypeCode", "StockType",
     "UnitCost", "ListPrice",
-    "BaseProductKey", "VariantIndex",
+    "BaseProductID", "VariantIndex",
     "Source",
 )
 

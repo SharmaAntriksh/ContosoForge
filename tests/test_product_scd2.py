@@ -193,7 +193,7 @@ class TestSplitProductsAndProfile:
             "Brand": ["X", "X", "Y", "Y"],
             "ListPrice": [19.99, 21.99, 49.99, 54.99],
             "UnitCost": [10.0, 11.0, 25.0, 27.0],
-            "BaseProductKey": [10, 10, 20, 20],
+            "BaseProductID": [10, 10, 20, 20],
             "VariantIndex": [0, 0, 0, 0],
             # analytical attribute that should appear in profile
             "PopularityScore": [50, 50, 75, 75],

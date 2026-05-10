@@ -52,7 +52,7 @@ def base_products():
         "ProductName": [f"Product {i}" for i in range(1, 21)],
         "BrandName": [f"Brand{i % 3}" for i in range(20)],
         "Color": ["Red", "Blue", "Green", "Black", "White"] * 4,
-        "BaseProductKey": np.arange(1, 21, dtype=np.int64),
+        "BaseProductID": np.arange(1, 21, dtype=np.int64),
         "VariantIndex": np.zeros(20, dtype=np.int32),
     })
 
@@ -244,10 +244,10 @@ class TestExpandContosoProducts:
         )
 
     def test_trim_base_equals_product_key(self, base_products):
-        """In trim mode, BaseProductKey equals ProductKey (each is its own base)."""
+        """In trim mode, BaseProductID equals ProductKey (each is its own base)."""
         df = expand_contoso_products(base_products, num_products=10, seed=42)
         npt.assert_array_equal(
-            df["BaseProductKey"].to_numpy(),
+            df["BaseProductID"].to_numpy(),
             df["ProductKey"].to_numpy(),
         )
 
@@ -313,7 +313,7 @@ class TestExpandContosoProducts:
     def test_expand_variant_index_increments(self, base_products):
         """Each base product's variants should have incrementing VariantIndex."""
         df = expand_contoso_products(base_products, num_products=60, seed=42)
-        for _, grp in df.groupby("BaseProductKey"):
+        for _, grp in df.groupby("BaseProductID"):
             vi = grp["VariantIndex"].sort_values().to_numpy()
             assert vi[0] == 0
             # Each subsequent variant index should be one more than previous
@@ -452,12 +452,12 @@ class TestApplyProductPricing:
         npt.assert_array_equal(uc, np.round(uc, 2))
 
     def test_margin_mode_variants_share_cost(self):
-        """All variants of the same BaseProductKey must share UnitCost so
+        """All variants of the same BaseProductID must share UnitCost so
         catalog-level pricing is consistent (SCD2 drift later diverges them)."""
         df = pd.DataFrame({
             "ProductKey": np.arange(1, 7, dtype=np.int64),
             # 2 bases, 3 variants each
-            "BaseProductKey": np.array([1, 1, 1, 4, 4, 4], dtype=np.int64),
+            "BaseProductID": np.array([1, 1, 1, 4, 4, 4], dtype=np.int64),
             "VariantIndex": np.array([0, 1, 2, 0, 1, 2], dtype=np.int64),
             "SubcategoryKey": np.array([10, 10, 10, 20, 20, 20], dtype=np.int64),
             "ListPrice": np.array([99.99, 99.99, 99.99, 49.99, 49.99, 49.99]),
@@ -465,7 +465,7 @@ class TestApplyProductPricing:
         })
         cfg = self._margin_cfg()
         result = apply_product_pricing(df, cfg, seed=42)
-        for _, grp in result.groupby("BaseProductKey"):
+        for _, grp in result.groupby("BaseProductID"):
             assert grp["UnitCost"].nunique() == 1, "variants of same base must share UnitCost"
             assert grp["ListPrice"].nunique() == 1
 
@@ -474,7 +474,7 @@ class TestApplyProductPricing:
         n_bases = 50
         df = pd.DataFrame({
             "ProductKey": np.arange(1, n_bases + 1, dtype=np.int64),
-            "BaseProductKey": np.arange(1, n_bases + 1, dtype=np.int64),
+            "BaseProductID": np.arange(1, n_bases + 1, dtype=np.int64),
             "VariantIndex": np.zeros(n_bases, dtype=np.int64),
             "SubcategoryKey": np.full(n_bases, 10, dtype=np.int64),
             "ListPrice": np.full(n_bases, 100.0),
@@ -586,10 +586,10 @@ class TestEnrichProductsAttributes:
 
     @pytest.fixture
     def enrichable_products(self):
-        """Products suitable for enrichment (needs BaseProductKey)."""
+        """Products suitable for enrichment (needs BaseProductID)."""
         return pd.DataFrame({
             "ProductKey": np.arange(1, 11, dtype=np.int64),
-            "BaseProductKey": np.arange(1, 11, dtype=np.int64),
+            "BaseProductID": np.arange(1, 11, dtype=np.int64),
             "SubcategoryKey": np.tile([10, 20, 30, 40], 3)[:10].astype(np.int64),
             "ListPrice": np.linspace(20.0, 200.0, 10),
             "UnitCost": np.linspace(10.0, 100.0, 10),
@@ -652,11 +652,11 @@ class TestEnrichProductsAttributes:
         assert (df.loc[blue_rows, "ColorFamily"] == "Blue").all()
 
     def test_variant_consistency(self, subcategory_parquet):
-        """Products sharing the same BaseProductKey should get identical
+        """Products sharing the same BaseProductID should get identical
         hash-derived attributes (Material, Style, etc.)."""
         df = pd.DataFrame({
             "ProductKey": np.arange(1, 7, dtype=np.int64),
-            "BaseProductKey": np.array([1, 1, 1, 2, 2, 2], dtype=np.int64),
+            "BaseProductID": np.array([1, 1, 1, 2, 2, 2], dtype=np.int64),
             "SubcategoryKey": np.array([10, 10, 10, 20, 20, 20], dtype=np.int64),
             "ListPrice": [50.0, 55.0, 60.0, 100.0, 110.0, 120.0],
             "UnitCost": [25.0, 27.5, 30.0, 50.0, 55.0, 60.0],
@@ -668,14 +668,14 @@ class TestEnrichProductsAttributes:
             df, {}, seed=42,
             output_folder=subcategory_parquet,
         )
-        # All variants of BaseProductKey=1 should share Material
-        grp1 = result[result["BaseProductKey"] == 1]
+        # All variants of BaseProductID=1 should share Material
+        grp1 = result[result["BaseProductID"] == 1]
         assert grp1["Material"].nunique() == 1
         assert grp1["Style"].nunique() == 1
         assert grp1["ProductLine"].nunique() == 1
 
-        # Same for BaseProductKey=2
-        grp2 = result[result["BaseProductKey"] == 2]
+        # Same for BaseProductID=2
+        grp2 = result[result["BaseProductID"] == 2]
         assert grp2["Material"].nunique() == 1
 
     def test_weight_non_negative(self, enrichable_products, subcategory_parquet):
@@ -721,7 +721,7 @@ class TestEnrichProductsAttributes:
         rng = np.random.default_rng(0)
         df = pd.DataFrame({
             "ProductKey": np.arange(1, n + 1, dtype=np.int64),
-            "BaseProductKey": np.arange(1, n + 1, dtype=np.int64),
+            "BaseProductID": np.arange(1, n + 1, dtype=np.int64),
             "SubcategoryKey": rng.choice([10, 20, 30, 40], size=n).astype(np.int64),
             "ListPrice": rng.uniform(20.0, 200.0, n),
             "UnitCost": rng.uniform(10.0, 100.0, n),

@@ -200,7 +200,7 @@ def _sample_margin_per_base(
     """Sample one margin per unique base key, broadcast back to per-row.
 
     When ``base_keys`` is None, falls back to per-row sampling (used for
-    callers that don't carry BaseProductKey, e.g., direct unit tests).
+    callers that don't carry BaseProductID, e.g., direct unit tests).
     All variants of the same base get the same margin, so per-variant
     UnitCost is consistent at catalog generation time — divergence only
     happens later via SCD2 price drift.
@@ -213,10 +213,10 @@ def _sample_margin_per_base(
 
 
 def _resolve_base_keys(out: pd.DataFrame) -> np.ndarray | None:
-    """Return BaseProductKey as int64 array, or None if column missing."""
-    if "BaseProductKey" not in out.columns:
+    """Return BaseProductID as int64 array, or None if column missing."""
+    if "BaseProductID" not in out.columns:
         return None
-    arr = pd.to_numeric(out["BaseProductKey"], errors="coerce")
+    arr = pd.to_numeric(out["BaseProductID"], errors="coerce")
     if arr.isna().any():
         return None
     return arr.to_numpy(dtype=np.int64, copy=False)
@@ -231,7 +231,7 @@ def _sanitize_unit_cost_from_price(
 ) -> None:
     """
     If UnitCost has NaN/inf/negative values, fill using ListPrice and a margin band.
-    Margin is sampled per BaseProductKey (when supplied) so variants of
+    Margin is sampled per BaseProductID (when supplied) so variants of
     the same base get identical fills.
     """
     up = out["ListPrice"].to_numpy(dtype=np.float64, copy=False)

@@ -335,7 +335,7 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("StockType", VARCHAR(20, not_null=True)),
         ("UnitCost", DECIMAL(10, 2, not_null=True)),
         ("ListPrice", DECIMAL(10, 2, not_null=True)),
-        ("BaseProductKey", INT_NN),
+        ("BaseProductID", INT_NN),
         ("VariantIndex", INT_NN),
         ("Source", VARCHAR(20, not_null=True)),
     ),

@@ -162,7 +162,7 @@ def generate_scd2_versions(
     result["EffectiveEndDate"] = eff_end_arr
     result["IsCurrent"] = is_current_arr
 
-    # ProductKey becomes the per-version surrogate; ProductID/BaseProductKey
+    # ProductKey becomes the per-version surrogate; ProductID/BaseProductID
     # retain pre-SCD2 values for cross-version joins. See CLAUDE.md gotcha #25.
     result["ProductKey"] = np.arange(1, total_rows + 1, dtype="int64")
 

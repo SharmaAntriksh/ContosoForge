@@ -254,7 +254,7 @@ def enrich_products_attributes(
     out = df.copy()
 
     # Base keys
-    base = pd.to_numeric(out.get("BaseProductKey", out["ProductKey"]), errors="coerce").fillna(0).astype("int64").to_numpy()
+    base = pd.to_numeric(out.get("BaseProductID", out["ProductKey"]), errors="coerce").fillna(0).astype("int64").to_numpy()
     uniq_base, inv = np.unique(base, return_inverse=True)
     b_u64 = uniq_base.astype("uint64", copy=False)
 
@@ -614,9 +614,9 @@ def apply_post_merge_enrichment(df: pd.DataFrame, seed: int) -> pd.DataFrame:
     """
     out = df
 
-    # Recompute base key hash arrays (deterministic on BaseProductKey)
+    # Recompute base key hash arrays (deterministic on BaseProductID)
     base = pd.to_numeric(
-        out.get("BaseProductKey", out["ProductKey"]), errors="coerce"
+        out.get("BaseProductID", out["ProductKey"]), errors="coerce"
     ).fillna(0).astype("int64").to_numpy()
     uniq_base, inv = np.unique(base, return_inverse=True)
     b_u64 = uniq_base.astype("uint64", copy=False)

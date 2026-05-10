@@ -102,9 +102,9 @@ def expand_contoso_products(
       - If num_products > base_count: expand by repeating base rows (variants)
 
     Identity rules (consistent across trim/expand):
-      - BaseProductKey = original Contoso ProductKey
+      - BaseProductID = original Contoso ProductKey
       - ProductKey     = 1..num_products (dense surrogate)
-      - VariantIndex   = 0 for trimmed/no-op; 0.. for expanded per BaseProductKey
+      - VariantIndex   = 0 for trimmed/no-op; 0.. for expanded per BaseProductID
       - ProductCode    = zero-padded ProductKey (string)
 
     Pricing MUST be handled elsewhere (apply_product_pricing). price_jitter_pct is ignored.
@@ -142,7 +142,7 @@ def expand_contoso_products(
         trimmed["ProductKey"] = np.arange(1, num_products + 1, dtype=np.int64)
 
         # No variants when trimmed: each product IS its own base
-        trimmed["BaseProductKey"] = trimmed["ProductKey"].copy()
+        trimmed["BaseProductID"] = trimmed["ProductKey"].copy()
 
         trimmed["VariantIndex"] = np.zeros(num_products, dtype=np.int64)
 
@@ -167,11 +167,11 @@ def expand_contoso_products(
     # Variant index per original Contoso product
     expanded["VariantIndex"] = original_key.groupby(original_key).cumcount().astype("int64")
 
-    # Map BaseProductKey to the NEW ProductKey of each group's first variant (VariantIndex=0)
+    # Map BaseProductID to the NEW ProductKey of each group's first variant (VariantIndex=0)
     base_map = expanded.loc[expanded["VariantIndex"] == 0, ["ProductKey"]].copy()
     base_map["_orig"] = original_key[expanded["VariantIndex"] == 0].values
     orig_to_new = base_map.set_index("_orig")["ProductKey"]
-    expanded["BaseProductKey"] = original_key.map(orig_to_new).astype("int64")
+    expanded["BaseProductID"] = original_key.map(orig_to_new).astype("int64")
 
     # ProductCode
     expanded["ProductCode"] = expanded["ProductKey"].astype(str).str.zfill(7)
