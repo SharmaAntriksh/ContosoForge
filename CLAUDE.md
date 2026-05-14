@@ -344,7 +344,7 @@ pytest --lf            # rerun only last-failed tests
 pytest --co            # list tests without running
 ```
 
-Test files: `tests/test_config_loader.py`, `test_pricing_pipeline.py`, `test_quantity_model.py`, `test_geography.py`, `test_customer_profiles.py`, `test_version_store.py`, `test_state.py`, `test_determinism.py`, `test_integration.py`, `test_web_api.py`, `test_dimensions.py`, `test_packaging.py`, `test_sales_logic.py`, `test_utils.py`, `test_web_routes.py`, `test_schema.py`, `test_gotchas_and_guards.py`, `test_products.py`, `test_sales_writer.py`, `test_sql_tools.py`, `test_dates.py` (1437+ tests; web API/route tests require `httpx` and are skipped without it).
+Test files: `tests/test_config_loader.py`, `test_pricing_pipeline.py`, `test_quantity_model.py`, `test_geography.py`, `test_customer_profiles.py`, `test_version_store.py`, `test_state.py`, `test_determinism.py`, `test_integration.py`, `test_web_api.py`, `test_dimensions.py`, `test_packaging.py`, `test_sales_logic.py`, `test_utils.py`, `test_web_routes.py`, `test_schema.py`, `test_gotchas_and_guards.py`, `test_products.py`, `test_sales_writer.py`, `test_sql_tools.py`, `test_dates.py`. Web API/route tests require `httpx` and are skipped without it.
 
 ## Output Formats
 

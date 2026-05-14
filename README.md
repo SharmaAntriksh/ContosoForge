@@ -10,7 +10,16 @@ Every run is **deterministic**, **schema-stable**, and **idempotent**, making th
 
 The generator produces a full star-schema data model across dimension and fact tables.
 
-**Dimension tables:** Customers, CustomerProfile, OrganizationProfile, Products, ProductProfile, ProductCategory, ProductSubcategory, Stores, Employees, EmployeeStoreAssignments, Dates (calendar + fiscal + weekly fiscal), Time, Geography, Currency, ExchangeRates, Promotions, Suppliers, Plans, CustomerSubscriptions, LoyaltyTiers, SalesChannels, CustomerAcquisitionChannels, ReturnReason
+**Dimension tables:**
+
+| Group | Tables |
+|---|---|
+| Customers & accounts | Customers, CustomerProfile, OrganizationProfile, Plans, CustomerSubscriptions, LoyaltyTiers, CustomerAcquisitionChannels |
+| Products & catalog | Products, ProductProfile, ProductCategory, ProductSubcategory, Suppliers, Promotions |
+| Locations & org | Stores, Employees, EmployeeStoreAssignments, Geography |
+| Time | Dates (calendar + fiscal + weekly fiscal), Time |
+| Currency | Currency, ExchangeRates |
+| Other lookups | SalesChannels, ReturnReason |
 
 **Fact tables:** Sales (flat or split into SalesOrderHeader + SalesOrderDetail), SalesReturn, BudgetYearly, BudgetMonthly, InventorySnapshot, CustomerWishlists, Complaints
 
@@ -105,7 +114,7 @@ python main.py \
   --clean
 ```
 
-The 5 most-used flags are `--format`, `--sales-rows`, `--customers`, `--workers`, and `--clean`. For the full CLI surface (every flag, common patterns, override precedence), see [docs/cli-reference.md](docs/cli-reference.md).
+The 5 most-used flags are `--format`, `--sales-rows`, `--customers`, `--workers`, and `--clean`. For the full CLI surface (every flag, common patterns, override precedence), see the [CLI reference](docs/cli-reference.md).
 
 ### 3. Explore the output
 
@@ -144,9 +153,9 @@ generated_datasets/
 
 The generator is driven by two YAML files at the project root.
 
-- **`config.yaml`** — controls the **shape and scale** of the dataset: row counts, entity counts, date ranges, output format, parallelism, and feature toggles. Full reference: [docs/CONFIG_GUIDE.md](docs/CONFIG_GUIDE.md).
+- **`config.yaml`** — controls the **shape and scale** of the dataset: row counts, entity counts, date ranges, output format, parallelism, and feature toggles. Full reference: [CONFIG_GUIDE](docs/CONFIG_GUIDE.md).
 
-- **`models.yaml`** — controls **how sales behave**: demand curves, pricing dynamics, basket sizes, brand popularity, return patterns, and the overall business shape via [trend presets](docs/MODELS_GUIDE.md#available-presets). Not overridable via CLI — edit directly or via the web UI. Full reference: [docs/MODELS_GUIDE.md](docs/MODELS_GUIDE.md).
+- **`models.yaml`** — controls **how sales behave**: demand curves, pricing dynamics, basket sizes, brand popularity, return patterns, and the overall business shape via [trend presets](docs/MODELS_GUIDE.md#available-presets). Not overridable via CLI — edit directly or via the web UI. Full reference: [MODELS_GUIDE](docs/MODELS_GUIDE.md).
 
 CLI flags override `config.yaml` values for the current run only — they are not persisted.
 
@@ -160,12 +169,12 @@ Post-generation utilities for tuning, repartitioning, and importing generated da
 
 | Task | Script | Docs |
 |---|---|---|
-| Re-compress / re-row-group Parquet output | `scripts/optimize_parquet.py` | [docs/operations/parquet-optimization.md](docs/operations/parquet-optimization.md) |
-| Compact small Delta Lake files | `scripts/optimize_delta.py` | [docs/operations/delta-optimization.md](docs/operations/delta-optimization.md) |
-| Change Delta Lake partition layout | `scripts/repartition_delta.py` | [docs/operations/delta-repartitioning.md](docs/operations/delta-repartitioning.md) |
-| Import CSV output to SQL Server | `scripts/run_sql_server_import.ps1` | [docs/operations/sql-server-import.md](docs/operations/sql-server-import.md) |
-| Provision a SQL login for SSAS / Power BI | (same import script) | [docs/operations/tabular-user.md](docs/operations/tabular-user.md) |
-| Post-import admin & verify procedures | (generated SQL) | [docs/operations/post-import-procedures.md](docs/operations/post-import-procedures.md) |
+| Re-compress / re-row-group Parquet output | `scripts/optimize_parquet.py` | [parquet-optimization](docs/operations/parquet-optimization.md) |
+| Compact small Delta Lake files | `scripts/optimize_delta.py` | [delta-optimization](docs/operations/delta-optimization.md) |
+| Change Delta Lake partition layout | `scripts/repartition_delta.py` | [delta-repartitioning](docs/operations/delta-repartitioning.md) |
+| Import CSV output to SQL Server | `scripts/run_sql_server_import.ps1` | [sql-server-import](docs/operations/sql-server-import.md) |
+| Provision a SQL login for SSAS / Power BI | (same import script) | [tabular-user](docs/operations/tabular-user.md) |
+| Post-import admin & verify procedures | (generated SQL) | [post-import-procedures](docs/operations/post-import-procedures.md) |
 
 ---
 
@@ -207,7 +216,7 @@ Each output includes a Power BI Project (`.pbip`) template with pre-configured f
 
 ## Testing
 
-The project includes 1437+ tests covering config validation, pricing pipeline, quantity model, geography, trend presets, version store, state management, determinism guarantees, edge-case guards, web API, packaging, sales logic, schema validation, product dimensions, sales writer, SQL tools, and date dimension edge cases.
+The project includes an extensive test suite covering config validation, pricing pipeline, quantity model, geography, trend presets, version store, state management, determinism guarantees, edge-case guards, web API, packaging, sales logic, schema validation, product dimensions, sales writer, SQL tools, and date dimension edge cases.
 
 ```bash
 # Run all tests
@@ -230,11 +239,11 @@ pytest --lf
 
 | Topic | Doc |
 |---|---|
-| Full CLI flag reference | [docs/cli-reference.md](docs/cli-reference.md) |
-| `config.yaml` reference | [docs/CONFIG_GUIDE.md](docs/CONFIG_GUIDE.md) |
-| `models.yaml` reference + trend presets | [docs/MODELS_GUIDE.md](docs/MODELS_GUIDE.md) |
-| Pipeline architecture | [docs/PIPELINE_FLOWCHART.md](docs/PIPELINE_FLOWCHART.md) |
-| Operations (parquet, delta, SQL import) | [docs/operations/](docs/operations/) |
+| Full CLI flag reference | [cli-reference](docs/cli-reference.md) |
+| `config.yaml` reference | [CONFIG_GUIDE](docs/CONFIG_GUIDE.md) |
+| `models.yaml` reference + trend presets | [MODELS_GUIDE](docs/MODELS_GUIDE.md) |
+| Pipeline architecture | [PIPELINE_FLOWCHART](docs/PIPELINE_FLOWCHART.md) |
+| Operations (parquet, delta, SQL import) | [operations/](docs/operations/) |
 
 ---
 
