@@ -8,8 +8,8 @@
 scale:
   sales_rows: 1003295
   products:
-    catalog: all                    # contoso (original 2517) | synthetic (4839) | all (combined - 7136)
-    rows: 7136                      # target product count (trims or expands to fit)
+    catalog: all                    # contoso (original 2517) | synthetic (5633) | all (combined - 7930)
+    rows: 7930                      # target product count (trims or expands to fit)
   customers: 42851
   stores: 200
   promotions: { seasonal: 11, clearance: 4, limited: 5, flash: 6, volume: 4, loyalty: 3, bundle: 3, new_customer: 3 }

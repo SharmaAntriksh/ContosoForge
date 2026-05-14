@@ -707,6 +707,158 @@ TEMPLATES: dict[int, dict] = {
         "price_range": (50, 600),
         "brands": ["LG"],
     },
+
+    # =================================================================
+    # Backfill for ContosoRetailDW subcategories that shipped with no
+    # products in the source data.  Each was empty in both
+    # contoso_products.parquet and the synthetic catalog, so no sales
+    # could ever reference them.  Templates use modern real-world brands
+    # and price bands aligned with current retail.
+    # =================================================================
+
+    # --- Audio (cat 1) ---
+    2: {  # Recorder — voice / field / dictation recorders
+        "specs": ["Digital Voice Recorder", "Pocket Dictation Recorder",
+                  "Stereo Field Recorder", "Handheld Audio Recorder",
+                  "Lavalier Recorder Kit", "Podcast Recorder 4-Track"],
+        "colors": ["Black", "Silver"],
+        "classes": ["Regular", "Deluxe"],
+        "price_range": (30, 500),
+        "brands": ["Sony", "Olympus", "Tascam", "Zoom", "Philips"],
+    },
+    3: {  # Radio — portable / clock / shortwave / tabletop
+        "specs": ["Portable AM/FM Radio", "Clock Radio with USB",
+                  "Shortwave World Receiver", "DAB+ Digital Radio",
+                  "Emergency Hand-Crank Radio", "Tabletop Bluetooth Radio"],
+        "colors": ["Black", "White", "Silver", "Walnut", "Red"],
+        "classes": ["Economy", "Regular", "Deluxe"],
+        "price_range": (18, 400),
+        "brands": ["Sony", "Panasonic", "Sangean", "Bose", "Tivoli"],
+    },
+    5: {  # Headphones — wired / studio / audiophile (sub 6 covers BT)
+        "specs": ["Studio Monitor Headphones", "Open-Back Audiophile Headphones",
+                  "Closed-Back Reference Headphones", "Wired In-Ear Monitors",
+                  "DJ Headphones", "Planar Magnetic Headphones",
+                  "Wired Gaming Headset"],
+        "colors": ["Black", "Silver", "White", "Red"],
+        "classes": ["Economy", "Regular", "Deluxe"],
+        "price_range": (35, 700),
+        "brands": ["Sony", "Sennheiser", "Audio-Technica", "Beyerdynamic",
+                   "AKG", "Shure"],
+    },
+    7: {  # Speakers — bookshelf / tower / portable / smart
+        "specs": ["Bookshelf Speakers Pair", "Floorstanding Tower Speakers",
+                  "Center Channel Speaker", "Bluetooth Portable Speaker",
+                  "Smart Wi-Fi Speaker", "Outdoor Patio Speakers Pair",
+                  "Powered Subwoofer 10in"],
+        "colors": ["Black", "White", "Walnut", "Grey"],
+        "classes": ["Regular", "Deluxe"],
+        "price_range": (45, 2200),
+        "brands": ["JBL", "Bose", "Sony", "Sonos", "Klipsch", "KEF"],
+    },
+    8: {  # Audio Accessories — cables / stands / DACs / adapters
+        "specs": ["3.5mm Audio Cable 6ft", "Optical Toslink Cable 6ft",
+                  "Headphone Stand Aluminum", "Bluetooth Audio Receiver",
+                  "RCA Stereo Cable 6ft", "Banana Plug Connectors 12pk",
+                  "Headphone Splitter 4-Way", "USB DAC Headphone Amplifier",
+                  "Speaker Wire 14AWG 50ft"],
+        "colors": ["Black", "Silver", "White"],
+        "classes": ["Economy", "Regular", "Deluxe"],
+        "price_range": (5, 300),
+        "brands": ["Anker", "Belkin", "AudioQuest", "Mediabridge", "FiiO",
+                   "Monoprice"],
+    },
+
+    # --- TV and Video (cat 2) ---
+    14: {  # TV & Video Accessories — mounts / cables / streaming / remotes
+        "specs": ["TV Wall Mount Tilt 32-65in",
+                  "TV Wall Mount Full Motion 55-90in",
+                  "HDMI 2.1 Cable 6ft", "Streaming Stick 4K HDR",
+                  "Universal Remote Control", "TV Antenna Indoor HD",
+                  "Coaxial Cable 25ft", "Swivel TV Stand 55in",
+                  "Streaming Box 4K"],
+        "colors": ["Black", "White", "Silver"],
+        "classes": ["Economy", "Regular", "Deluxe"],
+        "price_range": (8, 300),
+        "brands": ["Roku", "Amazon", "Logitech", "Sanus", "Anker",
+                   "Mediabridge", "Mohu"],
+    },
+
+    # --- Computers (cat 3) ---
+    16: {  # Netbooks — Chromebooks / mini laptops / convertibles
+        "specs": ["Chromebook 11.6in", "Chromebook 14in Touchscreen",
+                  "Convertible 2-in-1 Chromebook 11in",
+                  "Mini Laptop 12in", "Cloudbook 14in",
+                  "Education Chromebook 11in Rugged"],
+        "colors": ["Silver", "Black", "White", "Blue"],
+        "classes": ["Economy", "Regular"],
+        "price_range": (180, 700),
+        "brands": ["Acer", "Asus", "HP", "Lenovo", "Samsung"],
+    },
+    21: {  # Computer Setup & Service — house-brand services
+        "specs": ["In-Home Computer Setup", "Data Migration & Transfer Service",
+                  "Virus Removal & Cleanup", "Operating System Reinstall",
+                  "Annual Tech Support Plan", "Extended Warranty 2-Year",
+                  "Hardware Diagnostic Service", "Home Network Setup"],
+        "colors": ["N/A"],
+        "classes": ["Regular", "Deluxe"],
+        "price_range": (40, 400),
+        "brands": ["ProTech Services", "TechAssist", "GeekCare"],
+    },
+
+    # --- Cameras and camcorders (cat 4) ---
+    25: {  # Film Cameras — instant / 35mm / disposable
+        "specs": ["Instant Photo Camera Mini", "Wide-Format Instant Camera",
+                  "35mm Point & Shoot Camera", "35mm SLR Film Camera",
+                  "Disposable Camera 3-Pack", "Half-Frame 35mm Camera",
+                  "Instant Photo Camera Square"],
+        "colors": ["Black", "White", "Pink", "Blue", "Mint", "Beige"],
+        "classes": ["Economy", "Regular", "Deluxe"],
+        "price_range": (15, 400),
+        "brands": ["Fujifilm", "Kodak", "Lomography", "Polaroid", "Ilford"],
+    },
+
+    # --- Music, Movies and Audio Books (cat 6) ---
+    34: {  # Music CD — albums / compilations / box sets
+        "specs": ["Greatest Hits Album", "Live Concert Album",
+                  "Classical Symphony Collection", "Movie Soundtrack Album",
+                  "Holiday Music Album", "Jazz Standards Collection",
+                  "Rock Anthology 2-Disc Set", "Pop Hits Compilation",
+                  "Deluxe Edition Box Set"],
+        "colors": ["N/A"],
+        "classes": ["Economy", "Regular", "Deluxe"],
+        "price_range": (8, 50),
+        "brands": ["Universal Music", "Sony Music", "Warner Music",
+                   "Capitol Records", "Decca", "Blue Note"],
+    },
+    36: {  # Audio Books — CD and digital format
+        "specs": ["Audio Book Bestseller Novel", "Audio Book Biography",
+                  "Audio Book Self-Help", "Audio Book Mystery & Thriller",
+                  "Audio Book Classic Literature",
+                  "Audio Book Business & Finance",
+                  "Audio Book Sci-Fi Series", "Audio Book Children's Collection",
+                  "Audio Book History"],
+        "colors": ["N/A"],
+        "classes": ["Economy", "Regular", "Deluxe"],
+        "price_range": (10, 60),
+        "brands": ["Audible Studios", "HarperAudio",
+                   "Penguin Random House Audio", "Macmillan Audio",
+                   "Hachette Audio", "Simon & Schuster Audio"],
+    },
+
+    # --- Games and Toys (cat 7) ---
+    40: {  # Games Accessories — controllers / headsets / docks / peripherals
+        "specs": ["Wireless Controller", "Gaming Headset Wireless",
+                  "Charging Dock Dual", "Racing Wheel & Pedals",
+                  "Arcade Fight Stick", "Console Carrying Case",
+                  "External Game Storage 1TB", "Mechanical Gaming Keyboard",
+                  "RGB Gaming Mouse"],
+        "colors": ["Black", "White", "Red", "Blue"],
+        "classes": ["Economy", "Regular", "Deluxe"],
+        "price_range": (18, 350),
+        "brands": ["Logitech", "Razer", "SteelSeries", "8BitDo", "HyperX",
+                   "Sony", "Microsoft", "PowerA"],
+    },
 }
 
 # Pre-built lookup: SubcategoryKey → SubcategoryLabel
