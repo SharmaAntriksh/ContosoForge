@@ -354,3 +354,36 @@ Inventory snapshot fact table: periodic stock levels by product and store.
 |-----|-------------|---------|
 | `inventory.shrinkage.enabled` | Enable inventory shrinkage (theft, damage, spoilage). Reduces on-hand quantities by a small percentage each period. | `true` |
 | `inventory.shrinkage.rate` | Monthly shrinkage rate as a fraction of on-hand stock. 0.02 = 2% of inventory is lost per month. | `0.02` |
+
+---
+
+## Scaling tips
+
+Chart quality and data realism depend on the balance between customers, sales rows, and date range.
+
+### Rules of thumb
+
+- **More customers relative to rows** → spikier, more realistic charts (each customer averages fewer orders, so monthly variation is visible)
+- **Fewer customers relative to rows** → smoother, flatter charts (law of large numbers averages out variance)
+- **Longer date ranges** → need fewer customers for the same row count (rows spread over more months)
+- **Target ~1.5 orders per customer per month**: `customers ≈ sales_rows / months / 1.5`
+
+### Recommended customer counts
+
+For visually interesting charts at ~1.5 orders/customer/month:
+
+| Sales Rows | 3 years (36 mo) | 6 years (72 mo) | 10 years (120 mo) | 20 years (240 mo) |
+|---|---|---|---|---|
+| 2M | 37K | 19K | 11K | 6K |
+| 10M | 185K | 93K | 56K | 28K |
+| 20M | 370K | 185K | 111K | 56K |
+| 100M | 1.85M | 925K | 555K | 278K |
+
+### Effects on output
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Charts look "too smooth" / flat | Too few customers relative to rows | Increase `customers` toward the table above |
+| Sparse purchase history per customer | Too many customers relative to rows | Decrease `customers`, or increase `sales_rows` |
+| Spiky charts with unrealistic gaps | Date range too long for row count | Increase `sales_rows` or narrow the date range |
+

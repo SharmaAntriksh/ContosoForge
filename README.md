@@ -105,6 +105,8 @@ python main.py \
   --clean
 ```
 
+The 5 most-used flags are `--format`, `--sales-rows`, `--customers`, `--workers`, and `--clean`. For the full CLI surface (every flag, common patterns, override precedence), see [docs/cli-reference.md](docs/cli-reference.md).
+
 ### 3. Explore the output
 
 Generated datasets land in `generated_datasets/` with a timestamped folder name like:
@@ -118,54 +120,22 @@ generated_datasets/
       │   ├── config.yaml
       │   └── models.yaml
       ├── dimensions/
-      │   ├── currency.csv
-      │   ├── customer_acquisition_channels.csv
-      │   ├── customer_profile.csv
-      │   ├── customer_subscriptions.csv       ← if subscriptions enabled
       │   ├── customers.csv
-      │   ├── dates.csv
-      │   ├── employee_store_assignments.csv
-      │   ├── employees.csv
-      │   ├── exchange_rates.csv
-      │   ├── geography.csv
-      │   ├── loyalty_tiers.csv
-      │   ├── organization_profile.csv
-      │   ├── plans.csv                        ← if subscriptions enabled
-      │   ├── product_category.csv
-      │   ├── product_profile.csv
-      │   ├── product_subcategory.csv
       │   ├── products.csv
-      │   ├── promotions.csv
-      │   ├── return_reason.csv
-      │   ├── sales_channels.csv
       │   ├── stores.csv
-      │   ├── suppliers.csv
-      │   └── time.csv
+      │   ├── dates.csv
+      │   └── ... (22 dimension tables total)
       ├── facts/
-      │   ├── budget/                          ← if budget enabled
-      │   │   ├── budget_monthly.csv
-      │   │   └── budget_yearly.csv
-      │   ├── complaints/                      ← if complaints enabled
-      │   │   └── complaints.csv
-      │   ├── customer_wishlists/              ← if wishlists enabled
-      │   │   └── customer_wishlists.csv
-      │   ├── inventory/                       ← if inventory enabled
-      │   │   └── inventory_snapshot.csv
       │   ├── sales/
-      │   │   └── sales_chunk0000.csv
-      │   └── sales_return/                    ← if returns enabled
-      │       └── sales_return_chunk0000.csv
-      └── sql/
-          ├── indexes/
-          │   └── create_drop_cci.sql
+      │   ├── sales_return/                    ← if returns enabled
+      │   ├── budget/                          ← if budget enabled
+      │   ├── inventory/                       ← if inventory enabled
+      │   ├── customer_wishlists/              ← if wishlists enabled
+      │   └── complaints/                      ← if complaints enabled
+      └── sql/                                 ← CSV mode only
+          ├── schema/
           ├── load/
-          │   ├── 01_bulk_insert_dims.sql
-          │   └── 02_bulk_insert_facts.sql
-          └── schema/
-              ├── 01_create_dimensions.sql
-              ├── 02_create_facts.sql
-              ├── 03_create_constraints.sql
-              └── 04_create_views.sql
+          └── indexes/
 ```
 
 ---
@@ -174,339 +144,28 @@ generated_datasets/
 
 The generator is driven by two YAML files at the project root.
 
-### `config.yaml` — what to generate
+- **`config.yaml`** — controls the **shape and scale** of the dataset: row counts, entity counts, date ranges, output format, parallelism, and feature toggles. Full reference: [docs/CONFIG_GUIDE.md](docs/CONFIG_GUIDE.md).
 
-Controls the shape and scale of the dataset: row counts, date ranges, customer profiles, store settings, output format, and feature toggles. Key sections:
+- **`models.yaml`** — controls **how sales behave**: demand curves, pricing dynamics, basket sizes, brand popularity, return patterns, and the overall business shape via [trend presets](docs/MODELS_GUIDE.md#available-presets). Not overridable via CLI — edit directly or via the web UI. Full reference: [docs/MODELS_GUIDE.md](docs/MODELS_GUIDE.md).
 
-| Section | What it controls |
-|---|---|
-| `scale` | Row/entity counts — sales rows, products (with catalog selection: `contoso` / `synthetic` / `all`), customers, stores, promotions |
-| `defaults` | Global seed and date range (`start` / `end`) |
-| `sales` | Output format, merge settings, chunk/worker parallelism, compression |
-| `returns` | Return rate, timing window, enable/disable |
-| `customers` | Region mix (US/EU/India/Asia), org percentage, SCD2 versioning, first-year override |
-| `products` | Active ratio, price range, margin range, brand normalization, SCD2 price history. Catalog source (`contoso`/`synthetic`/`all`) is set via `scale.products.catalog` |
-| `stores` | Districts, regions, opening/closing dates, product assortment filtering |
-| `subscriptions` | Plans + CustomerSubscriptions bridge for DAX many-to-many patterns |
-| `employees` | Staff-per-store range, HR fields, store assignment rules with role profiles |
-| `dates` | Fiscal start month, calendar/ISO/fiscal/weekly-fiscal toggles |
-| `exchange_rates` | Currency list, base currency, volatility |
-| `budget` | Scenarios (Low/Medium/High), growth caps, weighting |
-| `inventory` | Snapshot grain, reorder compliance, shrinkage, ABC classification |
-| `wishlists` | Wishlist generation rate, priority distribution, seasonal patterns |
-| `complaints` | Complaint rate, severity distribution, resolution types |
+CLI flags override `config.yaml` values for the current run only — they are not persisted.
 
-### `models.yaml` — how sales behave
+For tuning the customer/row/date balance to get visually interesting charts, see [Scaling tips](docs/CONFIG_GUIDE.md#scaling-tips).
 
-Controls the realism of generated sales data and the overall business shape:
+---
 
-| Section | What it controls |
-|---|---|
-| `macro_demand` | **Trend preset** — the single knob that defines the business story (see below) |
-| `quantity` | Basket size distribution (Poisson lambda, monthly seasonality, noise) |
-| `pricing` | Inflation drift, markdown ladder, price snapping/rounding rules |
-| `brand_popularity` | Rotating "winner" brand boost each year |
-| `returns` | Return reason weights, lag day distribution, partial vs. full-line returns |
+## Operations
 
-### Trend presets
+Post-generation utilities for tuning, repartitioning, and importing generated datasets. Each script has its own reference doc with full flag coverage, recipes, and troubleshooting.
 
-The `macro_demand.trend` setting in `models.yaml` is the single source of business shape. Each preset defines a coherent story across revenue, customer acquisition, churn, and demand behavior.
-
-| Preset | Revenue Shape | Customer Curve |
+| Task | Script | Docs |
 |---|---|---|
-| `steady-growth` | Gentle 5%/yr upward line | Stable base, gradual acquisition |
-| `strong-growth` | Exponential acceleration | Continuously growing |
-| `gradual-growth` | S-curve with organic dips | Ramp then level off |
-| `hockey-stick` | Explosive years 4-6 | Rapid ramp |
-| `decline` | Steady year-over-year erosion | Shrinking (high churn) |
-| `new-market-entry` | Near-zero then accelerating | Slow start, late ramp |
-| `boom-and-bust` | Rapid rise then collapse | Rise then crash |
-| `recession-recovery` | U-shape dip and partial recovery | Stable |
-| `seasonal-dominant` | Flat trend, strong seasonal swings | Flat with seasonal waves |
-| `seasonal-with-growth` | Growth + retail seasonality | Growing with seasonal waves |
-| `plateau` | Growth for 4 years then flat | Growth then stable |
-| `volatile` | Wild year-to-year swings | Flat with noise |
-| `stagnation` | Perfectly flat | Perfectly flat |
-| `slow-decline` | Gentle ~10%/yr drop | Gradual erosion |
-| `double-dip` | Two distinct downturns | Gradual decline |
-
-### Scaling tips
-
-Chart quality depends on the balance between customers, sales rows, and date range:
-
-- **More customers relative to rows** → spikier, more realistic charts (each customer averages fewer orders, so monthly variation is visible)
-- **Fewer customers relative to rows** → smoother, flatter charts (law of large numbers averages out variance)
-- **Longer date ranges** → need fewer customers for the same row count (rows spread over more months)
-- **Rule of thumb:** target ~1.5 orders per customer per month → `customers ≈ sales_rows / months / 1.5`
-
-**Recommended customer counts** (for visually interesting charts at ~1.5 orders/customer/month):
-
-| Sales Rows | 5 years (60 mo) | 10 years (120 mo) | 20 years (240 mo) |
-|---|---|---|---|
-| 2M | 22K customers | 11K customers | 6K customers |
-| 20M | 222K customers | 111K customers | 56K customers |
-| 100M | 1.1M customers | 555K customers | 278K customers |
-
----
-
-## CLI Reference
-
-All CLI flags override their corresponding `config.yaml` values for the current run only.
-
-```
-python main.py [OPTIONS]
-```
-
-| Flag | Description |
-|---|---|
-| `--version` | Print version and exit |
-| `--format` | Output format: `csv`, `parquet`, `delta`, `deltaparquet` |
-| `--sales-rows N` | Number of sales rows to generate |
-| `--customers N` | Number of customers |
-| `--stores N` | Number of stores |
-| `--products N` | Number of products |
-| `--promotions N` | Total promotions (distributed across types) |
-| `--start-date YYYY-MM-DD` | Override global start date |
-| `--end-date YYYY-MM-DD` | Override global end date |
-| `--workers N` | Parallel worker count (default: auto-detect) |
-| `--chunk-size N` | Rows per processing chunk |
-| `--row-group-size N` | Parquet row group size |
-| `--skip-order-cols` | Omit SalesOrderNumber/LineNumber columns |
-| `--only dimensions\|sales` | Run only one pipeline stage |
-| `--regen-dimensions [names]` | Force regeneration of specific dimensions (e.g., `customers products` or `all`) |
-| `--clean` | Delete output folders before running |
-| `--dry-run` | Print resolved config and exit without generating |
-| `--config PATH` | Path to config file (default: `config.yaml`) |
-| `--models-config PATH` | Path to models config file (default: `models.yaml`) |
-
----
-
-## Parquet Optimization
-
-Re-compress and re-partition existing parquet output without regenerating data. Useful for tuning file size, compression codec, or row group size after a run.
-
-```powershell
-python scripts/optimize_parquet.py `
-  ".\generated_datasets\2026-03-28 01_03_23 PM Customers 89K Sales 21M PARQUET" `
-  -c snappy `
-  -r 1_000_000
-```
-
-| Flag | Description |
-|---|---|
-| `-c` / `--compression` | Codec: `snappy`, `zstd`, `gzip`, `brotli`, `lz4`, `none` (default: `zstd`) |
-| `-l` / `--level` | Compression level (codec-dependent, e.g. zstd 1-22) |
-| `-r` / `--row-group-size` | Target rows per row group (default: 1,000,000) |
-| `--in-place` | Overwrite originals instead of writing to a new folder |
-| `--dry-run` | Show what would be done without writing |
-
----
-
-## Delta Lake Optimization
-
-Compact small Delta Lake files into fewer, larger ones. Useful after `deltaparquet` runs where partitioned tables (Sales, InventorySnapshot) produce many small files from parallel chunk writes.
-
-```powershell
-python scripts/optimize_delta.py `
-  "generated_datasets\2026-03-29 07_11_29 PM Customers 43K Sales 1M DELTAPARQUET" `
-  --target-size 256 `
-  --min-files 5
-```
-
-Tables with 5 or fewer files are skipped automatically (dimensions, small facts). The script runs `OPTIMIZE` (compaction) and `VACUUM` (cleanup) on each qualifying Delta table.
-
-| Flag | Description |
-|---|---|
-| `--min-files N` | Skip tables with N or fewer files (default: 5) |
-| `--target-size MB` | Target file size after compaction in MB (default: 256) |
-| `--max-tasks N` | Max concurrent compaction tasks (default: CPU count) |
-
-**Partition tuning:** Inventory partitioning is controlled by `inventory.partition_by` in `config.yaml`. Default is `["Year"]`. Set to `["Year", "Month"]` for finer query pruning at the cost of more files, or `null` to disable partitioning entirely.
-
----
-
-## Delta Lake Repartitioning
-
-Change the partition layout of an already-generated Delta Lake dataset without regenerating data. Useful for switching between `Year`, `Year+Month`, or unpartitioned layouts after a run, or recompressing while repartitioning. Tables are streamed partition-by-partition to keep memory low; unpartitioned tables (dimensions, etc.) are skipped automatically.
-
-```powershell
-# Demote Year+Month -> Year (fewer, larger files)
-python scripts/repartition_delta.py `
-  "generated_datasets\2026-03-29 07_11_29 PM Customers 43K Sales 1M DELTAPARQUET" `
-  --partition-by year
-
-# Promote Year -> Year+Month (finer pruning)
-python scripts/repartition_delta.py "<dataset_folder>" --partition-by year-month
-
-# Remove partitions entirely (single consolidated table)
-python scripts/repartition_delta.py "<dataset_folder>" --partition-by none
-
-# Recompress while repartitioning
-python scripts/repartition_delta.py "<dataset_folder>" --partition-by year --compression ZSTD
-```
-
-| Flag | Description |
-|---|---|
-| <code>&#8209;&#8209;partition&#8209;by</code> | Target layout: `none`, `year`, or `year-month` (required) |
-| <code>&#8209;&#8209;compression</code> | Optional recompression codec: `UNCOMPRESSED`, `SNAPPY`, `GZIP`, `BROTLI`, `LZ4`, `ZSTD`, `LZ4_RAW` (default: keep existing) |
-
-Tables already at the requested layout are skipped. After repartitioning, run `optimize_delta.py` if you also want to compact small files within the new partitions.
-
----
-
-## SQL Server Import (CSV mode)
-
-When generating in CSV mode, the output includes auto-generated SQL scripts for bootstrapping a SQL Server database. Use the import script to load everything in one step.
-
-> If the target database already exists, the import is skipped automatically.
-
-**Windows Authentication (fast-load preset, recommended for large fact tables):**
-
-```powershell
-.\scripts\run_sql_server_import.ps1 `
-  -RunPath ".\generated_datasets\2026-03-26 06_40_28 PM Customers 29K Sales 1M CSV" `
-  -Server "YOURSERVER\SQL2022" `
-  -Database Sales1M `
-  -TrustedConnection `
-  -ApplyCCI $true `
-  -DropPKBeforeLoad `
-  -RestorePKAfterLoad `
-  -LoadWorkers 8 `
-  -Verify
-```
-
-**SQL Authentication:**
-
-```powershell
-.\scripts\run_sql_server_import.ps1 `
-  -RunPath ".\generated_datasets\<your-run-folder>" `
-  -Server "YOURSERVER\SQL2022" `
-  -Database ContosoSales `
-  -User sa `
-  -Password "YourPassword"
-```
-
-> SQL authentication requires Mixed Mode to be enabled on SQL Server.
-
-| Flag | Description |
-|---|---|
-| `-TrustedConnection` | Windows Authentication |
-| `-User`&nbsp;/&nbsp;`-Password` | SQL Authentication |
-| `-ApplyCCI $true` | Create clustered columnstore indexes after load |
-| `-DropPKBeforeLoad` | Drop PKs and FKs **before** the data load so parallel `BULK INSERT` runs into pure heaps. Removes per-row PK maintenance and FK validation — the main bottleneck for parallel loads. Definitions saved to `[admin].[_PK_Backup]`. |
-| `-RestorePKAfterLoad` | Restore PKs and FKs from `[admin].[_PK_Backup]` after load (and after CCI apply). Requires `-DropPKBeforeLoad`. Cannot be combined with `-DropPK`. |
-| `-DropPK $true` | Drop PKs and FKs **after** load (analytics-only end state, smallest DB). Keeps PKs and FKs active **during** the load, so SQL Server validates every row as it arrives. Slower than `-DropPKBeforeLoad` but fails fast on duplicate keys or orphan FKs — useful when loading manually-edited CSVs or debugging generator changes where the data may be untrusted. |
-| `-LoadWorkers <N>` | Parallel `BULK INSERT` worker count for multi-chunk fact tables (default `4`). Each worker holds its own pyodbc connection. Diminishing returns past ~8 on a single NVMe. |
-| `-Verify` | Run post-import data integrity checks (`verify.RunAll`) |
-| <nobr>`-ProvisionTabularUser`</nobr> | After import, ensure a SQL login + DB user exists with `DB_OWNER` (for SSAS Tabular / Power BI) |
-| `-TabularLogin` | Login name for the tabular user (default: `tabular_user`) |
-| `-TabularPassword` | `SecureString` password for the tabular user (alternative: `$env:SYNDATA_TABULAR_PASSWORD`) |
-
-The import creates all dimension and fact tables, applies PK/FK constraints, and creates analytical views.
-
-### Pick the right flag combination for your end-state
-
-| Goal | Flags | Notes |
-|---|---|---|
-| **Fast load + PKs/FKs intact + CCI** (recommended for SSAS / Power BI) | `-ApplyCCI $true -DropPKBeforeLoad -RestorePKAfterLoad -LoadWorkers 8` | Fastest end-to-end. Pre-drops constraints, parallel-loads heaps, applies CCI, re-adds PKs/FKs. |
-| **Fast load, analytics-only, smallest DB** | `-ApplyCCI $true -DropPKBeforeLoad -LoadWorkers 8` | Same fast load, but PKs/FKs stay dropped. Smallest final size. Can be restored later with `EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'`. |
-| **Safe load with row-by-row constraint validation** | (no PK flags) | Default behavior. PKs/FKs validated as data arrives. Slowest at scale, but defensive. |
-| **Defensive load + analytics-only end state** | `-ApplyCCI $true -DropPK $true` | Validates every row against PKs/FKs as it loads, then drops constraints for a small final DB. Use when CSVs are untrusted (manually edited, debugging generator changes, third-party data) — fails immediately on duplicates or orphan FKs instead of late at the restore step. Trades load speed for early-failure feedback. |
-
-For a 200M-row Sales fact table on a typical NVMe box with 8 cores, the fast-load preset cuts total import time from ~25 min (default behavior) to **~10 min** end-to-end. The biggest contributor is dropping FKs before load — Sales has 11 FK constraints, each adding per-row dimension lookups during `BULK INSERT`.
-
-Constraints can also be restored manually at any point with `EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'`.
-
-### Provisioning a Tabular User
-
-When importing into SSAS Tabular or Power BI, a dedicated SQL login is usually expected. `-ProvisionTabularUser` ensures one exists and is mapped into the imported database with `DB_OWNER`, so you don't have to create it by hand for every database.
-
-**Interactive (most common) — full flag set:**
-
-```powershell
-.\scripts\run_sql_server_import.ps1 `
-  -RunPath ".\generated_datasets\<your-run-folder>" `
-  -Server "SUMMER\SQL2025" `
-  -Database Sales2M `
-  -TrustedConnection `
-  -ApplyCCI $true `
-  -DropPKBeforeLoad `
-  -RestorePKAfterLoad `
-  -LoadWorkers 8 `
-  -Verify `
-  -ProvisionTabularUser `
-  -TabularLogin tabular_user
-# → Prompts: Enter password for tabular login [tabular_user]
-```
-
-**Pre-supplied password (scripted but still secure):**
-
-```powershell
-$sec = Read-Host -AsSecureString "Tabular password"
-
-.\scripts\run_sql_server_import.ps1 `
-  -RunPath ".\generated_datasets\<your-run-folder>" `
-  -Server "SUMMER\SQL2025" `
-  -Database Sales2M `
-  -TrustedConnection `
-  -ApplyCCI $true `
-  -DropPKBeforeLoad `
-  -RestorePKAfterLoad `
-  -LoadWorkers 8 `
-  -Verify `
-  -ProvisionTabularUser `
-  -TabularLogin tabular_user `
-  -TabularPassword $sec
-```
-
-**Automation / CI:**
-
-```powershell
-$env:SYNDATA_TABULAR_PASSWORD = "..."
-
-.\scripts\run_sql_server_import.ps1 `
-  -RunPath ".\generated_datasets\<your-run-folder>" `
-  -Server "SUMMER\SQL2025" `
-  -Database Sales2M `
-  -TrustedConnection `
-  -ApplyCCI $true `
-  -DropPKBeforeLoad `
-  -RestorePKAfterLoad `
-  -LoadWorkers 8 `
-  -Verify `
-  -ProvisionTabularUser `
-  -TabularLogin analytics_user
-```
-
-Password resolution order: `-TabularPassword` → `$env:SYNDATA_TABULAR_PASSWORD` → interactive prompt → error (non-interactive with no password set). The login name is validated against `^[A-Za-z_][A-Za-z0-9_]{0,127}$`. The same login can be reused across every imported database — re-running on a new database just adds a user mapping. The importing connection needs server-level rights (e.g. `securityadmin`) to create the login the first time; provisioning failures are non-fatal and logged as a warning.
-
-### Post-Import Stored Procedures
-
-The import generates stored procedures in the `admin` and `verify` schemas for ongoing management and data validation:
-
-**Admin procedures:**
-
-| Procedure | Description |
-|---|---|
-| `admin.ManageColumnstoreIndexes` | Create, drop, or rebuild clustered columnstore indexes on fact tables |
-| `admin.ManagePrimaryKeys` | Backup, drop, restore, or recreate PK/FK constraints (enables CCI swap) |
-
-**Verification procedures** (run individually or all at once with `verify.RunAll`):
-
-| Procedure | Description |
-|---|---|
-| `verify.RunAll` | Execute all verification checks and return a combined summary |
-| `verify.CrossDimension` | FK integrity between dimension tables (geography → stores, etc.) |
-| `verify.Customers` | Customer demographics: type distribution, household coverage, SCD2 validity |
-| `verify.EmployeeStoreSales` | Employee-store assignment coverage and sales attribution |
-| `verify.FactDistributions` | Sales amount, quantity, and discount statistical distributions |
-| `verify.Geography` | Geography completeness: all countries, states, and cities populated |
-| `verify.Products` | Product pricing sanity: margin ranges, active ratios, SCD2 consistency |
-| `verify.SalesRelationships` | FK integrity from sales → all dimension tables |
-| `verify.SecondaryFacts` | Budget, inventory, wishlists, and complaints row counts and FK checks |
-| `verify.Stores` | Store types, opening/closing dates, online vs physical distribution |
-| `verify.TemporalCoverage` | Date range coverage: sales span matches date dimension |
-| `verify.Warehouses` | Warehouse-store assignments and geographic coverage |
+| Re-compress / re-row-group Parquet output | `scripts/optimize_parquet.py` | [docs/operations/parquet-optimization.md](docs/operations/parquet-optimization.md) |
+| Compact small Delta Lake files | `scripts/optimize_delta.py` | [docs/operations/delta-optimization.md](docs/operations/delta-optimization.md) |
+| Change Delta Lake partition layout | `scripts/repartition_delta.py` | [docs/operations/delta-repartitioning.md](docs/operations/delta-repartitioning.md) |
+| Import CSV output to SQL Server | `scripts/run_sql_server_import.ps1` | [docs/operations/sql-server-import.md](docs/operations/sql-server-import.md) |
+| Provision a SQL login for SSAS / Power BI | (same import script) | [docs/operations/tabular-user.md](docs/operations/tabular-user.md) |
+| Post-import admin & verify procedures | (generated SQL) | [docs/operations/post-import-procedures.md](docs/operations/post-import-procedures.md) |
 
 ---
 
@@ -528,7 +187,7 @@ A web UI (FastAPI + React) is also available for interactive generation:
 
 ### SQL Server Import
 
-<img src="docs/assets/web-sqlserver-import.png" alt="Pipeline run status" width="700" />
+<img src="docs/assets/web-sqlserver-import.png" alt="SQL Server import UI" width="700" />
 
 ---
 
@@ -537,7 +196,6 @@ A web UI (FastAPI + React) is also available for interactive generation:
 <img src="docs/assets/output.png" alt="Output folder structure" width="700" />
 
 ---
-
 
 ## Power BI Data Model
 
@@ -567,6 +225,19 @@ pytest --lf
 ```
 
 ---
+
+## Documentation map
+
+| Topic | Doc |
+|---|---|
+| Full CLI flag reference | [docs/cli-reference.md](docs/cli-reference.md) |
+| `config.yaml` reference | [docs/CONFIG_GUIDE.md](docs/CONFIG_GUIDE.md) |
+| `models.yaml` reference + trend presets | [docs/MODELS_GUIDE.md](docs/MODELS_GUIDE.md) |
+| Pipeline architecture | [docs/PIPELINE_FLOWCHART.md](docs/PIPELINE_FLOWCHART.md) |
+| Operations (parquet, delta, SQL import) | [docs/operations/](docs/operations/) |
+
+---
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
