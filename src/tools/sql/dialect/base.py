@@ -52,6 +52,14 @@ class Dialect(ABC):
     # SQL Server: "bulk_insert"; Postgres: "copy"; etc. Also drives the
     # script banner ("Auto-generated <KIND_UPPER> script").
     load_script_kind: ClassVar[str] = "load"
+    # Default schema used when the orchestrator hands the dialect an
+    # unqualified table reference. Empty string means "rely on the
+    # connection's default" — true for SQL Server (which resolves
+    # ``BULK INSERT [Customers]`` against the session schema, usually
+    # ``dbo``). Postgres sets this to ``"dbo"`` because its session
+    # search_path defaults to ``public`` and the generated tables live
+    # in ``dbo``.
+    default_schema: ClassVar[str] = ""
     # One-line note prepended to load scripts under the timestamp banner,
     # typically calling out where the file path is resolved.
     load_script_note: ClassVar[str] = ""

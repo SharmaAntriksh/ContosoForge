@@ -18,6 +18,8 @@ row counts. Connection details mirror libpq env vars
 """
 from __future__ import annotations
 
+import re
+import shutil
 import time as _time
 from pathlib import Path
 
@@ -30,6 +32,9 @@ from src.tools.sql._import_common import (
     list_sql_files,
     ordered_load_files,
 )
+from src.tools.sql.dialect import PostgresDialect
+
+_DIALECT = PostgresDialect()
 
 try:  # psycopg 3
     import psycopg  # type: ignore
@@ -75,18 +80,72 @@ def _execute_script(conn, sql_file: Path) -> None:
         ) from exc
 
 
+# Pulls ``(target, path)`` pairs out of the generated COPY script so the
+# load can be executed client-side via ``COPY ... FROM STDIN``. The WITH
+# clause is intentionally ignored: every CSV the generator emits uses the
+# same options, so we just hard-code them in the STDIN statement below.
+_COPY_STATEMENT_RE = re.compile(
+    r'COPY\s+(?P<target>(?:"[^"]+"\."[^"]+"|"[^"]+"|[\w.]+))\s+'
+    r"FROM\s+'(?P<path>[^']+)'",
+    flags=re.IGNORECASE,
+)
+
+# psycopg's Copy.write() chunks into libpq's PQputCopyData, which itself
+# buffers; 1 MB minimises Python-level loop overhead for multi-GB files
+# without growing memory pressure meaningfully.
+_COPY_CHUNK_BYTES = 1 << 20
+
+_STDIN_COPY_OPTS = "FORMAT csv, HEADER true, ENCODING 'UTF8'"
+
+
+def _apply_copy_script_via_stdin(conn, sql_file: Path, *, run_dir: Path) -> None:
+    """Apply a generated COPY script using client-side STDIN streaming.
+
+    The generated load scripts use server-side ``COPY ... FROM '<path>'``,
+    which requires the Postgres server process to read the host filesystem
+    directly. On native Windows installs the service account often lacks
+    read permission on user-home directories; in Docker the host filesystem
+    isn't visible at all without a bind mount. To sidestep both, we parse
+    each ``COPY`` statement out of the script and execute it as
+    ``COPY ... FROM STDIN``, streaming the CSV bytes from this Python
+    process over the existing connection.
+    """
+    sql_text = _read_sql_text(sql_file)
+    matches = list(_COPY_STATEMENT_RE.finditer(sql_text))
+    if not matches:
+        return
+
+    with conn.cursor() as cur:
+        for m in matches:
+            target = m.group("target")
+            csv_path = Path(m.group("path"))
+            if not csv_path.is_file():
+                raise PostgresImportError(
+                    f"CSV not found for {target}: {csv_path}. "
+                    "Did the generated run move or get deleted?"
+                )
+            stmt = f"COPY {target} FROM STDIN WITH ({_STDIN_COPY_OPTS})"
+            try:
+                with cur.copy(stmt) as copy, csv_path.open("rb") as fh:
+                    shutil.copyfileobj(fh, copy, length=_COPY_CHUNK_BYTES)
+            except psycopg.Error as exc:  # type: ignore[union-attr]
+                raise PostgresImportError(
+                    f"COPY into {target} from {_short_path(csv_path, base=run_dir)} "
+                    f"failed: {exc}"
+                ) from exc
+
+
 def _database_exists(admin_conn, database: str) -> bool:
     with admin_conn.cursor() as cur:
         cur.execute("SELECT 1 FROM pg_database WHERE datname = %s;", (database,))
         return cur.fetchone() is not None
 
 
-def _create_database(admin_conn, database: str) -> None:
-    # CREATE DATABASE cannot run inside a transaction block.
-    admin_conn.autocommit = True
+def _create_database(admin_conn, database: str, dialect) -> None:
+    # CREATE DATABASE cannot run inside a transaction block; the caller is
+    # responsible for opening admin_conn with autocommit=True.
     with admin_conn.cursor() as cur:
-        ident = '"' + database.replace('"', '""') + '"'
-        cur.execute(f"CREATE DATABASE {ident};")
+        cur.execute(f"CREATE DATABASE {dialect.quote_ident(database)};")
 
 
 def _verify_row_counts(conn, *, dim_tables: list[str], fact_tables: list[str]) -> None:
@@ -171,16 +230,19 @@ def import_postgres(
     _log("INFO", f"  Database: {database}")
 
     # Step 1: create the database (connect to 'postgres' maintenance DB).
+    # CREATE DATABASE can't run in a transaction, so the admin connection
+    # opens in autocommit mode — psycopg won't let us flip it after the
+    # SELECT in _database_exists implicitly opens a transaction.
     admin_dsn = dict(host=host, port=port, dbname="postgres", user=user, password=password)
     try:
-        with pg.connect(**admin_dsn) as admin_conn:
+        with pg.connect(**admin_dsn, autocommit=True) as admin_conn:
             if _database_exists(admin_conn, database):
                 raise PostgresImportError(
                     f"Database '{database}' already exists. "
                     "Import aborted to avoid partial state. "
                     "Use a new database name or drop the database first."
                 )
-            _create_database(admin_conn, database)
+            _create_database(admin_conn, database, _DIALECT)
             _log("INFO", f"  Database: {database} (created)")
     except pg.Error as exc:
         raise PostgresImportError(
@@ -207,7 +269,7 @@ def import_postgres(
                 _t_load = _time.time()
                 _log("INFO", f"  Loading {section}")
                 _log("WORK", f"    {_short_path(load_file, base=run_dir)}")
-                _execute_script(conn, load_file)
+                _apply_copy_script_via_stdin(conn, load_file, run_dir=run_dir)
                 conn.commit()
                 _log("DONE", f"  Loading {section} completed in {_time.time() - _t_load:.1f}s")
 
