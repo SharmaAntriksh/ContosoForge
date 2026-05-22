@@ -157,6 +157,7 @@ def _verify_row_counts(conn, *, dim_tables: list[str], fact_tables: list[str]) -
     keeps ``n_live_tup`` close to real after COPY; an exact count would
     require a full scan and is rarely worth it for a load-time sanity check.
     """
+    default_schema = _DIALECT.default_schema
     sections = (("Dimensions", dim_tables), ("Facts", fact_tables))
     for title, tables in sections:
         if not tables:
@@ -170,9 +171,9 @@ def _verify_row_counts(conn, *, dim_tables: list[str], fact_tables: list[str]) -
                         "SELECT schemaname, n_live_tup "
                         "FROM pg_stat_user_tables "
                         "WHERE relname = %s "
-                        "ORDER BY (schemaname = 'dbo') DESC "
+                        "ORDER BY (schemaname = %s) DESC "
                         "LIMIT 1;",
-                        (t,),
+                        (t, default_schema),
                     )
                     row = cur.fetchone()
                     if not row:

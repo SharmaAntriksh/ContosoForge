@@ -22,11 +22,9 @@ from .base import ColumnSpec, Dialect, SqlType, sql_escape_literal
 class PostgresDialect(Dialect):
     name = "postgres"
     load_script_kind = "copy"
-    default_schema = "dbo"
-    # Generated DDL qualifies tables under ``default_schema`` to match SQL
-    # Server's convention. Postgres only ships the "public" schema, so we
-    # create the schema up front — keeps the script runnable via
-    # ``psql -f`` against a fresh database without a manual prep step.
+    default_schema = "public"
+    qualify_load_target = True
+    # Idempotent so the script runs even if "public" was dropped or renamed.
     script_preamble = (f'CREATE SCHEMA IF NOT EXISTS "{default_schema}";',)
     # COPY ... FROM is server-side: the path must be readable by the
     # Postgres server process. For local/Docker workflows where psql is

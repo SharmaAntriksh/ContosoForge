@@ -82,11 +82,13 @@ def create_table_from_schema(
     table_name: str,
     cols: Schema,
     *,
-    schema: str = "dbo",
+    schema: str | None = None,
     drop_existing: bool = True,
     include_batch_separator: bool = True,
     dialect: Dialect = DEFAULT_DIALECT,
 ) -> str:
+    if schema is None:
+        schema = dialect.default_schema
     _validate_sql_identifier(table_name, "table name")
     _validate_sql_identifier(schema, "schema name")
     fq_table = dialect.qualify(schema, table_name)
@@ -117,7 +119,7 @@ def generate_all_create_tables(
     cfg,
     skip_order_cols: bool = False,
     *,
-    schema: str = "dbo",
+    schema: str | None = None,
     drop_existing: bool = True,
     dialect: Dialect = DEFAULT_DIALECT,
 ):
@@ -131,6 +133,8 @@ def generate_all_create_tables(
       - get_sales_schema(skip_order_cols) for Sales
       - get_dates_schema(cfg['dates']) for Dates
     """
+    if schema is None:
+        schema = dialect.default_schema
 
     def _emit(table: str, cols: Schema) -> str:
         return create_table_from_schema(

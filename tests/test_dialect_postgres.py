@@ -183,11 +183,11 @@ class TestCreateTableFromSchemaPostgres:
         cols = [("Id", INT()), ("Name", VARCHAR(100)), ("Price", DECIMAL(10, 2))]
         sql = create_table_from_schema("Product", cols, dialect=self.dialect)
 
-        assert 'CREATE TABLE "dbo"."Product"' in sql
+        assert 'CREATE TABLE "public"."Product"' in sql
         assert '"Id" INTEGER NOT NULL' in sql
         assert '"Name" VARCHAR(100) NULL' in sql
         assert '"Price" DECIMAL(10, 2) NOT NULL' in sql
-        assert 'DROP TABLE IF EXISTS "dbo"."Product";' in sql
+        assert 'DROP TABLE IF EXISTS "public"."Product";' in sql
 
         assert "[" not in sql and "]" not in sql, "SQL Server brackets leaked"
         assert "IF OBJECT_ID" not in sql
@@ -261,7 +261,7 @@ class TestGenerateAllCreateTablesPostgres:
             # Postgres idioms present.
             assert "DROP TABLE IF EXISTS" in sql, f"{label}: missing DROP TABLE IF EXISTS"
             assert "CREATE TABLE" in sql, f"{label}: missing CREATE TABLE"
-            assert '"dbo".' in sql, f"{label}: schema not double-quoted"
+            assert '"public".' in sql, f"{label}: schema not double-quoted"
 
     def test_postgres_output_differs_from_sqlserver(self, tmp_path) -> None:
         """Sanity: rerunning with SQL Server produces different bytes."""

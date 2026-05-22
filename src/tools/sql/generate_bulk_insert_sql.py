@@ -223,7 +223,7 @@ def generate_bulk_insert_script(
                 continue
 
         schema, table = _split_qualified(tgt)
-        if not schema:
+        if not schema and dialect.qualify_load_target:
             schema = dialect.default_schema
         rel_hint = str(csv_path.relative_to(csv_folder)) if recursive else csv_path.name
 

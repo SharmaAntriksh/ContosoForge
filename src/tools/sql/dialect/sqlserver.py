@@ -14,6 +14,7 @@ from .base import ColumnSpec, Dialect, SqlType, sql_escape_literal
 class SqlServerDialect(Dialect):
     name = "sqlserver"
     batch_separator = "GO"
+    default_schema = "dbo"
     script_preamble = ("SET NOCOUNT ON;",)
     load_script_kind = "bulk_insert"
     load_script_note = "-- NOTE: 'FROM <path>' is evaluated on the SQL Server host."
