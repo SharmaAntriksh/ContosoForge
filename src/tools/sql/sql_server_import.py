@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Iterable, List, Tuple
 
 from src.exceptions import SqlServerImportError
+from src.tools.sql._import_common import (
+    _extract_tables_from_create_sql,
+    _log,
+    _short_path,
+    find_create_sql as _find_create_sql,
+    list_sql_files,
+    ordered_load_files,
+)
 from src.tools.sql.sql_helpers import sql_escape_literal
 
 try:
@@ -36,80 +44,8 @@ _CT_FK = "FK"
 
 
 
-# -------------------------
-# Formatting helpers
-# -------------------------
-def _ts() -> str:
-    return datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
-
-
-# ANSI color codes matching the pipeline's logging_utils.py
-_COLORS = {
-    "INFO": "\033[94m",   # Blue
-    "WORK": "\033[93m",   # Yellow
-    "DONE": "\033[92m",   # Green
-    "PASS": "\033[92m",   # Green (verification checks)
-    "SKIP": "\033[90m",   # Grey
-    "WARN": "\033[95m",   # Magenta
-    "FAIL": "\033[91m",   # Red
-    "LOAD": "\033[93m",   # Yellow (same as WORK)
-    "RESET": "\033[0m",
-}
-
-# Detect color support once
-_USE_COLOR = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-
-
-def _log(level: str, msg: str) -> None:
-    if _USE_COLOR:
-        c = _COLORS.get(level, "")
-        r = _COLORS["RESET"]
-        print(f"{_ts()} | {c}{level:<4}{r} | {msg}")
-    else:
-        print(f"{_ts()} | {level:<4} | {msg}")
-
-
-def _extract_tables_from_create_sql(sql_file: "Path") -> list[str]:
-    """
-    Extract table names from a CREATE TABLE script in execution order.
-    Works with: CREATE TABLE dbo.Table, CREATE TABLE [dbo].[Table], CREATE TABLE [Table]
-    """
-    try:
-        txt = sql_file.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return []
-
-    out: list[str] = []
-    seen: set[str] = set()
-
-    for raw in txt.splitlines():
-        line = re.sub(r"--.*$", "", raw).strip()
-        if not line:
-            continue
-        if "CREATE" not in line.upper() or "TABLE" not in line.upper():
-            continue
-
-        m = re.search(
-            r"CREATE\s+TABLE\s+"
-            r"(?:(?:\[\s*(?P<s1>\w+)\s*\]|\b(?P<s2>\w+)\b)\s*\.\s*)?"
-            r"(?:\[\s*(?P<t1>\w+)\s*\]|(?P<t2>\w+))",
-            line,
-            flags=re.IGNORECASE,
-        )
-        if not m:
-            continue
-
-        table = (m.group("t1") or m.group("t2") or "").strip()
-        if not table:
-            continue
-        if table.lower() in {"if", "exists"}:
-            continue
-
-        if table not in seen:
-            seen.add(table)
-            out.append(table)
-
-    return out
+# Importer logging helpers (_ts, _log, _COLORS), _extract_tables_from_create_sql,
+# and _short_path are imported from _import_common above.
 
 
 def _find_table_schema(cursor: "pyodbc.Cursor", table_name: str) -> str:
@@ -161,10 +97,6 @@ def _cci_count(cursor: "pyodbc.Cursor", schema: str, table: str) -> int:
     return int(cursor.fetchone()[0])
 
 
-def _find_create_sql(tables_files: Iterable[Path], suffix: str) -> Path | None:
-    return next((p for p in tables_files if p.name.lower().endswith(suffix)), None)
-
-
 def _count_user_constraints(cursor: "pyodbc.Cursor") -> tuple[int, int, int]:
     """Return (pk_count, uq_count, fk_count) on user tables in a single round-trip."""
     cursor.execute(
@@ -198,18 +130,6 @@ def _print_cci_summary(cursor: "pyodbc.Cursor", *, tables: list[str]) -> None:
             print(f"  - {schema}.{t}: CCI={c}")
         except (ValueError, KeyError, OSError) as exc:
             print(f"  - {t}: [SKIP] {exc}")
-
-
-def _short_path(p: Path, *, base: Path | None = None) -> str:
-    """
-    Prefer printing paths relative to `base` (if possible), otherwise just the filename.
-    """
-    try:
-        if base is not None:
-            return p.resolve().relative_to(base.resolve()).as_posix()
-    except (ValueError, TypeError):
-        pass
-    return p.name
 
 
 # -------------------------
@@ -643,10 +563,6 @@ def _execute_load_with_progress(
         _log("WORK", f"    {len(small)} others ({small_total:.1f}s)")
 
 
-def list_sql_files(folder: Path) -> List[Path]:
-    if not folder.is_dir():
-        return []
-    return sorted(folder.glob("*.sql"))
 
 
 def _try_disable_query_timeout(conn) -> None:
@@ -1092,26 +1008,7 @@ def import_sql_server(
                     ) from exc
 
             # --- 2.2 Data loading ---
-            load_files = list_sql_files(load_dir)
-
-            dims_sql = next((p for p in load_files if p.name.lower() == "01_bulk_insert_dims.sql"), None)
-            facts_sql = next((p for p in load_files if p.name.lower() == "02_bulk_insert_facts.sql"), None)
-
-            ordered_load: List[Path] = []
-            if dims_sql is not None:
-                ordered_load.append(dims_sql)
-            if facts_sql is not None:
-                ordered_load.append(facts_sql)
-
-            if not ordered_load:
-                ordered_load = load_files
-            else:
-                seen_load = set(ordered_load)
-                extras = [p for p in load_files if p not in seen_load]
-                if extras:
-                    _log("WARN", "Extra load scripts present; skipping by default:")
-                    for f in extras:
-                        _log("WARN", f"    {f.name}")
+            ordered_load = ordered_load_files(load_dir)
 
             for load_file in ordered_load:
                 is_dims = "dim" in load_file.name.lower()

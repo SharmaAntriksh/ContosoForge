@@ -17,22 +17,22 @@ run, do this once after touching dialect/postgres.py::
     docker run --rm -d --name pg-dialect-check \\
         -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16
 
-    # 3. Apply the generated DDL (Postgres scripts live at <run>/postgres/)
-    psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \\
-        -f generated_datasets/<run>/postgres/schema/01_create_dimensions.sql \\
-        -f generated_datasets/<run>/postgres/schema/02_create_facts.sql
-
-    # 4. Load the CSVs via COPY (paths inside the generated SQL must be
-    #    readable by the Postgres server process; mount the run folder into
-    #    the container if running Postgres in Docker).
-    psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \\
-        -f generated_datasets/<run>/postgres/load/01_copy_dims.sql \\
-        -f generated_datasets/<run>/postgres/load/02_copy_facts.sql
-
-    # 5. Spot-check table + row counts
-    psql -h localhost -U postgres -d postgres -c \\
-        "SELECT table_name, count(*) FROM information_schema.columns
-           WHERE table_schema='dbo' GROUP BY table_name ORDER BY table_name;"
+    # 3. Apply schema + load + verify row counts via the Python importer.
+    #    (Equivalent to psql -f of the schema then load scripts, plus a
+    #    SELECT count(*) per table at the end.) Requires pip install
+    #    'psycopg[binary]'.  The COPY paths inside the generated SQL must
+    #    be readable by the Postgres server process; when running Postgres
+    #    in Docker, mount the run folder into the container.
+    python -c "
+    from pathlib import Path
+    from src.tools.sql.postgres_import import import_postgres
+    import_postgres(
+        host='localhost', port=5432,
+        database='synthetic_demo',
+        user='postgres', password='test',
+        run_dir=Path('generated_datasets/<run>'),
+    )
+    "
 
     docker rm -f pg-dialect-check
 """

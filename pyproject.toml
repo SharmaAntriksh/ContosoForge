@@ -21,6 +21,9 @@ dependencies = [
 sql = [
     "pyodbc>=5.3.0,<6",
 ]
+postgres = [
+    "psycopg[binary]>=3.1,<4",
+]
 dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",

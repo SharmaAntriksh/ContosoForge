@@ -39,3 +39,7 @@ class ValidationError(ConfigError):
 
 class SqlServerImportError(PipelineError):
     """Raised when SQL Server import fails."""
+
+
+class PostgresImportError(PipelineError):
+    """Raised when Postgres import fails."""
