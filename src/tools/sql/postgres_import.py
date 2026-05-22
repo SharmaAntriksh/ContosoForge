@@ -221,6 +221,13 @@ def import_postgres(
     if not schema_files:
         raise PostgresImportError(f"No schema scripts found under {schema_dir}.")
 
+    # Constraints are applied AFTER the load — adding FKs before the COPY
+    # would force per-row validation and crush throughput.
+    constraint_files = [
+        f for f in schema_files if f.name.lower().endswith("_create_constraints.sql")
+    ]
+    schema_files = [f for f in schema_files if f not in constraint_files]
+
     load_files = ordered_load_files(load_dir)
 
     pg = _require_psycopg()
@@ -273,6 +280,15 @@ def import_postgres(
                 _apply_copy_script_via_stdin(conn, load_file, run_dir=run_dir)
                 conn.commit()
                 _log("DONE", f"  Loading {section} completed in {_time.time() - _t_load:.1f}s")
+
+            if constraint_files:
+                _t_constraints = _time.time()
+                _log("INFO", "  Applying Constraints")
+                for f in constraint_files:
+                    _log("WORK", f"    {_short_path(f, base=run_dir)}")
+                    _execute_script(conn, f)
+                conn.commit()
+                _log("DONE", f"  Applying Constraints completed in {_time.time() - _t_constraints:.1f}s")
 
             if verify:
                 dim_create = find_create_sql(schema_files, "create_dimensions.sql")
