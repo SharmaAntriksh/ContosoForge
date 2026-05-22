@@ -154,7 +154,7 @@ def generate_all_create_tables(
     header = [
         "-- Auto-generated CREATE TABLE scripts",
         f"-- Generated on: {ts}",
-        "SET NOCOUNT ON;",
+        *dialect.script_preamble,
         "",
     ]
 

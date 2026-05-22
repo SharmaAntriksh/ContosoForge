@@ -1,9 +1,9 @@
-\
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
 
+from src.tools.sql.dialect import DEFAULT_DIALECT, REGISTRY
 from src.tools.sql.generate_bulk_insert_sql import generate_dims_and_facts_bulk_insert_scripts
 from src.tools.sql.generate_create_table_scripts import generate_all_create_tables
 from src.tools.sql.sql_helpers import sql_escape_literal
@@ -303,9 +303,12 @@ def compose_verification_sql(*, sql_root: Path) -> None:
 # ------------------------------------------------------------
 
 def write_create_table_scripts(*, dims_out: Path, facts_out: Path, sql_root: Path, cfg: dict) -> None:
-    """
-    CREATE TABLE scripts are generated from STATIC_SCHEMAS + cfg (not from CSV inspection),
-    so we do NOT need to flatten facts or inspect filenames.
+    """Emit CREATE TABLE scripts for every registered SQL dialect.
+
+    SQL Server output lands at the existing ``sql/`` root for backward
+    compatibility; every other dialect lands at ``<run>/<dialect_name>/``
+    as a sibling of ``sql/``. The cost is trivial (~27 KB per extra dialect)
+    and avoids forcing users to re-run the pipeline to switch DBMSes.
     """
     with stage("Generating CREATE TABLE Scripts"):
         dims_csv = list(dims_out.glob("*.csv"))
@@ -315,10 +318,14 @@ def write_create_table_scripts(*, dims_out: Path, facts_out: Path, sql_root: Pat
             skip("No CSV files found - skipping CREATE TABLE scripts.")
             return
 
-        generate_all_create_tables(
-            output_folder=sql_root,
-            cfg=cfg,
-        )
+        run_root = sql_root.parent
+        for dialect in REGISTRY.values():
+            out_dir = sql_root if dialect is DEFAULT_DIALECT else run_root / dialect.name
+            generate_all_create_tables(
+                output_folder=out_dir,
+                cfg=cfg,
+                dialect=dialect,
+            )
 
 
 def write_bulk_insert_scripts(*, dims_out: Path, facts_out: Path, sql_root: Path, cfg: dict, **_) -> None:
