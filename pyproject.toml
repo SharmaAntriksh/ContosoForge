@@ -14,7 +14,7 @@ dependencies = [
     "pydantic>=2.12.5,<3",
     "PyYAML>=6.0.3,<7",
     "uvicorn>=0.41.0,<1",
-    "yfinance>=0.2.66,<1",
+    "yfinance>=0.2.66,<2",
 ]
 
 [project.optional-dependencies]
