@@ -27,7 +27,7 @@ The generator produces a full star-schema data model across dimension and fact t
 
 | Format | Description |
 |---|---|
-| `csv` | CSV files + auto-generated SQL Server bootstrap scripts (CREATE TABLE, BULK INSERT, views, constraints) |
+| `csv` | CSV files + auto-generated SQL Server and PostgreSQL bootstrap scripts (CREATE TABLE, load, constraints, views, indexes) |
 | `parquet` | Merged Apache Parquet with configurable compression, row groups, and dictionary encoding |
 | `deltaparquet` | Delta Lake tables partitioned by Year/Month |
 
@@ -141,10 +141,15 @@ generated_datasets/
       │   ├── inventory/                       ← if inventory enabled
       │   ├── customer_wishlists/              ← if wishlists enabled
       │   └── complaints/                      ← if complaints enabled
-      └── sql/                                 ← CSV mode only
-          ├── schema/
-          ├── load/
-          └── indexes/
+      ├── sql/                                 ← CSV mode only — SQL Server bootstrap
+      │   ├── schema/
+      │   ├── load/
+      │   └── indexes/
+      └── postgres/                            ← CSV mode only — PostgreSQL bootstrap
+          ├── schema/                          ← CREATE TABLE, views, constraints (DDL)
+          ├── load/                            ← COPY scripts
+          ├── admin/                           ← manage_primary_keys procedure
+          └── indexes/                         ← btree + BRIN indexes
 ```
 
 ---
@@ -173,6 +178,7 @@ Post-generation utilities for tuning, repartitioning, and importing generated da
 | Compact small Delta Lake files | `scripts/optimize_delta.py` | [delta-optimization](docs/operations/delta-optimization.md) |
 | Change Delta Lake partition layout | `scripts/repartition_delta.py` | [delta-repartitioning](docs/operations/delta-repartitioning.md) |
 | Import CSV output to SQL Server | `scripts/run_sql_server_import.ps1` | [sql-server-import](docs/operations/sql-server-import.md) |
+| Import CSV output to PostgreSQL | `scripts/run_postgres_import.ps1` | [postgres-import](docs/operations/postgres-import.md) |
 | Provision a SQL login for SSAS / Power BI | (same import script) | [tabular-user](docs/operations/tabular-user.md) |
 | Post-import admin & verify procedures | (generated SQL) | [post-import-procedures](docs/operations/post-import-procedures.md) |
 
@@ -243,7 +249,7 @@ pytest --lf
 | `config.yaml` reference | [CONFIG_GUIDE](docs/CONFIG_GUIDE.md) |
 | `models.yaml` reference + trend presets | [MODELS_GUIDE](docs/MODELS_GUIDE.md) |
 | Pipeline architecture | [PIPELINE_FLOWCHART](docs/PIPELINE_FLOWCHART.md) |
-| Operations (parquet, delta, SQL import) | [operations/](docs/operations/) |
+| Operations (parquet, delta, SQL Server / PostgreSQL import) | [operations/](docs/operations/) |
 
 ---
 
