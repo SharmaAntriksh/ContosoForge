@@ -73,8 +73,8 @@ except ImportError:
 def _require_psycopg():
     if psycopg is None:
         raise PostgresImportError(
-            "psycopg is required for Postgres import. "
-            "Install it with: pip install 'psycopg[binary]'"
+            "psycopg is required for Postgres import but is not installed.\n"
+            "Install the Postgres extra:  uv sync --extra postgres"
         )
     return psycopg
 

@@ -110,6 +110,11 @@ try {
         Write-Step "Python : $PythonExe (not resolved on PATH)" -Level warn
     }
 
+    # Preflight: ensure pyodbc is importable, self-heal via the 'sql' extra.
+    if ($pyResolvedPath) {
+        Invoke-DriverSelfHeal -PythonExe $PythonExe -Module "pyodbc" -Extra "sql" -ProjectRoot $RepoRoot
+    }
+
     # Build argument list (array form handles spaces safely)
     $argsList = @(
         $PyEntrypoint,

@@ -26,6 +26,8 @@ $ErrorActionPreference = "Stop"
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot   = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 
+. (Join-Path $ScriptDir "_common.ps1")
+
 Push-Location $RepoRoot
 try {
     # Activate venv if present
@@ -35,16 +37,12 @@ try {
         & $VenvActivate
     }
 
-    # Ensure dependencies
-    $Missing = @()
-    python -c "import fastapi" 2>$null
-    if ($LASTEXITCODE -ne 0) { $Missing += "fastapi" }
-    python -c "import uvicorn" 2>$null
-    if ($LASTEXITCODE -ne 0) { $Missing += "uvicorn[standard]" }
-
-    if ($Missing.Count -gt 0) {
-        Write-Host "Installing missing packages: $($Missing -join ', ')" -ForegroundColor Yellow
-        pip install @Missing --quiet
+    # Ensure web dependencies are present; restore from the lockfile if not.
+    python -c "import fastapi, uvicorn" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Web dependencies missing. Restoring with uv sync..." -ForegroundColor Yellow
+        Assert-UvAvailable
+        uv sync --project $RepoRoot
     }
 
     # Check port availability before launching

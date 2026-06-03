@@ -81,6 +81,11 @@ try {
         Write-Step "Python : $PythonExe (not resolved on PATH)" -Level warn
     }
 
+    # Preflight: ensure psycopg is importable, self-heal via the 'postgres' extra.
+    if ($pyResolvedPath) {
+        Invoke-DriverSelfHeal -PythonExe $PythonExe -Module "psycopg" -Extra "postgres" -ProjectRoot $RepoRoot
+    }
+
     # Resolve password: -Password > $env:PGPASSWORD > prompt (interactive only)
     $resolvedPassword = $null
     if ($Password) {

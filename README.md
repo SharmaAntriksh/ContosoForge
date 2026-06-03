@@ -61,11 +61,19 @@ git clone https://github.com/SharmaAntriksh/synthetic-data-generator.git
 cd synthetic-data-generator
 ```
 
+This project uses [uv](https://docs.astral.sh/uv/) for locked, reproducible
+installs. Install it once if you don't have it:
+
+- **With Python:** `pip install uv`
+- **Without Python (Windows):** `irm https://astral.sh/uv/install.ps1 | iex`
+- **Without Python (macOS / Linux):** `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+uv then provisions the correct Python itself — no separate Python install needed.
+
 **Windows (PowerShell):**
 
 ```powershell
-# Create virtual environment and install dependencies
-# Uses uv (preferred) if available, falls back to pip
+# Create virtual environment and install locked dependencies (via uv)
 .\scripts\create_venv.ps1
 
 # Activate
@@ -81,15 +89,17 @@ To update dependencies later:
 **macOS / Linux:**
 
 ```bash
-# Recommended (locked, reproducible)
-pip install uv
-uv sync
+# Locked, reproducible — includes SQL Server + Postgres import drivers
+uv sync --extra sql --extra postgres
 
-# Or traditional
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Core only (no database import drivers)
+uv sync
 ```
+
+> **Importing CSV output into SQL Server / Postgres?** The `pyodbc` and `psycopg`
+> drivers are optional extras. The `create_venv.ps1` / `sync_venv.ps1` scripts
+> install them by default; with bare `uv sync` add `--extra sql --extra postgres`.
+> A plain `uv sync` (no extras) will *remove* them from an existing venv.
 
 ### 2. Generate data
 

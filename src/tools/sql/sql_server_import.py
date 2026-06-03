@@ -886,8 +886,8 @@ def import_sql_server(
 ) -> None:
     if pyodbc is None:
         raise SqlServerImportError(
-            "pyodbc is required for SQL Server import. "
-            "Install it with: pip install pyodbc"
+            "pyodbc is required for SQL Server import but is not installed.\n"
+            "Install the SQL extra:  uv sync --extra sql"
         )
     import time as _time
 

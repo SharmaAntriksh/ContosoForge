@@ -12,6 +12,9 @@
 #   Write-Step            - consistent coloured log lines
 #   Invoke-Checked        - run an external command and throw on failure
 #   Format-RunnerLabel    - human-readable label for a runner hashtable
+#   Assert-UvAvailable    - throw with install guidance when uv is missing
+#   Build-UvSyncArgs      - assemble the `uv sync` argument array
+#   Invoke-DriverSelfHeal - ensure a Python module is importable, install its extra
 # ------------------------------------------------------------
 
 Set-StrictMode -Version Latest
@@ -29,7 +32,7 @@ function Resolve-ProjectRoot {
         [string[]]$ExtraMarkers = @()
     )
 
-    $markers = @(".git", "pyproject.toml", "requirements.txt") + $ExtraMarkers
+    $markers = @(".git", "pyproject.toml", "uv.lock") + $ExtraMarkers
     $dir = (Resolve-Path $StartDir).Path
 
     while ($true) {
@@ -187,4 +190,71 @@ function Format-RunnerLabel {
         return "$($Runner.Cmd) $($Runner.Args -join ' ')"
     }
     return $Runner.Cmd
+}
+
+function Assert-UvAvailable {
+    <#
+    .SYNOPSIS
+        Throw with copy-paste install guidance when uv is not on PATH.
+        This project standardizes on uv for locked, reproducible installs.
+    #>
+    if (Get-Command uv -ErrorAction SilentlyContinue) { return }
+    throw ("uv is required but was not found on PATH. Install it, then re-run:`n" +
+           "  - with Python:  pip install uv`n" +
+           "  - without Python (Windows):  irm https://astral.sh/uv/install.ps1 | iex`n" +
+           "  See https://docs.astral.sh/uv/ for other platforms.")
+}
+
+function Build-UvSyncArgs {
+    <#
+    .SYNOPSIS
+        Assemble the argument array for `uv sync`, shared by create_venv/sync_venv.
+        Extras are appended unless -Minimal is set.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [switch]$Dev,
+        [switch]$Minimal,
+        [string[]]$Extras = @(),
+        [switch]$Quiet
+    )
+
+    $uvArgs = @("sync", "--project", $ProjectRoot)
+    $uvArgs += if ($Dev) { "--dev" } else { "--no-dev" }
+    if (-not $Minimal) {
+        foreach ($x in $Extras) {
+            if (-not [string]::IsNullOrWhiteSpace($x)) { $uvArgs += @("--extra", $x) }
+        }
+    }
+    if ($Quiet) { $uvArgs += "--quiet" }
+    return ,$uvArgs
+}
+
+function Invoke-DriverSelfHeal {
+    <#
+    .SYNOPSIS
+        Ensure $Module is importable in $PythonExe; if not, install its uv extra
+        (uv sync --extra <Extra>) and re-check. Throws if it still can't be
+        imported. Optional DB-import drivers (pyodbc/psycopg) live in extras that
+        a bare `uv sync` prunes, so the import runners self-heal here rather than
+        failing deep inside the Python import.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$PythonExe,
+        [Parameter(Mandatory)][string]$Module,
+        [Parameter(Mandatory)][string]$Extra,
+        [Parameter(Mandatory)][string]$ProjectRoot
+    )
+
+    & $PythonExe -c "import $Module" 2>$null
+    if ($LASTEXITCODE -eq 0) { return }
+
+    Write-Step "$Module not found in this interpreter - auto-installing the '$Extra' extra via uv..." -Level warn
+    Assert-UvAvailable
+    & uv sync --project $ProjectRoot --extra $Extra 2>&1 | Out-Null
+    & $PythonExe -c "import $Module" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Module is required but could not be installed automatically. Run:  uv sync --extra $Extra"
+    }
+    Write-Step "$Module installed successfully." -Level ok
 }
