@@ -141,6 +141,35 @@ class TestMultiEventReturns:
         ret_qty = result.column("ReturnQuantity").to_numpy()
         assert np.all(ret_qty >= 1)
 
+    def test_dates_non_decreasing_wide_lag_range(self):
+        """RETURNS-1: with a WIDE base-lag range and small split gaps, an
+        independent per-event base lag would let a later event land before an
+        earlier one. Sharing one base lag per parent line keeps dates monotonic."""
+        detail = _make_detail(200)
+        cfg = ReturnsConfig(
+            enabled=True, return_rate=1.0,
+            split_return_rate=1.0, max_splits=3,
+            min_lag_days=1, max_lag_days=90,   # wide -> exposes per-event base bug
+            split_min_gap=1, split_max_gap=2,
+        )
+        result = build_sales_returns_from_detail(detail, chunk_seed=7, cfg=cfg)
+        so = result.column("SalesOrderNumber").to_numpy()
+        dates = result.column("ReturnDate").to_numpy(zero_copy_only=False)
+        seq = result.column("ReturnSequence").to_numpy()
+
+        prev_date = {}
+        for i in range(len(so)):
+            key = int(so[i])
+            if seq[i] == 1:
+                prev_date[key] = dates[i]
+            else:
+                assert dates[i] >= prev_date[key], (
+                    f"Order {key} seq {seq[i]}: {dates[i]} < prev {prev_date[key]}"
+                )
+                prev_date[key] = dates[i]
+        # Sanity: splits actually happened (otherwise the test proves nothing).
+        assert np.any(seq > 1)
+
 
 class TestReturnEventKey:
     def test_sequential_keys(self):

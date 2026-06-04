@@ -315,7 +315,15 @@ def build_sales_returns_from_detail(
     if hi <= 0:
         base_lag = np.full(total_events, lo, dtype=np.int32)
     else:
-        base_lag = rng.integers(lo, hi + 1, size=total_events, dtype=np.int32)
+        # RETURNS-1: one base lag per PARENT LINE, broadcast to its events — not an
+        # independent draw per event. Sharing the base means the cumulative split
+        # gaps below make ReturnDate non-decreasing by ReturnSequence; a fresh base
+        # per event could let a later event land earlier than an earlier one. In the
+        # no-split case (num_events all 1, total_events == m) this draws the same m
+        # values as before, so default-config output is unchanged.
+        base_lag = np.repeat(
+            rng.integers(lo, hi + 1, size=m, dtype=np.int32), num_events
+        )
 
     # For split events (seq > 1), add cumulative incremental gaps
     # Each subsequent event adds an independent gap, accumulated via cumsum

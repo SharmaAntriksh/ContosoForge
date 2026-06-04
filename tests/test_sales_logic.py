@@ -70,6 +70,7 @@ from src.facts.inventory.engine import (
     load_inventory_config,
 )
 from src.facts.inventory.micro_agg import micro_aggregate_inventory
+from src.facts.inventory.runner import _recompute_abc_from_demand
 from src.facts.sales.sales_worker.returns_builder import (
     RETURNS_SCHEMA,
     ReturnsConfig,
@@ -1600,3 +1601,68 @@ class TestComputeInventorySnapshots:
             },
         )
         assert result.empty
+
+
+# ===================================================================
+# Chunk assembly — CHUNK-3 (null-month padding)
+# ===================================================================
+
+class TestAssembleColumn:
+    """CHUNK-3: a column produced in some months but null in others must keep
+    full length (null months padded), not be silently shortened/misaligned."""
+
+    _ST = {"v": pa.int32()}
+
+    def test_all_data_months(self):
+        from src.facts.sales.sales_logic.chunk_builder import _assemble_column
+        bufs = [np.array([1, 2], dtype=np.int32), np.array([3], dtype=np.int32)]
+        out = _assemble_column("v", bufs, [2, 1], 3, self._ST)
+        assert out.to_pylist() == [1, 2, 3]
+
+    def test_all_null_months(self):
+        from src.facts.sales.sales_logic.chunk_builder import _assemble_column
+        out = _assemble_column("v", [None, None], [2, 1], 3, self._ST)
+        assert len(out) == 3 and out.null_count == 3
+
+    def test_mixed_pads_null_months(self):
+        from src.facts.sales.sales_logic.chunk_builder import _assemble_column
+        # month0: 2 data rows, month1: 3 null rows, month2: 1 data row.
+        bufs = [np.array([1, 2], dtype=np.int32), None, np.array([9], dtype=np.int32)]
+        out = _assemble_column("v", bufs, [2, 3, 1], 6, self._ST)
+        # Must be 6 (the old code dropped the null month, giving a misaligned 3).
+        assert len(out) == 6
+        assert out.to_pylist() == [1, 2, None, None, None, 9]
+
+
+# ===================================================================
+# Inventory ABC recompute — INV-1 (SCD2 family aggregation)
+# ===================================================================
+
+class TestRecomputeABC:
+    """INV-1: ABC ranking must aggregate a product-SCD2 family's volume across
+    its version keys, not rank each version key separately."""
+
+    def _demand(self):
+        # Family (ProductID 1) split across version keys 1,2,3 (40 each = 120 total);
+        # single-version products 4..10 with individually-higher per-key volume.
+        return pd.DataFrame({
+            "ProductKey": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "QuantitySold": [40, 40, 40, 50, 45, 30, 25, 20, 15, 10],
+        })
+
+    def _attrs(self):
+        return {
+            "ProductKey": np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.int64),
+            "ABCClassification": np.array(["C"] * 10),
+        }
+
+    def test_without_family_map_fragments(self):
+        # No SCD2 map -> version keys ranked separately, family not top-tier.
+        out = _recompute_abc_from_demand(self._demand(), self._attrs())["ABCClassification"]
+        assert not all(out[i] == "A" for i in range(3))
+
+    def test_with_family_map_aggregates_to_A(self):
+        pk_to_pid = {1: 1, 2: 1, 3: 1, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10}
+        out = _recompute_abc_from_demand(self._demand(), self._attrs(), pk_to_pid)["ABCClassification"]
+        # Family total (120) is the largest -> all three version keys classified A.
+        assert all(out[i] == "A" for i in range(3))

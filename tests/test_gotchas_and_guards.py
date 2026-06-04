@@ -226,6 +226,20 @@ class TestSCD2LifeEvents:
         )
         pd.testing.assert_frame_equal(out, base)
 
+    def test_event_offsets_strictly_increasing_under_clustering(self):
+        """CUST-SCD2-1: even when draws cluster near max_offset (so the spacing
+        clamp would collide), event offsets must be strictly increasing — equal
+        offsets chain a version with EffectiveEndDate < EffectiveStartDate."""
+        from src.dimensions.customers.scd2 import _event_offsets
+
+        for seed in range(200):
+            rng = np.random.default_rng(seed)
+            # Tight room (max_offset=120) vs 5 events forces the clamp to collide.
+            offsets = _event_offsets(rng, n_events=5, max_offset=120)
+            assert offsets.size >= 1
+            if offsets.size > 1:
+                assert np.all(np.diff(offsets) >= 1), f"equal offsets at seed {seed}"
+
 
 # ===================================================================
 # Subscription payment weights validation

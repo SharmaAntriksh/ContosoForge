@@ -629,6 +629,32 @@ def _to_pa_array(name: str, data: object, n_rows: int, schema_types: dict) -> pa
     return pa.array(data, type=t, safe=False)
 
 
+def _assemble_column(name, bufs, month_row_counts, total_rows, schema_types) -> pa.array:
+    """Concatenate one column's per-month buffers into a single pa.Array.
+
+    *bufs* holds one entry per appended month: a numpy array, or ``None`` for a
+    month where the column produced no data. *month_row_counts* is aligned 1:1
+    with *bufs*. Null months are padded with typed nulls so the column stays the
+    full ``total_rows`` length and positionally aligned with the other columns
+    (CHUNK-3 — the old mixed path skipped null months, yielding a short, misaligned
+    column that crashed ``pa.Table.from_arrays``).
+    """
+    t = schema_types[name]
+    has_data = any(b is not None for b in bufs)
+    if not has_data:
+        return pa.nulls(total_rows, type=t)
+    if all(b is not None for b in bufs):
+        combined = np.concatenate(bufs) if len(bufs) > 1 else bufs[0]
+        return _to_pa_array(name, combined, total_rows, schema_types)
+    # Mixed: some months produced the column, others did not.
+    month_arrays = [
+        pa.nulls(int(n), type=t) if b is None
+        else _to_pa_array(name, b, len(b), schema_types)
+        for b, n in zip(bufs, month_row_counts)
+    ]
+    return pa.concat_arrays(month_arrays)
+
+
 _FAR_PAST = np.datetime64("1900-01-01", "D")
 _FAR_FUTURE = np.datetime64("2262-04-11", "D")
 
@@ -1334,6 +1360,9 @@ def build_chunk_table(
     # Accumulate raw numpy buffers per column; build ONE Arrow table at the end.
     # This eliminates T × C Arrow array constructions + pa.concat_tables overhead.
     col_buffers: dict[str, list] = {f.name: [] for f in schema}
+    # Rows produced per appended month, aligned 1:1 with each col_buffers list, so
+    # the final assembly can pad null months with typed nulls (CHUNK-3).
+    month_row_counts: list[int] = []
     total_rows = 0
 
     # Salesperson effective-date map + fallback (constant across months)
@@ -1937,6 +1966,7 @@ def build_chunk_table(
                 elif not isinstance(data, np.ndarray):
                     data = np.asarray(data)
                 col_buffers[f.name].append(data)
+        month_row_counts.append(n_rows)
         total_rows += n_rows
 
     # ------------------------------------------------------------------
@@ -1945,35 +1975,8 @@ def build_chunk_table(
     if total_rows == 0:
         return _empty_table(schema)
 
-    arrays = []
-    for f in schema:
-        bufs = col_buffers[f.name]
-        t = schema_types[f.name]
-
-        # Check if any month produced data for this column
-        has_data = any(b is not None for b in bufs)
-
-        if not has_data:
-            # Entire column is null across all months
-            arrays.append(pa.nulls(total_rows, type=t))
-            continue
-
-        # All-data fast path (common case: every month populates this column)
-        if all(b is not None for b in bufs):
-            combined = np.concatenate(bufs) if len(bufs) > 1 else bufs[0]
-            arrays.append(_to_pa_array(f.name, combined, total_rows, schema_types))
-            continue
-
-        # Mixed path (rare: some months null, others not)
-        # Build per-month Arrow arrays and concatenate via Arrow
-        month_arrays = []
-        for b in bufs:
-            if b is None:
-                continue  # skip null months (no rows to represent)
-            month_arrays.append(_to_pa_array(f.name, b, len(b), schema_types))
-        if month_arrays:
-            arrays.append(pa.concat_arrays(month_arrays))
-        else:
-            arrays.append(pa.nulls(total_rows, type=t))
-
+    arrays = [
+        _assemble_column(f.name, col_buffers[f.name], month_row_counts, total_rows, schema_types)
+        for f in schema
+    ]
     return pa.Table.from_arrays(arrays, schema=schema)

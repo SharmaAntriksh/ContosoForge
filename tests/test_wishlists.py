@@ -387,6 +387,38 @@ class TestGenerateWishlistItems:
         )
         assert len(set(out_prod_idx)) == 10  # all unique
 
+    def test_high_collision_does_not_overflow_misc_pool(self):
+        """WISH-1: heavy dedup collisions (tiny catalog, max items/customer, full
+        affinity) drive items toward the 50+200 retry paths. The misc RNG pool must
+        be refilled with enough headroom that no item exhausts it mid-iteration
+        (IndexError with the old headroom of 60)."""
+        prod_subcat = np.array([1, 1, 2, 2, 3], dtype=np.int64)
+        product_weights = np.ones(5) / 5.0
+        pool, global_cdf = build_subcategory_pool(prod_subcat, product_weights)
+        rng = np.random.default_rng(123)
+
+        n_cust = 500
+        cust_keys = np.arange(1, n_cust + 1, dtype=np.int64)
+        items_per = np.full(n_cust, 5, dtype=np.int64)  # == n_products -> max dedup
+        total = int(items_per.sum())
+
+        out_prod_idx, *_ = generate_wishlist_items(
+            rng,
+            cust_keys=cust_keys,
+            earliest_ns=np.zeros(n_cust, dtype=np.int64),
+            latest_ns=np.full(n_cust, 10 * NS_PER_DAY, dtype=np.int64),
+            items_per=items_per,
+            purchased_map={},
+            prod_subcat=prod_subcat,
+            n_products=5,
+            global_cdf=global_cdf,
+            pool=pool,
+            conversion_rate=0.0,    # never short-circuit via purchases
+            affinity_strength=1.0,  # always enter the affinity retry path
+        )
+        assert len(out_prod_idx) == total
+        assert np.all((out_prod_idx >= 0) & (out_prod_idx < 5))
+
 
 # ===================================================================
 # SCD2 price resolution
