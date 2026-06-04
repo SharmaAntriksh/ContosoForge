@@ -78,6 +78,31 @@ def _clamp_order_dates_to_customer_start(
     return od_days.view("datetime64[D]")
 
 
+def _within_day_cursor(d_off: np.ndarray) -> np.ndarray:
+    """0-based rank of each order within its OrderDate (day-offset) group.
+
+    Robust to unsorted input. ``build_orders`` returns orders sorted by date,
+    but ``_clamp_order_dates_to_customer_start`` can push individual orders onto
+    a later day *after* that sort, breaking the contiguity a naive
+    ``arange - first_index`` cursor relies on. That naive cursor would then
+    over-count within a day and spill the resulting SalesOrderNumber past the
+    per-chunk allocation band into the next chunk's band → duplicate order
+    numbers across chunks (CHUNK-1). Computing the rank from a stable sort by
+    day yields the true 0-based within-day position regardless of ordering.
+    """
+    n = d_off.shape[0]
+    if n == 0:
+        return np.empty(0, dtype=np.int64)
+    order = np.argsort(d_off, kind="stable")
+    sorted_days = d_off[order]
+    unique_days, first_idx = np.unique(sorted_days, return_index=True)
+    group_start = first_idx[np.searchsorted(unique_days, sorted_days)]
+    cursor_sorted = np.arange(n, dtype=np.int64) - group_start
+    cursor = np.empty(n, dtype=np.int64)
+    cursor[order] = cursor_sorted
+    return cursor
+
+
 # Cached partition cols (immutable after State.seal(); avoids per-chunk getattr).
 _cached_delta_pcols: set[str] | None = None
 
@@ -1460,15 +1485,18 @@ def build_chunk_table(
                 _od_D = order_dates[line_num == 1].astype("datetime64[D]")
                 _d_off = _od_D.astype(np.int64) - _date_pool_min_day
 
-                _u_days, _fi, _dc = np.unique(
-                    _d_off, return_index=True, return_counts=True,
-                )
-                _gi = np.searchsorted(_u_days, _d_off)
-                _cursor = np.arange(_oc, dtype=np.int64) - _fi[_gi]
+                # CHUNK-1: the customer-start clamp above runs AFTER build_orders
+                # sorted by date, so _d_off is no longer guaranteed sorted. Derive
+                # each order's within-day rank from a stable sort (see helper) so
+                # the cursor is correct regardless of clamp-induced reordering.
+                _cursor = _within_day_cursor(_d_off)
 
-                if int(_dc.max()) > int(_per_chunk_alloc):
+                # Guard on cursor magnitude (the value that actually overflows the
+                # per-chunk band). max(cursor)+1 is the largest per-day order count.
+                _max_day_count = int(_cursor.max(initial=-1)) + 1
+                if _max_day_count > int(_per_chunk_alloc):
                     raise SalesError(
-                        f"per_chunk_alloc too small: {int(_dc.max())} orders on one "
+                        f"per_chunk_alloc too small: {_max_day_count} orders on one "
                         f"day but alloc={int(_per_chunk_alloc)} per chunk per day."
                     )
 

@@ -257,6 +257,41 @@ def _to_snake(name: str) -> str:
 # Check runners
 # ============================================================================
 
+def _emit_fk_check(
+    report: QualityReport,
+    check_name: str,
+    src_keys: np.ndarray,
+    target_keys: np.ndarray,
+    src_name: str,
+    fk_col: str,
+    target_label: str,
+) -> None:
+    """Append an FK result: every key in *src_keys* must exist in *target_keys*.
+
+    Shared by the fact→dimension and fact→fact (returns/complaints → header)
+    checks so both report orphans identically. numpy ``isin`` is much faster
+    than Python set subtraction for large key arrays.
+    """
+    in_target = np.isin(src_keys, target_keys)
+    n_orphans = int((~in_target).sum())
+    if n_orphans > 0:
+        sample = sorted(src_keys[~in_target][:10].tolist())
+        report.checks.append(CheckResult(
+            name=check_name,
+            passed=False,
+            message=f"{n_orphans} orphan key(s) in {src_name}.{fk_col}",
+            details=f"Sample orphans: {sample}",
+            category="Referential Integrity",
+        ))
+    else:
+        report.checks.append(CheckResult(
+            name=check_name,
+            passed=True,
+            message=f"All {len(src_keys)} keys found in {target_label}",
+            category="Referential Integrity",
+        ))
+
+
 def _check_referential_integrity(
     report: QualityReport,
     dims_folder: Path,
@@ -404,27 +439,38 @@ def _check_referential_integrity(
         if dim_keys is None or len(dim_keys) == 0:
             continue
 
-        # numpy isin check (much faster than Python set subtraction for large arrays)
-        _in_dim = np.isin(src_keys, dim_keys)
-        n_orphans = int((~_in_dim).sum())
+        _emit_fk_check(
+            report,
+            f"FK: {src_name}.{fk_col} → {dim_name}.{pk_col}",
+            src_keys, dim_keys, src_name, fk_col, dim_name,
+        )
 
-        if n_orphans > 0:
-            orphan_vals = src_keys[~_in_dim]
-            sample = sorted(orphan_vals[:10].tolist())
-            report.checks.append(CheckResult(
-                name=f"FK: {src_name}.{fk_col} → {dim_name}.{pk_col}",
-                passed=False,
-                message=f"{n_orphans} orphan key(s) in {src_name}.{fk_col}",
-                details=f"Sample orphans: {sample}",
-                category="Referential Integrity",
-            ))
-        else:
-            report.checks.append(CheckResult(
-                name=f"FK: {src_name}.{fk_col} → {dim_name}.{pk_col}",
-                passed=True,
-                message=f"All {len(src_keys)} keys found in {dim_name}",
-                category="Referential Integrity",
-            ))
+    # --- Fact-to-fact links: returns / complaints → SalesOrderHeader ---
+    # SalesOrderNumber is the order PK in the header; returns and complaints
+    # reference it. CHUNK-1's cross-chunk duplicate order numbers would also
+    # surface here as orphan references when the join no longer resolves.
+    header_path = _find_table(facts_folder, "sales_order_header")
+    if header_path is not None:
+        header_keys = _get_unique_keys_fast(header_path, "SalesOrderNumber")
+        if header_keys is not None and len(header_keys) > 0:
+            # (fact_table, fk_column) — SalesOrderNumber nulls are dropped by the
+            # unique extractor, so unlinked complaints are correctly ignored.
+            fact_link_checks = [
+                ("sales_return", "SalesOrderNumber"),
+                ("complaints", "SalesOrderNumber"),
+            ]
+            for src_name, fk_col in fact_link_checks:
+                src_path = _find_table(facts_folder, src_name)
+                if src_path is None:
+                    continue
+                src_keys = _get_unique_keys_fast(src_path, fk_col)
+                if src_keys is None or len(src_keys) == 0:
+                    continue
+                _emit_fk_check(
+                    report,
+                    f"FK: {src_name}.{fk_col} → sales_order_header.SalesOrderNumber",
+                    src_keys, header_keys, src_name, fk_col, "sales_order_header",
+                )
 
     # --- Date-range checks: fact dates must fall within dates dimension ---
     dates_path = _find_table(dims_folder, "dates")
@@ -526,6 +572,9 @@ def _check_nulls_and_duplicates(
         ("dates", "DateKey", dims_folder),
         ("geography", "GeographyKey", dims_folder),
         ("currency", "CurrencyKey", dims_folder),
+        # Fact PK: SalesOrderNumber is the true PK of the order header (when emitted).
+        # Cross-chunk duplicate order numbers (CHUNK-1) surface here as duplicate PKs.
+        ("sales_order_header", "SalesOrderNumber", facts_folder),
     ]
 
     for table_name, pk_col, folder in pk_checks:
