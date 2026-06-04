@@ -1130,6 +1130,41 @@ class TestBuildSalesReturns:
         result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
         assert result.num_rows == 0
 
+    @staticmethod
+    def _int64_detail_table(n: int, start: int) -> pa.Table:
+        rng = _rng()
+        so = np.arange(start, start + n, dtype=np.int64)
+        return pa.table({
+            "SalesOrderNumber": pa.array(so, type=pa.int64()),
+            "SalesOrderLineNumber": pa.array(np.ones(n, dtype=np.int32), type=pa.int32()),
+            "DeliveryDate": pa.array(
+                np.array(["2023-06-15"] * n, dtype="datetime64[D]"), type=pa.date32()
+            ),
+            "Quantity": pa.array(rng.integers(1, 10, size=n, dtype=np.int32), type=pa.int32()),
+            "NetPrice": pa.array(rng.uniform(10.0, 100.0, size=n), type=pa.float64()),
+            "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32), type=pa.int32()),
+        })
+
+    def test_int64_detail_preserves_dtype_and_value(self):
+        """SCHEMA-1: returns mirror int64 SalesOrderNumber without truncation."""
+        start = 2_147_483_647 + 1000  # beyond int32 range
+        detail = self._int64_detail_table(50, start)
+        cfg = ReturnsConfig(enabled=True, return_rate=1.0, min_lag_days=1, max_lag_days=30)
+        result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+        assert result.schema.field("SalesOrderNumber").type == pa.int64()
+        returned = set(result.column("SalesOrderNumber").to_pylist())
+        assert returned and returned.issubset(set(range(start, start + 50)))
+        assert min(returned) > 2_147_483_647  # not wrapped to int32
+
+    def test_int64_detail_empty_keeps_int64_schema(self):
+        """Empty result must still carry int64 SO# (cross-chunk concat consistency)."""
+        detail = self._int64_detail_table(1, 5_000_000_000)
+        result = build_sales_returns_from_detail(
+            detail, chunk_seed=42, cfg=ReturnsConfig(enabled=False),
+        )
+        assert result.num_rows == 0
+        assert result.schema.field("SalesOrderNumber").type == pa.int64()
+
     def test_full_rate_returns_rows(self):
         detail = _make_detail_table(100)
         cfg = ReturnsConfig(enabled=True, return_rate=1.0, min_lag_days=1, max_lag_days=30)
@@ -1308,6 +1343,31 @@ class TestBuildWorkerSchemas:
             returns_enabled=False,
         )
         assert "TimeKey" in bundle.sales_schema_out.names
+
+    def test_order_number_int32_by_default(self):
+        """SCHEMA-1: small runs keep SalesOrderNumber as int32."""
+        bundle = build_worker_schemas(
+            file_format="parquet",
+            skip_order_cols=False,
+            skip_order_cols_requested=False,
+            returns_enabled=True,
+        )
+        for tbl in ("SalesOrderDetail", "SalesOrderHeader", "SalesReturn"):
+            assert bundle.schema_by_table[tbl].field("SalesOrderNumber").type == pa.int32()
+        assert bundle.sales_schema_gen.field("SalesOrderNumber").type == pa.int32()
+
+    def test_order_id_int64_promotes_all_tables(self):
+        """SCHEMA-1: order_id_int64=True promotes SalesOrderNumber everywhere."""
+        bundle = build_worker_schemas(
+            file_format="parquet",
+            skip_order_cols=False,
+            skip_order_cols_requested=False,
+            returns_enabled=True,
+            order_id_int64=True,
+        )
+        for tbl in ("SalesOrderDetail", "SalesOrderHeader", "SalesReturn"):
+            assert bundle.schema_by_table[tbl].field("SalesOrderNumber").type == pa.int64()
+        assert bundle.sales_schema_gen.field("SalesOrderNumber").type == pa.int64()
 
 
 # ===================================================================

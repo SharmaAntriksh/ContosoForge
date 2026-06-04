@@ -701,6 +701,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
 
         month_stride = int(worker_cfg.get("month_stride", 0) or 0)
         per_chunk_alloc = int(worker_cfg.get("per_chunk_alloc", 0) or 0)
+        order_id_int64 = bool(worker_cfg.get("order_id_int64", False))
 
         no_discount_key = worker_cfg["no_discount_key"]
         delta_output_folder = worker_cfg.get("delta_output_folder") or op.get("delta_output_folder")
@@ -1117,7 +1118,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         returns_enabled=bool(returns_enabled),
         parquet_dict_exclude=set(parquet_dict_exclude) if parquet_dict_exclude else None,
         models_cfg=models_cfg if isinstance(models_cfg, Mapping) else None,
-        total_rows=int(worker_cfg.get("total_rows", 0)),
+        order_id_int64=order_id_int64,
         partition_cols=partition_cols if partition_cols else None,
     )
 
@@ -1160,6 +1161,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "order_id_stride_orders": int(max(1, chunk_size)),
             "month_stride": month_stride,
             "per_chunk_alloc": per_chunk_alloc,
+            "order_id_int64": order_id_int64,
             "max_lines_per_order": int(max_lines_per_order),
             
             "row_group_size": int(max(1, row_group_size)),

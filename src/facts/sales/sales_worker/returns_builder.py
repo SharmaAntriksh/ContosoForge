@@ -54,9 +54,25 @@ class ReturnsConfig:
     logistics_keys: frozenset = frozenset()
 
 
-def _empty_returns_table() -> pa.Table:
-    arrays = [pa.array([], type=f.type) for f in RETURNS_SCHEMA]
-    return pa.Table.from_arrays(arrays, schema=RETURNS_SCHEMA)
+def _returns_schema_for(so_type: pa.DataType) -> pa.Schema:
+    """RETURNS_SCHEMA with SalesOrderNumber set to *so_type*.
+
+    Returns mirror the dtype the detail table carries for SalesOrderNumber, so a
+    large run with int64 order numbers produces int64 here too (rather than
+    silently truncating to the int32 default).
+    """
+    if so_type == pa.int32():
+        return RETURNS_SCHEMA
+    return pa.schema([
+        pa.field(f.name, so_type) if f.name == "SalesOrderNumber" else f
+        for f in RETURNS_SCHEMA
+    ])
+
+
+def _empty_returns_table(so_type: pa.DataType = pa.int32()) -> pa.Table:
+    schema = _returns_schema_for(so_type)
+    arrays = [pa.array([], type=f.type) for f in schema]
+    return pa.Table.from_arrays(arrays, schema=schema)
 
 
 def _as_np_i64(x) -> np.ndarray:
@@ -182,16 +198,24 @@ def build_sales_returns_from_detail(
 
     Determinism: seeded from chunk_seed.
     """
+    # Mirror the detail table's SalesOrderNumber dtype (int32 or, for large runs,
+    # int64) so returns never truncate the order number.
+    _so_type = (
+        detail.schema.field("SalesOrderNumber").type
+        if "SalesOrderNumber" in detail.schema.names
+        else pa.int32()
+    )
+
     if not cfg.enabled:
-        return _empty_returns_table()
+        return _empty_returns_table(_so_type)
 
     rr, min_lag, max_lag, reason_keys, reason_probs = _validate_cfg(cfg)
     if rr <= 0.0:
-        return _empty_returns_table()
+        return _empty_returns_table(_so_type)
 
     n = int(detail.num_rows)
     if n <= 0:
-        return _empty_returns_table()
+        return _empty_returns_table(_so_type)
 
     _ensure_required_columns(detail)
     detail_cc = detail.combine_chunks()
@@ -205,9 +229,11 @@ def build_sales_returns_from_detail(
     # Select candidate return lines (only positive-quantity lines can be returned).
     mask = (rng.random(n) < rr) & (qty_all > 0)
     if not bool(mask.any()):
-        return _empty_returns_table()
+        return _empty_returns_table(_so_type)
 
-    so = _as_np_i32(_col_np(detail_cc, "SalesOrderNumber"))[mask]
+    # Read as int64 to avoid truncating large order numbers; the output array is
+    # built back to _so_type below.
+    so = _as_np_i64(_col_np(detail_cc, "SalesOrderNumber"))[mask]
     line = _as_np_i32(_col_np(detail_cc, "SalesOrderLineNumber"))[mask]
     delivery_raw = _col_np(detail_cc, "DeliveryDate")[mask]
     delivery = _to_np_date_days(delivery_raw)
@@ -217,7 +243,7 @@ def build_sales_returns_from_detail(
 
     m = int(qty.size)
     if m == 0:
-        return _empty_returns_table()
+        return _empty_returns_table(_so_type)
 
     # --- Determine return quantity per line ---
     full_line = rng.random(m) < cfg.full_line_probability
@@ -352,7 +378,7 @@ def build_sales_returns_from_detail(
 
     return pa.table(
         {
-            "SalesOrderNumber": pa.array(so_exp, type=pa.int32()),
+            "SalesOrderNumber": pa.array(so_exp, type=_so_type),
             "SalesOrderLineNumber": pa.array(line_exp, type=pa.int32()),
             "ReturnDate": pa.array(ret_date, type=pa.date32()),
             "ReturnReasonKey": pa.array(reason, type=pa.int32()),
@@ -361,5 +387,5 @@ def build_sales_returns_from_detail(
             "ReturnSequence": pa.array(seq, type=pa.int32()),
             "ReturnEventKey": pa.array(return_event_key, type=pa.int64()),
         },
-        schema=RETURNS_SCHEMA,
+        schema=_returns_schema_for(_so_type),
     )

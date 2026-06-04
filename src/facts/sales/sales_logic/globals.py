@@ -325,6 +325,7 @@ class State(metaclass=_SealableMeta):
     # Day-based order ID ranges (ensures SalesOrderNumber ~ OrderDate)
     month_stride = None                # total ID space per day (num_chunks * per_chunk_alloc)
     per_chunk_alloc = None             # ID slots each chunk owns within a day
+    order_id_int64 = False             # emit SalesOrderNumber as int64 (large runs)
 
     # used by task.py when deciding to drop order cols in Sales output
     skip_order_cols_requested = None

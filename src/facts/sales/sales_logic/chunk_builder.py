@@ -1128,6 +1128,7 @@ def build_chunk_table(
     _day_stride = np.int64(State.month_stride or 0)
     _per_chunk_alloc = np.int64(State.per_chunk_alloc or 0)
     _use_day_ids = _day_stride > 0 and _per_chunk_alloc > 0
+    _order_id_int64 = bool(getattr(State, "order_id_int64", False))
 
     # ------------------------------------------------------------
     # STATIC STATE
@@ -1507,15 +1508,20 @@ def build_chunk_table(
                     + np.int64(1)
                 )
 
-                if _new_ids.size > 0 and int(_new_ids.max()) >= int(INT32_MAX):
-                    raise SalesError(
-                        f"Day-based SalesOrderNumber would overflow int32: "
-                        f"max_id={int(_new_ids.max())} >= {int(INT32_MAX)}."
-                    )
-
-                order_ids_int = np.repeat(
-                    _new_ids.astype(np.int32), _reps,
-                )
+                # Emit the dtype the schema expects (single-sourced from sales.py's
+                # _order_id_int64). int64 for large runs; int32 otherwise, with a
+                # loud overflow guard as a backstop since the int32 cast (and the
+                # schema's safe=False conversion) would otherwise wrap silently.
+                if _order_id_int64:
+                    order_ids_int = np.repeat(_new_ids, _reps)
+                else:
+                    if _new_ids.size > 0 and int(_new_ids.max()) >= int(INT32_MAX):
+                        raise SalesError(
+                            f"Day-based SalesOrderNumber would overflow int32: "
+                            f"max_id={int(_new_ids.max())} >= {int(INT32_MAX)} "
+                            "but int64 promotion was not enabled for this run."
+                        )
+                    order_ids_int = np.repeat(_new_ids.astype(np.int32), _reps)
             else:
                 order_ids_int = orders["order_ids_int"]
 

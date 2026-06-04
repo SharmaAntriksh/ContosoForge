@@ -91,6 +91,7 @@ class SalesWorkerCfg(TypedDict, total=False):
     max_lines_per_order: int
     month_stride: int
     per_chunk_alloc: int
+    order_id_int64: bool               # emit SalesOrderNumber as int64 (large runs)
 
     # -- Column control ------------------------------------------------------
     no_discount_key: Required[int]

@@ -22,9 +22,11 @@ SCHEMA-1) are deferred to the end per plan.
 |----|-----|----------------|-------|
 | **QR-1** | Medium | Quality report now checks `sales_order_header.SalesOrderNumber` uniqueness/nulls + fact-to-fact FK (returns/complaints → header). Shared `_emit_fk_check` helper. This is the **detector** for CHUNK-1. | `tests/test_quality_report.py::TestSalesOrderIntegrity` |
 | **CHUNK-1** | **High** | Within-day order cursor derived from a stable sort (`_within_day_cursor`) instead of `arange − first_index`, so SalesOrderNumber stays unique across chunks despite the post-sort customer-start clamp. Overflow guard now keys on cursor magnitude. | `tests/test_chunk_id_integrity.py`; verified end-to-end (multi-chunk header SO# unique) |
+| **SCHEMA-1 / ORCH-1** | Medium | `SalesOrderNumber` int32→int64 decision now sized to the real ~8× day-ID space (single `_order_id_int64` threaded to schema + builder + returns); warning re-thresholded. Generation/parquet facet only — SQL DDL `BIGINT` widening deferred to the SQL pass. | `TestBuildWorkerSchemas::test_order_id_int64_*`, `TestBuildSalesReturns::test_int64_*`; verified end-to-end (forced int64 run, all SO# columns int64 + consistent) |
 
-**Remaining next up (suggested order):** SCHEMA-1 / ORCH-1 (same day-ID subsystem; int64 sizing —
-non-SQL facet), then DATES-1, then the low-severity cluster. See the table below for the full list.
+**Remaining next up (suggested order):** DATES-1 (4-4-5 boundary clipping), then the low-severity
+cluster (CHUNK-3, RETURNS-1, CUST-SCD2-1/2, EMP-1, INV-1, WISH-1, etc.). SQL findings (TOOLS-1 +
+SCHEMA-1's `BIGINT` DDL facet) batched for the end. See the table below for the full list.
 
 ---
 
@@ -112,7 +114,7 @@ Lower-risk plumbing noted inline as not-deep-read.
 | ID | Sev | One-liner |
 |----|-----|-----------|
 | ✅ **CHUNK-1** | **High** | ~~Duplicate `SalesOrderNumber` across chunks: start-date clamp breaks the day-ID cursor's sorted-input assumption (multi-chunk + order cols + acquisition).~~ **FIXED** |
-| **SCHEMA-1 / ORCH-1** | Medium | int64 SO# promotion mis-thresholded; day-IDs hard-cast to int32 → runs >~268M rows crash on overflow. |
+| ✅ **SCHEMA-1 / ORCH-1** | Medium | ~~int64 SO# promotion mis-thresholded; day-IDs hard-cast to int32 → runs >~268M rows crash on overflow.~~ **FIXED** (parquet/generation; SQL DDL `BIGINT` widening deferred to SQL pass) |
 | **DATES-1** | Medium | 4-4-5 month/quarter boundaries clipped to data range at partial edge periods (masked by default buffer; exposed at `buffer_years: 0`). |
 | **CHUNK-3** | Low-Med | Final-assembly "mixed" path drops null months instead of padding (latent; would error/misalign if a column's presence varies per month). |
 | **RETURNS-1** | Low-Med | Split-return event dates not monotonic by sequence (only if `split_return_rate>0`). |
@@ -890,7 +892,9 @@ row count is preserved end-to-end.
 
 #### ORCH-1 — `total_rows` guard/warning mis-thresholded (see SCHEMA-1)
 - **Severity:** Medium (same root issue as SCHEMA-1)
-- **Status:** confirmed
+- **Status:** **fixed** (with SCHEMA-1) — the early `total_rows > 1.07B` warning is removed; a
+  correctly-sized warning now fires from the real worst-case ID (`(day_span+1)*day_stride`) after
+  day-ID sizing in `sales.py`.
 - **Where:** [sales.py:2065-2069](src/facts/sales/sales.py#L2065-L2069)
 - **What:** warns only when `total_rows > 1.07B` and claims "SalesOrderNumber will use int64",
   but the day-ID space is ~8× total_rows and the builder hard-casts to int32 and raises at
@@ -907,7 +911,17 @@ row count is preserved end-to-end.
 
 #### SCHEMA-1 — `SalesOrderNumber` int64 promotion ignores the ~8× day-ID multiplier (effective int32 cap)
 - **Severity:** Medium (loud crash on very large runs; dead promotion logic; worsened by CHUNK-1)
-- **Status:** confirmed
+- **Status:** **fixed (parquet/generation facet; SQL DDL deferred)** — a single `_order_id_int64`
+  decision is computed in `sales.py` from the true worst-case ID `(day_span+1)*day_stride` (~8×
+  total_rows) and threaded via `worker_cfg` → `build_worker_schemas` (drives `order_num_type` for
+  sales/detail/header/returns) and → `State.order_id_int64` (the chunk builder emits an int64 SO#
+  array instead of unconditionally casting to int32). `returns_builder` now mirrors the detail's
+  SalesOrderNumber dtype (reads int64-safe, builds output + empty tables to match) so returns no
+  longer silently truncate. Tests: `TestBuildWorkerSchemas::test_order_id_int64_*`,
+  `TestBuildSalesReturns::test_int64_*`. Verified end-to-end (forced int64 run: header/detail/return
+  all int64, header SO# unique = detail distinct, returns ⊆ header). **Still deferred to the SQL
+  pass:** widening `SalesOrderNumber` from `INT` to `BIGINT` in the generated SQL DDL
+  (`static_schemas.py` / SQL packagers) so CSV→SQL import doesn't overflow on >268M-row runs.
 - **Where:** [schemas.py:130](src/facts/sales/sales_worker/schemas.py#L130);
   builder hard-casts int32 at [chunk_builder.py:1482-1490](src/facts/sales/sales_logic/chunk_builder.py#L1482-L1490);
   sizing at [sales.py:2129-2131](src/facts/sales/sales.py#L2129-L2131)
