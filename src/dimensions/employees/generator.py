@@ -568,9 +568,20 @@ def generate_employee_dimension(
             np.subtract.at(within_store_idx, offsets, staff_counts[:-1])
         within_store_idx = np.cumsum(within_store_idx)
 
-        max_ek = int(STAFF_KEY_BASE) + int(staff_sk.max()) * int(STAFF_KEY_STORE_MULT) + int(within_store_idx.max())
-        if max_ek > np.iinfo(np.int64).max:
-            raise OverflowError(f"EmployeeKey would overflow int64: {max_ek}")
+        # EmployeeKey encoding reserves STAFF_KEY_STORE_MULT slots per store within
+        # the staff band. If a store has >= that many staff, within_store_idx spills
+        # into the next store's slot range, producing duplicate EmployeeKeys and
+        # wrong-store decode in _infer_home_store_key. Guard loudly — the old int64
+        # check never fired (max keys are ~5e7, far below int64). The upper band
+        # (ONLINE_EMP_KEY_BASE) is already protected: physical StoreKey < 10_000 and
+        # idx < 1_000 keep max staff key < 50M.
+        max_staff_per_store = int(staff_counts.max())
+        if max_staff_per_store >= STAFF_KEY_STORE_MULT:
+            raise DimensionError(
+                f"A store has {max_staff_per_store} staff but the EmployeeKey encoding "
+                f"reserves only {STAFF_KEY_STORE_MULT} slots per store; keys would "
+                f"collide across stores. Lower the per-store EmployeeCount."
+            )
         staff_ek = (STAFF_KEY_BASE + staff_sk * STAFF_KEY_STORE_MULT + within_store_idx).astype(np.int64)
         staff_parent = (STORE_MGR_KEY_BASE + staff_sk).astype(np.int64)
 

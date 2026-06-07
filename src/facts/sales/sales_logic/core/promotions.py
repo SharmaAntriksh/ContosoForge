@@ -12,6 +12,10 @@ import numpy as np
 
 from src.defaults import PHYSICAL_CHANNELS, DIGITAL_CHANNELS
 from src.exceptions import SalesError
+from src.utils.logging_utils import warn
+
+# Warn at most once per process when channel filtering is silently disabled.
+_warned_ch_len_mismatch = False
 
 
 # ----------------------------------------------------------------
@@ -100,6 +104,17 @@ def apply_promotions(
     _BUSINESS_CH = frozenset({4, 9})
     _has_ch_filter = (channel_keys is not None and promo_channel_group is not None
                       and len(promo_channel_group) == P)
+    # CORE-4: channel filtering requested but mis-sized -> it silently disappears.
+    # Warn (once) instead of dropping the channel correlation without a trace.
+    if (channel_keys is not None and promo_channel_group is not None
+            and len(promo_channel_group) != P):
+        global _warned_ch_len_mismatch
+        if not _warned_ch_len_mismatch:
+            _warned_ch_len_mismatch = True
+            warn(
+                f"promo_channel_group length {len(promo_channel_group)} != number of "
+                f"promotions ({P}); channel-affinity promo filtering disabled."
+            )
 
     # U is typically <= 31 when month-sliced; building lists is fast
     # and avoids a U×P boolean matrix

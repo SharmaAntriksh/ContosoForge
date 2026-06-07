@@ -70,5 +70,9 @@ def project_table_to_schema(
 
 
 def _project_table_to_schema(table: Any, schema: Any) -> Any:
-    """Backward-compatible alias (many callers expect underscore name)."""
-    return project_table_to_schema(table, schema, cast_safe=False, on_cast_error="raise")
+    """Backward-compatible alias (some callers expect the underscore name).
+
+    Uses cast_safe=True so a narrowing cast that overflows raises instead of
+    silently truncating (WRITER-1) — matching the live merge path.
+    """
+    return project_table_to_schema(table, schema, cast_safe=True, on_cast_error="raise")

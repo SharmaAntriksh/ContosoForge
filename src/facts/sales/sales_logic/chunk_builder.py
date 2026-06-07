@@ -78,7 +78,32 @@ def _clamp_order_dates_to_customer_start(
     return od_days.view("datetime64[D]")
 
 
-# Cached partition cols (immutable after State.seal(); avoids per-chunk getattr).
+def _within_day_cursor(d_off: np.ndarray) -> np.ndarray:
+    """0-based rank of each order within its OrderDate (day-offset) group.
+
+    Robust to unsorted input. ``build_orders`` returns orders sorted by date,
+    but ``_clamp_order_dates_to_customer_start`` can push individual orders onto
+    a later day *after* that sort, breaking the contiguity a naive
+    ``arange - first_index`` cursor relies on. That naive cursor would then
+    over-count within a day and spill the resulting SalesOrderNumber past the
+    per-chunk allocation band into the next chunk's band → duplicate order
+    numbers across chunks (CHUNK-1). Computing the rank from a stable sort by
+    day yields the true 0-based within-day position regardless of ordering.
+    """
+    n = d_off.shape[0]
+    if n == 0:
+        return np.empty(0, dtype=np.int64)
+    order = np.argsort(d_off, kind="stable")
+    sorted_days = d_off[order]
+    unique_days, first_idx = np.unique(sorted_days, return_index=True)
+    group_start = first_idx[np.searchsorted(unique_days, sorted_days)]
+    cursor_sorted = np.arange(n, dtype=np.int64) - group_start
+    cursor = np.empty(n, dtype=np.int64)
+    cursor[order] = cursor_sorted
+    return cursor
+
+
+# Cached partition cols (read once from the per-worker State; avoids per-chunk getattr).
 _cached_delta_pcols: set[str] | None = None
 
 
@@ -604,6 +629,32 @@ def _to_pa_array(name: str, data: object, n_rows: int, schema_types: dict) -> pa
     return pa.array(data, type=t, safe=False)
 
 
+def _assemble_column(name, bufs, month_row_counts, total_rows, schema_types) -> pa.array:
+    """Concatenate one column's per-month buffers into a single pa.Array.
+
+    *bufs* holds one entry per appended month: a numpy array, or ``None`` for a
+    month where the column produced no data. *month_row_counts* is aligned 1:1
+    with *bufs*. Null months are padded with typed nulls so the column stays the
+    full ``total_rows`` length and positionally aligned with the other columns
+    (CHUNK-3 — the old mixed path skipped null months, yielding a short, misaligned
+    column that crashed ``pa.Table.from_arrays``).
+    """
+    t = schema_types[name]
+    has_data = any(b is not None for b in bufs)
+    if not has_data:
+        return pa.nulls(total_rows, type=t)
+    if all(b is not None for b in bufs):
+        combined = np.concatenate(bufs) if len(bufs) > 1 else bufs[0]
+        return _to_pa_array(name, combined, total_rows, schema_types)
+    # Mixed: some months produced the column, others did not.
+    month_arrays = [
+        pa.nulls(int(n), type=t) if b is None
+        else _to_pa_array(name, b, len(b), schema_types)
+        for b, n in zip(bufs, month_row_counts)
+    ]
+    return pa.concat_arrays(month_arrays)
+
+
 _FAR_PAST = np.datetime64("1900-01-01", "D")
 _FAR_FUTURE = np.datetime64("2262-04-11", "D")
 
@@ -1103,6 +1154,7 @@ def build_chunk_table(
     _day_stride = np.int64(State.month_stride or 0)
     _per_chunk_alloc = np.int64(State.per_chunk_alloc or 0)
     _use_day_ids = _day_stride > 0 and _per_chunk_alloc > 0
+    _order_id_int64 = bool(getattr(State, "order_id_int64", False))
 
     # ------------------------------------------------------------
     # STATIC STATE
@@ -1308,6 +1360,9 @@ def build_chunk_table(
     # Accumulate raw numpy buffers per column; build ONE Arrow table at the end.
     # This eliminates T × C Arrow array constructions + pa.concat_tables overhead.
     col_buffers: dict[str, list] = {f.name: [] for f in schema}
+    # Rows produced per appended month, aligned 1:1 with each col_buffers list, so
+    # the final assembly can pad null months with typed nulls (CHUNK-3).
+    month_row_counts: list[int] = []
     total_rows = 0
 
     # Salesperson effective-date map + fallback (constant across months)
@@ -1460,15 +1515,18 @@ def build_chunk_table(
                 _od_D = order_dates[line_num == 1].astype("datetime64[D]")
                 _d_off = _od_D.astype(np.int64) - _date_pool_min_day
 
-                _u_days, _fi, _dc = np.unique(
-                    _d_off, return_index=True, return_counts=True,
-                )
-                _gi = np.searchsorted(_u_days, _d_off)
-                _cursor = np.arange(_oc, dtype=np.int64) - _fi[_gi]
+                # CHUNK-1: the customer-start clamp above runs AFTER build_orders
+                # sorted by date, so _d_off is no longer guaranteed sorted. Derive
+                # each order's within-day rank from a stable sort (see helper) so
+                # the cursor is correct regardless of clamp-induced reordering.
+                _cursor = _within_day_cursor(_d_off)
 
-                if int(_dc.max()) > int(_per_chunk_alloc):
+                # Guard on cursor magnitude (the value that actually overflows the
+                # per-chunk band). max(cursor)+1 is the largest per-day order count.
+                _max_day_count = int(_cursor.max(initial=-1)) + 1
+                if _max_day_count > int(_per_chunk_alloc):
                     raise SalesError(
-                        f"per_chunk_alloc too small: {int(_dc.max())} orders on one "
+                        f"per_chunk_alloc too small: {_max_day_count} orders on one "
                         f"day but alloc={int(_per_chunk_alloc)} per chunk per day."
                     )
 
@@ -1479,15 +1537,20 @@ def build_chunk_table(
                     + np.int64(1)
                 )
 
-                if _new_ids.size > 0 and int(_new_ids.max()) >= int(INT32_MAX):
-                    raise SalesError(
-                        f"Day-based SalesOrderNumber would overflow int32: "
-                        f"max_id={int(_new_ids.max())} >= {int(INT32_MAX)}."
-                    )
-
-                order_ids_int = np.repeat(
-                    _new_ids.astype(np.int32), _reps,
-                )
+                # Emit the dtype the schema expects (single-sourced from sales.py's
+                # _order_id_int64). int64 for large runs; int32 otherwise, with a
+                # loud overflow guard as a backstop since the int32 cast (and the
+                # schema's safe=False conversion) would otherwise wrap silently.
+                if _order_id_int64:
+                    order_ids_int = np.repeat(_new_ids, _reps)
+                else:
+                    if _new_ids.size > 0 and int(_new_ids.max()) >= int(INT32_MAX):
+                        raise SalesError(
+                            f"Day-based SalesOrderNumber would overflow int32: "
+                            f"max_id={int(_new_ids.max())} >= {int(INT32_MAX)} "
+                            "but int64 promotion was not enabled for this run."
+                        )
+                    order_ids_int = np.repeat(_new_ids.astype(np.int32), _reps)
             else:
                 order_ids_int = orders["order_ids_int"]
 
@@ -1903,6 +1966,7 @@ def build_chunk_table(
                 elif not isinstance(data, np.ndarray):
                     data = np.asarray(data)
                 col_buffers[f.name].append(data)
+        month_row_counts.append(n_rows)
         total_rows += n_rows
 
     # ------------------------------------------------------------------
@@ -1911,35 +1975,8 @@ def build_chunk_table(
     if total_rows == 0:
         return _empty_table(schema)
 
-    arrays = []
-    for f in schema:
-        bufs = col_buffers[f.name]
-        t = schema_types[f.name]
-
-        # Check if any month produced data for this column
-        has_data = any(b is not None for b in bufs)
-
-        if not has_data:
-            # Entire column is null across all months
-            arrays.append(pa.nulls(total_rows, type=t))
-            continue
-
-        # All-data fast path (common case: every month populates this column)
-        if all(b is not None for b in bufs):
-            combined = np.concatenate(bufs) if len(bufs) > 1 else bufs[0]
-            arrays.append(_to_pa_array(f.name, combined, total_rows, schema_types))
-            continue
-
-        # Mixed path (rare: some months null, others not)
-        # Build per-month Arrow arrays and concatenate via Arrow
-        month_arrays = []
-        for b in bufs:
-            if b is None:
-                continue  # skip null months (no rows to represent)
-            month_arrays.append(_to_pa_array(f.name, b, len(b), schema_types))
-        if month_arrays:
-            arrays.append(pa.concat_arrays(month_arrays))
-        else:
-            arrays.append(pa.nulls(total_rows, type=t))
-
+    arrays = [
+        _assemble_column(f.name, col_buffers[f.name], month_row_counts, total_rows, schema_types)
+        for f in schema
+    ]
     return pa.Table.from_arrays(arrays, schema=schema)

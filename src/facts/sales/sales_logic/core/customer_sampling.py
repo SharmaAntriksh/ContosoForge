@@ -356,13 +356,17 @@ def _urgency_pick(
     """
     if size <= 0:
         return np.empty(0, dtype=keys.dtype)
-    if size >= keys.size:
-        return keys.copy()
 
     if end_month_norm is None:
+        # No expiry info to order by.
+        if size >= keys.size:
+            return keys.copy()
         return rng.choice(keys, size=size, replace=False)
 
-    # Remaining eligibility window for each undiscovered customer.
+    # Order by urgency (nearest-expiry first) so a downstream ``[:k]`` slice keeps
+    # the most urgent customers — including when every key is forced
+    # (size >= keys.size), where the old code returned original key order and a
+    # later slice could drop near-expiry customers (CORE-1).
     # end_month == -1 means open-ended → treat as infinite remaining.
     em = end_month_norm[indices]
     remaining_months = np.where(em < 0, np.int64(999_999), em - np.int64(m_offset))
@@ -372,7 +376,7 @@ def _urgency_pick(
     sort_key = remaining_months.astype(np.float64) + jitter
 
     order = np.argsort(sort_key, kind="quicksort")
-    return keys[order[:size]]
+    return keys[order[:min(size, keys.size)]]
 
 
 # ----------------------------------------------------------------

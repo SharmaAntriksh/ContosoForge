@@ -12,6 +12,7 @@ Covers:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,11 +29,14 @@ from src.tools.sql.sql_helpers import (
 )
 from src.tools.sql.generate_create_table_scripts import (
     create_table_from_schema,
+    generate_all_create_tables,
     _validate_sql_identifier,
     _sales_output_mode,
     _skip_order_cols,
 )
-from src.utils.static_schemas import DECIMAL, INT, VARCHAR
+from src.utils.static_schemas import (
+    DECIMAL, INT, BIGINT, VARCHAR, _INT32_HALF, promote_order_number,
+)
 from src.tools.sql.generate_bulk_insert_sql import (
     _split_qualified,
     _infer_table_from_filename,
@@ -799,3 +803,53 @@ class TestCollectPhaseScripts:
 
         tables, views, constraints, cci, verify = _collect_phase_scripts(tmp_path)
         assert all(lst == [] for lst in (tables, views, constraints, cci, verify))
+
+
+# ===================================================================
+# SalesOrderNumber INT->BIGINT DDL promotion (SCHEMA-1 DDL facet)
+# ===================================================================
+
+class TestPromoteOrderNumber:
+    def test_below_threshold_unchanged(self):
+        cols = [("SalesOrderNumber", INT(not_null=True)), ("X", INT(not_null=True))]
+        # No promotion at/below the threshold: content is returned as-is.
+        assert promote_order_number(cols, _INT32_HALF) == cols
+
+    def test_above_threshold_promotes_to_bigint(self):
+        cols = [("SalesOrderNumber", INT(not_null=True)), ("X", INT(not_null=True))]
+        out = dict(promote_order_number(cols, _INT32_HALF + 1))
+        assert out["SalesOrderNumber"].sql_type == BIGINT().sql_type
+        assert out["X"].sql_type == INT(not_null=True).sql_type  # other columns untouched
+
+    def test_preserves_nullability(self):
+        # Complaints' SalesOrderNumber is nullable — promotion must keep it nullable.
+        cols = [("SalesOrderNumber", INT(not_null=False))]
+        out = dict(promote_order_number(cols, _INT32_HALF + 1))
+        assert out["SalesOrderNumber"].nullable is True
+
+
+class TestSalesOrderNumberDDLPromotion:
+    """End-to-end: the generated facts DDL widens SalesOrderNumber across every
+    fact table that carries it (Sales/Header/Detail/Return/Complaints) once the
+    configured row count would overflow int32."""
+
+    def _facts_sql(self, tmp_path, total_rows):
+        cfg = _ns(
+            sales={"sales_output": "both", "total_rows": total_rows, "skip_order_cols": False},
+            returns={"enabled": True},
+            complaints={"enabled": True},
+            dates={},
+        )
+        generate_all_create_tables(str(tmp_path), cfg)
+        return (tmp_path / "schema" / "02_create_facts.sql").read_text(encoding="utf-8")
+
+    def test_high_rows_all_bigint(self, tmp_path):
+        sql = self._facts_sql(tmp_path, _INT32_HALF + 1)
+        assert re.search(r"SalesOrderNumber\W+BIGINT\b", sql)
+        # no SalesOrderNumber column left as plain INT
+        assert not re.search(r"SalesOrderNumber\W+INT\b", sql)
+
+    def test_low_rows_stays_int(self, tmp_path):
+        sql = self._facts_sql(tmp_path, 1000)
+        assert re.search(r"SalesOrderNumber\W+INT\b", sql)
+        assert not re.search(r"SalesOrderNumber\W+BIGINT\b", sql)

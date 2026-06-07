@@ -117,7 +117,9 @@ def _inventory_worker_task(args: Tuple) -> Dict[str, Any]:
         if file_format == "csv":
             csv_path = output_base + ".csv"
             csv_df = _prepare_csv(snapshots)
-            csv_df.to_csv(csv_path, index=False)
+            # Force LF to match the BULK INSERT ROWTERMINATOR='0x0a' (pandas
+            # to_csv defaults to CRLF on Windows).
+            csv_df.to_csv(csv_path, index=False, lineterminator="\n")
 
     return {
         "chunk_idx": chunk_idx,

@@ -277,22 +277,22 @@ def build_orders(
             repeats[candidates] += share
             remaining = delta - int(share.sum())
 
-            # Bounded cleanup loop for the small remainder
-            for _ in range(8):
-                if remaining <= 0:
-                    break
+            # Distribute the small remainder. Loop to completion (each candidate
+            # gains at most 1 line per pass) rather than capping at a fixed number
+            # of passes — total headroom is sufficient, so an 8-pass cap could
+            # spuriously fail when a few candidates carry large headroom (CORE-2).
+            # Raise only when candidates are genuinely exhausted at max_lines.
+            while remaining > 0:
                 still_open = candidates[repeats[candidates] < max_lines]
                 if still_open.size == 0:
-                    break
+                    raise SalesError(
+                        f"Could not allocate {remaining} remaining order lines; all "
+                        f"candidates at max_lines={max_lines} limit"
+                    )
                 take = min(remaining, int(still_open.size))
                 chosen = rng.choice(still_open, size=take, replace=False)
                 repeats[chosen] += 1
                 remaining -= take
-            if remaining > 0:
-                raise SalesError(
-                    f"Could not allocate {remaining} remaining order lines after 8 "
-                    f"iterations; all candidates at max_lines={max_lines} limit"
-                )
 
     elif delta < 0:
         # Need fewer lines: decrement orders that have > 1 line

@@ -80,21 +80,20 @@ def add_fiscal_columns(
         df["Date"] - df["FiscalYearStartDate"]
     ).dt.days.add(1).astype(np.int32)
 
-    # Fiscal offsets relative to as_of
-    asof_mask = df["Date"] == as_of
-    asof_idx = df.index[asof_mask]
-
-    if len(asof_idx) > 0:
-        _asof = df.loc[asof_idx[0]]
-        as_of_fiscal_month_index = int(_asof["FiscalMonthIndex"])
-        as_of_fiscal_quarter_index = int(_asof["FiscalQuarterIndex"])
-        as_of_fiscal_year = int(_asof["FiscalYear"])
-        df["FiscalMonthOffset"] = (df["FiscalMonthIndex"].astype(int) - as_of_fiscal_month_index).astype(np.int32)
-        df["FiscalQuarterOffset"] = (df["FiscalQuarterIndex"].astype(int) - as_of_fiscal_quarter_index).astype(np.int32)
-        df["FiscalYearOffset"] = (df["FiscalYear"].astype(int) - as_of_fiscal_year).astype(np.int32)
-    else:
-        df["FiscalMonthOffset"] = np.int32(0)
-        df["FiscalQuarterOffset"] = np.int32(0)
-        df["FiscalYearOffset"] = np.int32(0)
+    # Fiscal offsets relative to as_of — computed arithmetically from as_of's own
+    # fiscal indices (same formulas as the columns above), matching calendar.py's
+    # offset logic. The old code located the as_of row in the frame and fell back to
+    # all-zeros when as_of wasn't present; the arithmetic form is correct regardless
+    # and never silently collapses to zero (DATES-2).
+    _am = int(as_of.month)
+    _a_fy_start = int(as_of.year) if _am >= fy_start_month else int(as_of.year) - 1
+    _a_fiscal_month_number = ((_am - fy_start_month + 12) % 12) + 1
+    _a_fiscal_quarter_number = ((_a_fiscal_month_number - 1) // 3) + 1
+    as_of_fiscal_month_index = _a_fy_start * 12 + _a_fiscal_month_number
+    as_of_fiscal_quarter_index = _a_fy_start * 4 + _a_fiscal_quarter_number
+    as_of_fiscal_year = _a_fy_start + (0 if fy_start_month == 1 else 1)
+    df["FiscalMonthOffset"] = (df["FiscalMonthIndex"].astype(int) - as_of_fiscal_month_index).astype(np.int32)
+    df["FiscalQuarterOffset"] = (df["FiscalQuarterIndex"].astype(int) - as_of_fiscal_quarter_index).astype(np.int32)
+    df["FiscalYearOffset"] = (df["FiscalYear"].astype(int) - as_of_fiscal_year).astype(np.int32)
 
     return df

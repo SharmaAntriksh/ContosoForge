@@ -78,19 +78,58 @@ def _rollup_demand_to_warehouse(
     return rolled
 
 
+def _load_pk_to_pid(parquet_dims: Path) -> Dict[int, int]:
+    """ProductKey -> ProductID (family) map from product_profile.
+
+    Returns ``{}`` when the profile has no ProductID column, in which case the
+    caller treats ProductKey as the family (no product SCD2). Used so ABC ranking
+    aggregates a SCD2 family's volume across its version keys (INV-1).
+    """
+    pp_path = parquet_dims / "product_profile.parquet"
+    if not pp_path.exists():
+        return {}
+    names = set(pq.read_schema(str(pp_path)).names)
+    if "ProductID" not in names or "ProductKey" not in names:
+        return {}
+    t = pq.read_table(str(pp_path), columns=["ProductKey", "ProductID"])
+    pk = t.column("ProductKey").to_numpy()
+    pid = t.column("ProductID").to_numpy()
+    return {int(k): int(v) for k, v in zip(pk, pid)}
+
+
 def _recompute_abc_from_demand(
     demand: pd.DataFrame,
     product_attrs_arrays: Dict[str, np.ndarray],
+    pk_to_pid: Optional[Dict[int, int]] = None,
 ) -> Dict[str, np.ndarray]:
     """Recompute ABCClassification from actual sales volume.
 
-    Ranks products by total QuantitySold across all stores and months:
+    Ranks product FAMILIES by total QuantitySold across all stores and months:
       - Top 20% by volume -> A
       - Next 30% -> B
       - Bottom 50% -> C
-      - Products with zero sales -> C
+      - Families with zero sales -> C
+
+    Under product SCD2 the demand ProductKey is version-specific, so *pk_to_pid*
+    maps each version key to its ProductID (family): volume is aggregated per
+    family before ranking and one ABC is assigned per family, then broadcast to
+    all of the family's version keys. Without SCD2 (empty/None map) ProductKey is
+    the family and behaviour is unchanged (INV-1).
     """
-    vol = demand.groupby("ProductKey", sort=False)["QuantitySold"].sum()
+    pa_pk = product_attrs_arrays["ProductKey"]
+
+    if pk_to_pid:
+        # Translate version keys -> family (ProductID); unknown keys map to self.
+        def _fam(s: pd.Series) -> pd.Series:
+            mapped = s.map(pk_to_pid)
+            return mapped.where(mapped.notna(), s).astype(np.int64)
+
+        vol = demand.groupby(_fam(demand["ProductKey"]), sort=False)["QuantitySold"].sum()
+        pa_lookup = _fam(pd.Series(pa_pk))
+    else:
+        vol = demand.groupby("ProductKey", sort=False)["QuantitySold"].sum()
+        pa_lookup = pd.Series(pa_pk)
+
     if vol.empty:
         return product_attrs_arrays
 
@@ -101,13 +140,11 @@ def _recompute_abc_from_demand(
         ranks <= n * 0.20, "A",
         np.where(ranks <= n * 0.50, "B", "C"),
     )
-    vol_abc = dict(zip(vol.index, abc))
+    vol_abc = pd.Series(abc, index=vol.index)
 
-    # Vectorised override: map product keys -> volume-based ABC;
-    # products with no sales default to C
-    pa_pk = product_attrs_arrays["ProductKey"]
-    vol_abc_series = pd.Series(vol_abc)
-    mapped = pd.Series(pa_pk).map(vol_abc_series)
+    # Vectorised override: map each product's family -> volume-based ABC;
+    # families with no sales default to C
+    mapped = pa_lookup.map(vol_abc)
     pa_abc = mapped.fillna("C").to_numpy()
     updated = int(mapped.notna().sum())
     no_sales = len(pa_abc) - updated
@@ -241,8 +278,10 @@ def run_inventory_pipeline(
     # static price-based formula in product_profile.  This ensures high-volume
     # low-price products (e.g. Tailspin Toys) are correctly classified as A.
     if product_attrs_arrays is not None and "ABCClassification" in product_attrs_arrays:
+        # Family map so a product-SCD2 family's volume is ranked as one unit (INV-1).
+        pk_to_pid = _load_pk_to_pid(parquet_dims)
         product_attrs_arrays = _recompute_abc_from_demand(
-            demand, product_attrs_arrays,
+            demand, product_attrs_arrays, pk_to_pid,
         )
         # Write updated ABC back to product_profile so Power BI sees it
         _update_product_profile_abc(parquet_dims, product_attrs_arrays)

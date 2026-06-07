@@ -16,9 +16,6 @@ def compute_prices(
     n,
     unit_price,
     unit_cost,
-    *,
-    price_pressure: float = 1.0,
-    row_price_jitter_pct: float = 0.0,
 ):
     """
     Package base product prices for downstream processing.
@@ -31,8 +28,6 @@ def compute_prices(
     rng : numpy.random.Generator
     n : int - number of rows
     unit_price, unit_cost : array-like - per-row base prices from products
-    price_pressure : float - global multiplier (default 1.0, no effect)
-    row_price_jitter_pct : float - per-row noise (default 0.0, no effect)
     """
 
     n = int(n)

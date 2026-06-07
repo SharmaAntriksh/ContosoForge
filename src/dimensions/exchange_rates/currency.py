@@ -10,7 +10,7 @@ from typing import List
 
 import pandas as pd
 
-from src.utils.logging_utils import info, skip, stage
+from src.utils.logging_utils import info, skip, stage, warn
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning.version_store import should_regenerate, save_version
 
@@ -38,6 +38,38 @@ def build_dim_currency(currencies: List[str]) -> pd.DataFrame:
     })
 
 
+def _resolve_currency_list(explicit, fx_from, fx_to) -> List[str]:
+    """Effective, normalized currency list for the dimension.
+
+    When *explicit* (``cfg.currency.currencies``) is set it is used, but always
+    unioned with the FX from/to currencies: the exchange_rates dimension looks up
+    a CurrencyKey for every from/to currency, so the currency dim must superset
+    them — otherwise the FX key-join maps a missing code to NaN and crashes on
+    ``.astype("int32")`` (FX-CUR-1). When unset, the list is derived from the FX
+    from/to union (or ``["USD"]``).
+    """
+    # Pre-dedupe + upper-case the FX codes: normalize_currency_list raises on
+    # duplicates and from/to lists overlap (e.g. USD in both), and the membership
+    # test below compares against the already-normalized `currencies`.
+    fx_codes = list(dict.fromkeys(
+        str(c).strip().upper()
+        for c in (list(fx_from or []) + list(fx_to or []))
+        if str(c).strip()
+    ))
+    if explicit:
+        currencies = normalize_currency_list(explicit)
+        missing = [c for c in fx_codes if c not in set(currencies)]
+        if missing:
+            warn(
+                f"currency.currencies omits FX currencies {missing}; adding them so "
+                "FromCurrencyKey/ToCurrencyKey resolve (the currency dim must contain "
+                "every exchange_rates from/to currency)."
+            )
+            currencies = normalize_currency_list(currencies + missing)
+        return currencies
+    return normalize_currency_list(fx_codes or ["USD"])
+
+
 # ---------------------------------------------------------
 # Pipeline wrapper
 # ---------------------------------------------------------
@@ -58,13 +90,9 @@ def run_currency(cfg, parquet_folder: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Determine effective currency list
-    if cur_cfg.currencies:
-        currencies = normalize_currency_list(cur_cfg.currencies)
-    else:
-        raw = list(dict.fromkeys(
-            list(fx_cfg.from_currencies or []) + list(fx_cfg.to_currencies or [])
-        ))
-        currencies = normalize_currency_list(raw or ["USD"])
+    currencies = _resolve_currency_list(
+        cur_cfg.currencies, fx_cfg.from_currencies, fx_cfg.to_currencies
+    )
 
     version_cfg = {
         "currencies": currencies,

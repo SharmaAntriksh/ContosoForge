@@ -387,6 +387,38 @@ class TestGenerateWishlistItems:
         )
         assert len(set(out_prod_idx)) == 10  # all unique
 
+    def test_high_collision_does_not_overflow_misc_pool(self):
+        """WISH-1: heavy dedup collisions (tiny catalog, max items/customer, full
+        affinity) drive items toward the 50+200 retry paths. The misc RNG pool must
+        be refilled with enough headroom that no item exhausts it mid-iteration
+        (IndexError with the old headroom of 60)."""
+        prod_subcat = np.array([1, 1, 2, 2, 3], dtype=np.int64)
+        product_weights = np.ones(5) / 5.0
+        pool, global_cdf = build_subcategory_pool(prod_subcat, product_weights)
+        rng = np.random.default_rng(123)
+
+        n_cust = 500
+        cust_keys = np.arange(1, n_cust + 1, dtype=np.int64)
+        items_per = np.full(n_cust, 5, dtype=np.int64)  # == n_products -> max dedup
+        total = int(items_per.sum())
+
+        out_prod_idx, *_ = generate_wishlist_items(
+            rng,
+            cust_keys=cust_keys,
+            earliest_ns=np.zeros(n_cust, dtype=np.int64),
+            latest_ns=np.full(n_cust, 10 * NS_PER_DAY, dtype=np.int64),
+            items_per=items_per,
+            purchased_map={},
+            prod_subcat=prod_subcat,
+            n_products=5,
+            global_cdf=global_cdf,
+            pool=pool,
+            conversion_rate=0.0,    # never short-circuit via purchases
+            affinity_strength=1.0,  # always enter the affinity retry path
+        )
+        assert len(out_prod_idx) == total
+        assert np.all((out_prod_idx >= 0) & (out_prod_idx < 5))
+
 
 # ===================================================================
 # SCD2 price resolution
@@ -395,43 +427,68 @@ class TestGenerateWishlistItems:
 
 class TestSCD2PriceLookup:
     def test_no_scd2_column(self):
-        df = pd.DataFrame({"ProductKey": [1, 2], "ListPrice": [10.0, 20.0]})
+        df = pd.DataFrame({
+            "ProductID": [1, 2], "ProductKey": [1, 2], "ListPrice": [10.0, 20.0],
+        })
         result = build_scd2_price_lookup(
             df,
-            prod_keys_current=np.array([1, 2], dtype=np.int64),
+            prod_ids_current=np.array([1, 2], dtype=np.int64),
             prod_prices_current=np.array([10.0, 20.0]),
         )
         assert result is None
 
     def test_single_version_per_product(self):
         df = pd.DataFrame({
+            "ProductID": [1, 2],
             "ProductKey": [1, 2],
             "ListPrice": [10.0, 20.0],
             "EffectiveStartDate": ["2023-01-01", "2023-01-01"],
         })
         result = build_scd2_price_lookup(
             df,
-            prod_keys_current=np.array([1, 2], dtype=np.int64),
+            prod_ids_current=np.array([1, 2], dtype=np.int64),
             prod_prices_current=np.array([10.0, 20.0]),
         )
-        assert result is None  # no multi-version products
+        assert result is None  # no multi-version families
 
-    def test_multi_version_lookup(self):
+    def test_returns_none_without_product_id(self):
+        """WISH-2 guard: SCD2 data present but no ProductID -> graceful None
+        (wishlists fall back to current prices) rather than mis-keying."""
         df = pd.DataFrame({
-            "ProductKey": [1, 1, 2],
+            "ProductKey": [1, 2, 3],  # unique per version, no ProductID column
+            "ListPrice": [8.0, 10.0, 20.0],
+            "EffectiveStartDate": ["2023-01-01", "2023-07-01", "2023-01-01"],
+        })
+        result = build_scd2_price_lookup(
+            df,
+            prod_ids_current=np.array([100, 200], dtype=np.int64),
+            prod_prices_current=np.array([10.0, 20.0]),
+        )
+        assert result is None
+
+    def test_multi_version_lookup_keyed_by_product_id(self):
+        """WISH-2: real products SCD2 assigns a UNIQUE ProductKey per version and a
+        shared ProductID per family. Keying by ProductID resolves the versions;
+        the old ProductKey keying saw nunique==len and returned None (dead path)."""
+        df = pd.DataFrame({
+            "ProductID": [100, 100, 200],     # family 100 has two versions
+            "ProductKey": [1, 2, 3],          # unique per version (realistic SCD2)
             "ListPrice": [8.0, 10.0, 20.0],
             "EffectiveStartDate": ["2023-01-01", "2023-07-01", "2023-01-01"],
         })
         starts, prices = build_scd2_price_lookup(
             df,
-            prod_keys_current=np.array([1, 2], dtype=np.int64),
+            prod_ids_current=np.array([100, 200], dtype=np.int64),
             prod_prices_current=np.array([10.0, 20.0]),
         )
-        assert starts.shape[0] == 2  # 2 products
+        assert starts.shape[0] == 2  # 2 product families
         assert starts.shape[1] >= 2  # at least 2 version slots
-        # Product 1 (index 0) should have 2 versions
+        # Family 100 (index 0): older version 8.0 then 10.0
         assert prices[0, 0] == 8.0
         assert prices[0, 1] == 10.0
+        # First version covers all time before the second.
+        assert starts[0, 0] == 0
+        assert starts[0, 1] > 0
 
 
 class TestResolveSCD2Prices:

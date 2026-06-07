@@ -1055,6 +1055,25 @@ DATE_COLUMN_GROUPS = {
 _INT32_HALF = 1_073_741_823  # int32_max // 2
 
 
+def promote_order_number(cols: Sequence[SchemaCol], total_rows: int) -> List[SchemaCol]:
+    """Widen ``SalesOrderNumber`` to BIGINT when *total_rows* would overflow
+    int32, preserving the column's nullability.
+
+    Single source of the int64 ``SalesOrderNumber`` decision for generated SQL:
+    used by ``get_sales_schema`` (Sales fact) and by the CREATE TABLE generator
+    for the other fact tables that carry the column (SalesOrderHeader/Detail/
+    Return/Complaints) — which pass the static (tuple) schemas. The
+    parquet/generation side makes the same int64 call via the ``order_id_int64``
+    flag.
+    """
+    if total_rows <= _INT32_HALF:
+        return list(cols)
+    return [
+        (name, BIGINT(not_null=not dtype.nullable)) if name == "SalesOrderNumber" else (name, dtype)
+        for name, dtype in cols
+    ]
+
+
 def get_sales_schema(skip_order_cols: bool, total_rows: int = 0) -> List[SchemaCol]:
     """Return the Sales schema with or without order number columns.
 
@@ -1062,12 +1081,7 @@ def get_sales_schema(skip_order_cols: bool, total_rows: int = 0) -> List[SchemaC
     promoted to BIGINT to prevent overflow in both parquet and SQL output.
     """
     cols = list(_SALES_SCHEMA_NO_ORDER if skip_order_cols else _SALES_SCHEMA)
-    if total_rows > _INT32_HALF:
-        cols = [
-            ("SalesOrderNumber", BIGINT_NN) if name == "SalesOrderNumber" else (name, dtype)
-            for name, dtype in cols
-        ]
-    return cols
+    return promote_order_number(cols, total_rows)
 
 
 def get_sales_order_header_schema() -> List[SchemaCol]:
@@ -1118,6 +1132,7 @@ def get_dates_schema(dates_cfg: Mapping) -> list[SchemaCol]:
 __all__ = [
     "STATIC_SCHEMAS",
     "DATE_COLUMN_GROUPS",
+    "promote_order_number",
     "get_sales_schema",
     "get_sales_order_header_schema",
     "get_sales_order_detail_schema",

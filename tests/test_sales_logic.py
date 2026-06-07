@@ -34,6 +34,7 @@ from src.facts.sales.sales_logic.core.delivery import (
     fmt,
 )
 from src.facts.sales.sales_logic.core.allocation import (
+    _remove_rows_stochastic,
     _safe_prob,
     _sched_mode_and_values,
     build_rows_per_month,
@@ -48,6 +49,7 @@ from src.facts.sales.sales_logic.core.customer_sampling import (
     _participation_distinct_target,
     _sample_customers,
     _update_seen_lookup,
+    _urgency_pick,
 )
 from src.facts.sales.sales_logic.globals import State
 from src.facts.budget.accumulator import BudgetAccumulator
@@ -70,10 +72,12 @@ from src.facts.inventory.engine import (
     load_inventory_config,
 )
 from src.facts.inventory.micro_agg import micro_aggregate_inventory
+from src.facts.inventory.runner import _recompute_abc_from_demand
 from src.facts.sales.sales_worker.returns_builder import (
     RETURNS_SCHEMA,
     ReturnsConfig,
     _empty_returns_table,
+    _ontime_reason_probs,
     build_sales_returns_from_detail,
 )
 from src.facts.sales.sales_worker.schemas import (
@@ -388,6 +392,22 @@ class TestApplyPromotions:
 
         with pytest.raises(SalesError, match="must align"):
             apply_promotions(_rng(), 5, dates, promo_keys, promo_start, promo_end)
+
+    def test_channel_group_length_mismatch_warns(self):
+        """CORE-4: requesting channel filtering with a mis-sized promo_channel_group
+        must warn, not silently drop the channel correlation."""
+        import src.facts.sales.sales_logic.core.promotions as promo_mod
+        promo_mod._warned_ch_len_mismatch = False
+        dates = np.array(["2023-01-15"] * 6, dtype="datetime64[D]")
+        promo_keys = np.array([1, 10], dtype=np.int32)  # P = 2
+        promo_start = np.array(["2023-01-01", "2023-01-10"], dtype="datetime64[D]")
+        promo_end = np.array(["2023-01-31", "2023-01-31"], dtype="datetime64[D]")
+        apply_promotions(
+            _rng(), 6, dates, promo_keys, promo_start, promo_end, no_discount_key=1,
+            channel_keys=np.ones(6, dtype=np.int32),
+            promo_channel_group=np.array([0], dtype=np.int8),  # len 1 != P=2
+        )
+        assert promo_mod._warned_ch_len_mismatch is True
 
 
 # ===================================================================
@@ -1015,13 +1035,6 @@ class TestBudgetAccumulator:
         assert len(df) == 1
         assert df["SalesAmount"].iloc[0] == pytest.approx(300.0)
 
-    def test_finalize_returns_none_when_empty(self):
-        acc = BudgetAccumulator(
-            country_labels=np.array(["US"]),
-            category_labels=np.array(["Electronics"]),
-        )
-        assert acc.finalize_returns() is None
-
 
 # ===================================================================
 # 10. Inventory accumulator
@@ -1129,6 +1142,41 @@ class TestBuildSalesReturns:
         cfg = ReturnsConfig(enabled=True, return_rate=0.0)
         result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
         assert result.num_rows == 0
+
+    @staticmethod
+    def _int64_detail_table(n: int, start: int) -> pa.Table:
+        rng = _rng()
+        so = np.arange(start, start + n, dtype=np.int64)
+        return pa.table({
+            "SalesOrderNumber": pa.array(so, type=pa.int64()),
+            "SalesOrderLineNumber": pa.array(np.ones(n, dtype=np.int32), type=pa.int32()),
+            "DeliveryDate": pa.array(
+                np.array(["2023-06-15"] * n, dtype="datetime64[D]"), type=pa.date32()
+            ),
+            "Quantity": pa.array(rng.integers(1, 10, size=n, dtype=np.int32), type=pa.int32()),
+            "NetPrice": pa.array(rng.uniform(10.0, 100.0, size=n), type=pa.float64()),
+            "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32), type=pa.int32()),
+        })
+
+    def test_int64_detail_preserves_dtype_and_value(self):
+        """SCHEMA-1: returns mirror int64 SalesOrderNumber without truncation."""
+        start = 2_147_483_647 + 1000  # beyond int32 range
+        detail = self._int64_detail_table(50, start)
+        cfg = ReturnsConfig(enabled=True, return_rate=1.0, min_lag_days=1, max_lag_days=30)
+        result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+        assert result.schema.field("SalesOrderNumber").type == pa.int64()
+        returned = set(result.column("SalesOrderNumber").to_pylist())
+        assert returned and returned.issubset(set(range(start, start + 50)))
+        assert min(returned) > 2_147_483_647  # not wrapped to int32
+
+    def test_int64_detail_empty_keeps_int64_schema(self):
+        """Empty result must still carry int64 SO# (cross-chunk concat consistency)."""
+        detail = self._int64_detail_table(1, 5_000_000_000)
+        result = build_sales_returns_from_detail(
+            detail, chunk_seed=42, cfg=ReturnsConfig(enabled=False),
+        )
+        assert result.num_rows == 0
+        assert result.schema.field("SalesOrderNumber").type == pa.int64()
 
     def test_full_rate_returns_rows(self):
         detail = _make_detail_table(100)
@@ -1309,6 +1357,31 @@ class TestBuildWorkerSchemas:
         )
         assert "TimeKey" in bundle.sales_schema_out.names
 
+    def test_order_number_int32_by_default(self):
+        """SCHEMA-1: small runs keep SalesOrderNumber as int32."""
+        bundle = build_worker_schemas(
+            file_format="parquet",
+            skip_order_cols=False,
+            skip_order_cols_requested=False,
+            returns_enabled=True,
+        )
+        for tbl in ("SalesOrderDetail", "SalesOrderHeader", "SalesReturn"):
+            assert bundle.schema_by_table[tbl].field("SalesOrderNumber").type == pa.int32()
+        assert bundle.sales_schema_gen.field("SalesOrderNumber").type == pa.int32()
+
+    def test_order_id_int64_promotes_all_tables(self):
+        """SCHEMA-1: order_id_int64=True promotes SalesOrderNumber everywhere."""
+        bundle = build_worker_schemas(
+            file_format="parquet",
+            skip_order_cols=False,
+            skip_order_cols_requested=False,
+            returns_enabled=True,
+            order_id_int64=True,
+        )
+        for tbl in ("SalesOrderDetail", "SalesOrderHeader", "SalesReturn"):
+            assert bundle.schema_by_table[tbl].field("SalesOrderNumber").type == pa.int64()
+        assert bundle.sales_schema_gen.field("SalesOrderNumber").type == pa.int64()
+
 
 # ===================================================================
 # Budget engine
@@ -1325,14 +1398,12 @@ class TestBudgetConfig:
         raw = AppConfig.model_validate({
             "budget": {
                 "enabled": True,
-                "report_currency": "EUR",
                 "growth_caps": {"high": 0.50, "low": -0.10},
                 "weights": {"local": 0.70, "category": 0.20, "global": 0.10},
             }
         })
         cfg = load_budget_config(raw)
         assert cfg.enabled is True
-        assert cfg.report_currency == "EUR"
         assert cfg.growth_cap_high == 0.50
         assert cfg.weight_local == 0.70
 
@@ -1405,6 +1476,29 @@ class TestComputeBudget:
         # Medium scenario with growth should be positive
         medium = yearly[yearly["Scenario"] == "Medium"]
         assert (medium["BudgetSalesAmount"] > 0).all()
+
+    def test_monthly_rolls_up_to_yearly_sparse_category(self):
+        """BUDGET-1: a category with actuals in only a few months must still have
+        its 12 monthly budgets sum to the yearly total (not overshoot)."""
+        rows = []
+        for year in [2021, 2022, 2023]:
+            for country in ["US", "UK"]:
+                for month in range(1, 13):  # Electronics: full year
+                    rows.append({"Country": country, "Category": "Electronics",
+                                 "Year": year, "Month": month, "SalesChannelKey": 1,
+                                 "SalesAmount": 1000.0 + month, "SalesQuantity": 100 + month})
+                for month in [1, 2, 3]:      # Clothing: sparse (3 months)
+                    rows.append({"Country": country, "Category": "Clothing",
+                                 "Year": year, "Month": month, "SalesChannelKey": 1,
+                                 "SalesAmount": 500.0, "SalesQuantity": 50})
+        yearly, monthly = compute_budget(pd.DataFrame(rows), BudgetConfig(enabled=True))
+
+        keys = ["Country", "Category", "BudgetYear", "Scenario"]
+        m_sum = monthly.groupby(keys)["BudgetAmount"].sum().reset_index()
+        merged = m_sum.merge(yearly[keys + ["BudgetSalesAmount"]], on=keys)
+        ratio = merged["BudgetAmount"] / merged["BudgetSalesAmount"]
+        # Under the bug, sparse Clothing overshoots ~1.75x; allow only cents rounding.
+        assert ratio.between(0.99, 1.01).all(), merged.loc[~ratio.between(0.99, 1.01)]
 
 
 # ===================================================================
@@ -1540,3 +1634,148 @@ class TestComputeInventorySnapshots:
             },
         )
         assert result.empty
+
+
+# ===================================================================
+# Chunk assembly — CHUNK-3 (null-month padding)
+# ===================================================================
+
+class TestAssembleColumn:
+    """CHUNK-3: a column produced in some months but null in others must keep
+    full length (null months padded), not be silently shortened/misaligned."""
+
+    _ST = {"v": pa.int32()}
+
+    def test_all_data_months(self):
+        from src.facts.sales.sales_logic.chunk_builder import _assemble_column
+        bufs = [np.array([1, 2], dtype=np.int32), np.array([3], dtype=np.int32)]
+        out = _assemble_column("v", bufs, [2, 1], 3, self._ST)
+        assert out.to_pylist() == [1, 2, 3]
+
+    def test_all_null_months(self):
+        from src.facts.sales.sales_logic.chunk_builder import _assemble_column
+        out = _assemble_column("v", [None, None], [2, 1], 3, self._ST)
+        assert len(out) == 3 and out.null_count == 3
+
+    def test_mixed_pads_null_months(self):
+        from src.facts.sales.sales_logic.chunk_builder import _assemble_column
+        # month0: 2 data rows, month1: 3 null rows, month2: 1 data row.
+        bufs = [np.array([1, 2], dtype=np.int32), None, np.array([9], dtype=np.int32)]
+        out = _assemble_column("v", bufs, [2, 3, 1], 6, self._ST)
+        # Must be 6 (the old code dropped the null month, giving a misaligned 3).
+        assert len(out) == 6
+        assert out.to_pylist() == [1, 2, None, None, None, 9]
+
+
+# ===================================================================
+# Inventory ABC recompute — INV-1 (SCD2 family aggregation)
+# ===================================================================
+
+class TestRecomputeABC:
+    """INV-1: ABC ranking must aggregate a product-SCD2 family's volume across
+    its version keys, not rank each version key separately."""
+
+    def _demand(self):
+        # Family (ProductID 1) split across version keys 1,2,3 (40 each = 120 total);
+        # single-version products 4..10 with individually-higher per-key volume.
+        return pd.DataFrame({
+            "ProductKey": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "QuantitySold": [40, 40, 40, 50, 45, 30, 25, 20, 15, 10],
+        })
+
+    def _attrs(self):
+        return {
+            "ProductKey": np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.int64),
+            "ABCClassification": np.array(["C"] * 10),
+        }
+
+    def test_without_family_map_fragments(self):
+        # No SCD2 map -> version keys ranked separately, family not top-tier.
+        out = _recompute_abc_from_demand(self._demand(), self._attrs())["ABCClassification"]
+        assert not all(out[i] == "A" for i in range(3))
+
+    def test_with_family_map_aggregates_to_A(self):
+        pk_to_pid = {1: 1, 2: 1, 3: 1, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10}
+        out = _recompute_abc_from_demand(self._demand(), self._attrs(), pk_to_pid)["ABCClassification"]
+        # Family total (120) is the largest -> all three version keys classified A.
+        assert all(out[i] == "A" for i in range(3))
+
+
+# ===================================================================
+# RETURNS-2 (on-time reason probabilities) + CORE-3 (exact row removal)
+# ===================================================================
+
+class TestOntimeReasonProbs:
+    """RETURNS-2: logistics reasons must stay at exactly 0 for on-time orders,
+    and the distribution must be valid (non-negative, sums to 1)."""
+
+    def test_logistics_stays_zero_and_valid(self):
+        reason_probs = np.array([0.1, 0.2, 0.3, 0.4])
+        # Last reason is logistics — the old boundary guard forced mass onto it.
+        logistics_mask = np.array([False, False, False, True])
+        p = _ontime_reason_probs(reason_probs, logistics_mask)
+        assert p[3] == 0.0                      # logistics slot never revived
+        assert np.all(p >= 0.0)                 # never negative -> rng.choice safe
+        assert abs(float(p.sum()) - 1.0) < 1e-12
+
+    def test_multiple_logistics_including_last(self):
+        reason_probs = np.array([0.25, 0.25, 0.25, 0.25])
+        logistics_mask = np.array([False, True, False, True])
+        p = _ontime_reason_probs(reason_probs, logistics_mask)
+        assert p[1] == 0.0 and p[3] == 0.0
+        assert np.all(p >= 0.0)
+        assert abs(float(p.sum()) - 1.0) < 1e-12
+
+    def test_all_logistics_falls_back_to_uniform(self):
+        reason_probs = np.array([0.5, 0.5])
+        logistics_mask = np.array([True, True])
+        p = _ontime_reason_probs(reason_probs, logistics_mask)
+        assert np.all(p >= 0.0)
+        assert abs(float(p.sum()) - 1.0) < 1e-12
+
+
+class TestRemoveRowsStochastic:
+    """CORE-3: must remove exactly `need` rows (loop to completion), not stop
+    short at a fixed iteration cap."""
+
+    def test_removes_exact_amount_few_candidates_large_need(self):
+        rng = np.random.default_rng(1)
+        rows = np.array([100, 100], dtype=np.int64)   # 2 candidates, lots of rows
+        _remove_rows_stochastic(rng, rows, 150, np.array([0, 1]), np.ones(2))
+        assert int(rows.sum()) == 50                   # 200 - 150 removed exactly
+
+    def test_stops_when_candidates_exhausted(self):
+        rng = np.random.default_rng(2)
+        rows = np.array([3, 4], dtype=np.int64)        # only 7 rows available
+        _remove_rows_stochastic(rng, rows, 10, np.array([0, 1]), np.ones(2))
+        assert int(rows.sum()) == 0                    # removes all it can, no hang
+
+
+# ===================================================================
+# CORE-1 (urgency ordering in the all-forced corner)
+# ===================================================================
+
+class TestUrgencyPick:
+    """CORE-1: when every undiscovered key is forced (size >= keys.size), the
+    result must still be ordered by urgency (nearest-expiry first), so a
+    downstream [:k] slice keeps the most urgent customers."""
+
+    def test_all_forced_returns_urgency_order(self):
+        keys = np.array([10, 20, 30, 40], dtype=np.int64)
+        indices = np.array([0, 1, 2, 3])
+        end_month_norm = np.array([5, 2, 8, 3], dtype=np.int64)  # remaining: 5,2,8,3
+        out = _urgency_pick(
+            np.random.default_rng(0), keys, indices, end_month_norm, m_offset=0, size=4,
+        )
+        # Nearest expiry is key 20 (remaining 2); original order would put 10 first.
+        assert out[0] == 20
+        assert list(out) == [20, 40, 10, 30]
+
+    def test_subset_still_urgency_order(self):
+        keys = np.array([10, 20, 30, 40], dtype=np.int64)
+        indices = np.array([0, 1, 2, 3])
+        end_month_norm = np.array([5, 2, 8, 3], dtype=np.int64)
+        out = _urgency_pick(
+            np.random.default_rng(0), keys, indices, end_month_norm, m_offset=0, size=2,
+        )
+        assert list(out) == [20, 40]  # two most urgent

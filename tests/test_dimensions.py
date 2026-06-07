@@ -26,6 +26,7 @@ from src.dimensions.stores.generator import GeoContext
 # Currency / Exchange Rates
 # ---------------------------------------------------------------------------
 from src.dimensions.exchange_rates import build_dim_currency
+from src.dimensions.exchange_rates.currency import _resolve_currency_list
 from src.dimensions.exchange_rates.helpers import normalize_currency_list
 from src.dimensions.exchange_rates.monthly_rates import build_monthly_rates
 
@@ -300,6 +301,24 @@ class TestNormalizeCurrencyList:
     def test_case_normalized(self):
         result = normalize_currency_list(["usd", "Eur", "GBP"])
         assert result == ["USD", "EUR", "GBP"]
+
+
+class TestResolveCurrencyList:
+    """FX-CUR-1: the currency dim must superset the FX from/to currencies."""
+
+    def test_explicit_omitting_fx_currency_is_unioned_in(self):
+        # Explicit list omits EUR, but FX needs it -> EUR must be added.
+        result = _resolve_currency_list(["USD", "GBP"], ["USD"], ["EUR"])
+        assert "EUR" in result
+        assert set(["USD", "GBP", "EUR"]).issubset(result)
+
+    def test_explicit_superset_is_unchanged(self):
+        result = _resolve_currency_list(["USD", "EUR", "GBP"], ["USD"], ["EUR"])
+        assert result == ["USD", "EUR", "GBP"]
+
+    def test_no_explicit_derives_from_fx_union(self):
+        result = _resolve_currency_list(None, ["USD"], ["EUR", "JPY"])
+        assert set(["USD", "EUR", "JPY"]).issubset(result)
 
 
 # ===================================================================
@@ -619,6 +638,37 @@ class TestGenerateEmployeeDimension:
 
     def test_employee_key_unique(self, people_pools):
         stores = self._make_stores()
+        df = generate_employee_dimension(
+            stores=stores,
+            seed=42,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+            people_pools=people_pools,
+        )
+        assert df["EmployeeKey"].is_unique
+
+    def test_over_1000_staff_raises_not_silent_collision(self, people_pools):
+        """EMP-1: a store with >= STAFF_KEY_STORE_MULT staff would spill into the
+        next store's EmployeeKey band. Guard must raise loudly, not corrupt."""
+        stores = self._make_stores(n=3)
+        # EmployeeCount includes the manager, so 1002 -> 1001 staff -> idx hits 1001.
+        stores.loc[1, "EmployeeCount"] = 1002
+        stores["StoreType"] = "Supermarket"  # ensure all physical
+        with pytest.raises(DimensionError, match="slots per store"):
+            generate_employee_dimension(
+                stores=stores,
+                seed=42,
+                global_start=pd.Timestamp("2021-01-01"),
+                global_end=pd.Timestamp("2025-12-31"),
+                people_pools=people_pools,
+            )
+
+    def test_just_under_1000_staff_stays_unique(self, people_pools):
+        """EMP-1 boundary: 999 staff/store (idx max 999) stays within the per-store
+        slot band -> no collision, keys still unique."""
+        stores = self._make_stores(n=3)
+        stores["EmployeeCount"] = 1000  # 999 staff each
+        stores["StoreType"] = "Supermarket"
         df = generate_employee_dimension(
             stores=stores,
             seed=42,

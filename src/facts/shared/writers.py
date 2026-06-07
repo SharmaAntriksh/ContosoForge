@@ -90,7 +90,10 @@ def write_fact_table(
         if _bool_cols:
             df = df.assign(**{c: df[c].astype("Int8") for c in _bool_cols})
         csv_df = csv_prep_fn(df) if csv_prep_fn else df
-        kwargs: dict = {"index": False}
+        # Force LF: pandas to_csv defaults to CRLF on Windows, but the generated
+        # SQL BULK INSERT hardcodes ROWTERMINATOR='0x0a' (LF). A trailing \r would
+        # break numeric last columns and silently corrupt string ones.
+        kwargs: dict = {"index": False, "lineterminator": "\n"}
         if csv_float_format:
             kwargs["float_format"] = csv_float_format
 

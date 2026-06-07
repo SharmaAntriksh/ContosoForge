@@ -89,22 +89,22 @@ def _remove_rows_stochastic(
     need: int,
     candidates: np.ndarray,
     weights: np.ndarray,
-    max_iters: int = 8,
 ) -> None:
     """
     Remove *exactly* `need` rows from `rows` at `candidates` indices,
-    weighted by `weights`, iterating until the full amount is removed or
-    no candidates remain.
+    weighted by `weights`, looping until the full amount is removed or no
+    candidate has rows left.
 
-    Mutates `rows` in-place.
+    Loops to completion rather than capping at a fixed number of passes: the
+    caller's candidates hold enough rows, so a fixed cap could silently leave
+    `rows.sum()` above target (CORE-3). Each pass removes >= 1 row, so it
+    terminates. Mutates `rows` in-place.
     """
     # Pre-allocate the lookup table once at the max possible size
     idx_map_size = int(candidates.max()) + 1 if candidates.size > 0 else 0
     idx_map = np.empty(idx_map_size, dtype="int64") if idx_map_size > 0 else None
 
-    for _ in range(max_iters):
-        if need <= 0:
-            break
+    while need > 0:
         # refresh: only candidates that still have rows
         active_mask = rows[candidates] > 0
         active = candidates[active_mask]

@@ -2,26 +2,18 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace as _dc_replace
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Callable
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
-try:
-    import pyarrow.parquet as pq
-except ImportError:  # pragma: no cover
-    pq = None  # type: ignore
-
 from ..sales_logic import State, build_chunk_table
 from ..sales_logic.columns import (
-    DIGITAL_HOUR_W,
     SALES_CHANNEL_CORE_KEYS,
-    _normalize_prob as _normalize_hour_prob,
-    _PROFILE_FROM_GROUP,
-    _parse_time_str,
-    _build_channel_hour_weights,
+    _load_sales_channels,
+    _sample_hour_weighted_minute,
+    _sample_timekey_by_channel,
 )
 from ..output_paths import TABLE_SALES, TABLE_SALES_ORDER_DETAIL, TABLE_SALES_ORDER_HEADER
 
@@ -36,7 +28,7 @@ from .returns_builder import ReturnsConfig, RETURNS_REQUIRED_DETAIL_COLS, build_
 
 # Budget streaming aggregation (lazy import to avoid hard dependency)
 try:
-    from src.facts.budget.micro_agg import micro_aggregate_sales, micro_aggregate_returns
+    from src.facts.budget.micro_agg import micro_aggregate_sales
     _BUDGET_AGG_AVAILABLE = True
 except ImportError:
     _BUDGET_AGG_AVAILABLE = False
@@ -293,42 +285,18 @@ def _maybe_build_returns(
 # SalesChannelKey + TimeKey
 # -----------------------------
 
-def _dims_parquet_folder() -> Optional[Path]:
-    for attr in ("parquet_folder_p", "parquet_folder", "dimensions_parquet_folder", "dims_parquet_folder"):
-        v = getattr(State, attr, None)
-        if v:
-            return Path(v)
-    return None
+def _channel_keys_and_probs() -> tuple[np.ndarray, np.ndarray]:
+    """(keys, p) for sampling SalesChannelKey, from the shared channel loader.
 
-
-def _sales_channels_spec() -> tuple[np.ndarray, np.ndarray]:
+    Falls back to the core channel keys from defaults when the dimension
+    parquet is unavailable.
     """
-    Returns (keys:int16[], p:float64[]) for sampling SalesChannelKey.
-    Tries sales_channels.parquet; falls back to [1..5].
-    Cached on State.
-    """
-    cached = getattr(State, "_sales_channel_spec", None)
-    if cached is not None:
-        return cached
-
-    keys: Optional[np.ndarray] = None
-
-    folder = _dims_parquet_folder()
-    if pq is not None and folder is not None:
-        pth = folder / "sales_channels.parquet"
-        if pth.exists():
-            tab = pq.read_table(pth, columns=["SalesChannelKey"])
-            arr = np.asarray(tab["SalesChannelKey"].to_numpy(), dtype=np.int32)
-            arr = arr[arr != np.int32(0)]  # don't sample Unknown
-            if arr.size:
-                keys = arr
-
-    if keys is None or keys.size == 0:
+    cache = _load_sales_channels(State)
+    if cache is None:
         keys = SALES_CHANNEL_CORE_KEYS
-
-    p = np.full(keys.shape[0], 1.0 / keys.shape[0], dtype=np.float64)
-    State._sales_channel_spec = (keys, p)
-    return State._sales_channel_spec
+        return keys, np.full(keys.shape[0], 1.0 / keys.shape[0], dtype=np.float64)
+    keys, p, _ = cache
+    return keys, p
 
 
 def _ensure_sales_channel_key_on_lines(
@@ -339,7 +307,7 @@ def _ensure_sales_channel_key_on_lines(
     if "SalesChannelKey" in table.column_names:
         return table
 
-    keys, p = _sales_channels_spec()
+    keys, p = _channel_keys_and_probs()
     rng = np.random.default_rng(seed)
 
     if order_enc is not None:
@@ -364,101 +332,6 @@ def _ensure_sales_channel_key_on_lines(
     return table.append_column("SalesChannelKey", col)
 
 
-def _sample_hour_weighted_minute(rng: np.random.Generator, size: int, hour_p: np.ndarray) -> np.ndarray:
-    """Sample minute-of-day values given pre-normalized hour probabilities."""
-    if size <= 0:
-        return np.empty(0, dtype=np.int32)
-    hours = rng.choice(24, size=size, p=hour_p).astype(np.int32)
-    mins = rng.integers(0, 60, size=size, dtype=np.int32)
-    return (hours * 60 + mins).astype(np.int32, copy=False)
-
-
-_cached_digital_w: np.ndarray | None = None
-
-
-def _sample_time_keys_by_channel(
-    rng: np.random.Generator,
-    channel_keys: np.ndarray,
-    channel_hour_lut: np.ndarray,
-) -> np.ndarray:
-    """Sample minute-of-day TimeKey values using per-channel hour weights."""
-    global _cached_digital_w
-    keys = np.asarray(channel_keys, dtype=np.int32)
-    n_total = keys.shape[0]
-    out = np.empty(n_total, dtype=np.int32)
-
-    if _cached_digital_w is None:
-        _cached_digital_w = _normalize_hour_prob(DIGITAL_HOUR_W)
-    digital_w = _cached_digital_w
-
-    # Group by channel via argsort (avoids O(channels × n) mask scans)
-    unique_cks, inverse = np.unique(keys, return_inverse=True)
-    order = np.argsort(inverse, kind="stable")
-    counts = np.bincount(inverse, minlength=len(unique_cks))
-    starts = np.zeros(len(unique_cks) + 1, dtype=np.int64)
-    np.cumsum(counts, out=starts[1:])
-
-    lut_size = channel_hour_lut.shape[0]
-    for i, ck in enumerate(unique_cks):
-        s, e = int(starts[i]), int(starts[i + 1])
-        n = e - s
-        ck_int = int(ck)
-        hour_w = channel_hour_lut[ck_int] if ck_int < lut_size else digital_w
-        out[order[s:e]] = _sample_hour_weighted_minute(rng, n, hour_w)
-    return out
-
-
-def _channel_hour_lut_from_dim() -> Optional[np.ndarray]:
-    """
-    channel_hour_lut[key] -> 24-element normalized hour-weight array.
-
-    Each channel's profile weights are masked to its OpenTime/CloseTime window.
-    Cached on State.
-    """
-    cached = getattr(State, "_sales_channel_hour_lut", None)
-    if cached is not None:
-        return cached
-
-    folder = _dims_parquet_folder()
-    if pq is None or folder is None:
-        return None
-
-    pth = folder / "sales_channels.parquet"
-    if not pth.exists():
-        return None
-
-    read_cols = ["SalesChannelKey", "ChannelGroup"]
-    schema = pq.read_schema(pth)
-    col_names = set(schema.names)
-    has_times = "OpenTime" in col_names and "CloseTime" in col_names
-    if has_times:
-        read_cols += ["OpenTime", "CloseTime"]
-
-    tab = pq.read_table(pth, columns=read_cols)
-    keys = np.asarray(tab["SalesChannelKey"].to_numpy(), dtype=np.int64)
-    groups = np.asarray(tab["ChannelGroup"].to_numpy(), dtype=object)
-    open_times = np.asarray(tab["OpenTime"].to_numpy(), dtype=object) if has_times else None
-    close_times = np.asarray(tab["CloseTime"].to_numpy(), dtype=object) if has_times else None
-
-    if keys.size == 0:
-        return None
-
-    maxk = int(keys.max())
-    digital_w = _normalize_hour_prob(DIGITAL_HOUR_W)
-    lut = np.tile(digital_w, (maxk + 1, 1))  # default: digital
-
-    for i, (k, g) in enumerate(zip(keys, groups)):
-        if k < 0:
-            continue
-        profile_code = int(_PROFILE_FROM_GROUP.get((g or "").strip().lower(), 1))
-        oh = _parse_time_str(open_times[i]) if open_times is not None else -1
-        ch = _parse_time_str(close_times[i]) if close_times is not None else -1
-        lut[int(k)] = _build_channel_hour_weights(profile_code, oh, ch)
-
-    State._sales_channel_hour_lut = lut
-    return lut
-
-
 def _combine_if_chunked(col: pa.Array) -> pa.Array:
     """Combine a ChunkedArray into a single array; pass-through otherwise."""
     if isinstance(col, pa.ChunkedArray):
@@ -473,7 +346,8 @@ def _ensure_time_key_on_lines(
     """Ensure TimeKey exists and is constant within SalesOrderNumber (if present)."""
     rng = np.random.default_rng(seed)
 
-    channel_hour_lut = _channel_hour_lut_from_dim()
+    cache = _load_sales_channels(State)
+    channel_hour_lut = cache[2] if cache is not None else None
     has_channel = "SalesChannelKey" in table.column_names and channel_hour_lut is not None
 
     if order_enc is not None:
@@ -497,7 +371,7 @@ def _ensure_time_key_on_lines(
                 dtype=np.int32,
             )
             per_order_sc = sc_np[first]
-            per_order_time = _sample_time_keys_by_channel(rng, per_order_sc, channel_hour_lut)
+            per_order_time = _sample_timekey_by_channel(rng, per_order_sc, channel_hour_lut)
             per_order_arr = pa.array(per_order_time, type=pa.int32())
             time_col = pc.take(per_order_arr, enc.indices)
         else:
@@ -536,7 +410,7 @@ def _ensure_time_key_on_lines(
                 dtype=np.int32,
             )
             per_order_sc = sc_np[first]
-            per_order_time = _sample_time_keys_by_channel(rng, per_order_sc, channel_hour_lut)
+            per_order_time = _sample_timekey_by_channel(rng, per_order_sc, channel_hour_lut)
             per_order_arr = pa.array(per_order_time, type=pa.int32())
             time_col = pc.take(per_order_arr, enc.indices)
         else:
@@ -555,7 +429,7 @@ def _ensure_time_key_on_lines(
             _combine_if_chunked(table["SalesChannelKey"]).to_numpy(zero_copy_only=False),
             dtype=np.int32,
         )
-        out = _sample_time_keys_by_channel(rng, sc_np, channel_hour_lut)
+        out = _sample_timekey_by_channel(rng, sc_np, channel_hour_lut)
         time_col = pa.array(out, type=pa.int32())
     else:
         per_row = rng.integers(0, 1440, size=table.num_rows, dtype=np.int32)
@@ -703,22 +577,6 @@ def _maybe_budget_agg(detail_table: pa.Table) -> Optional[Dict[str, Any]]:
     )
 
 
-def _maybe_returns_agg(
-    returns_table: Optional[pa.Table],
-    detail_table: pa.Table,
-) -> Optional[Dict[str, Any]]:
-    """Compute returns micro-aggregate from a returns chunk. Returns None if disabled."""
-    if not _budget_enabled():
-        return None
-    if returns_table is None or returns_table.num_rows == 0:
-        return None
-    return micro_aggregate_returns(
-        returns_table, detail_table,
-        store_to_country=State.budget_store_to_country,
-        product_to_cat=State.budget_product_to_cat,
-    )
-
-
 def _attach_aggs(
     result: Any,
     aggs: Dict[str, Any],
@@ -853,9 +711,6 @@ def _worker_task(args):
             out: Dict[str, Any] = {TABLE_SALES: _write_table(TABLE_SALES, idx_i, sales_out)}
             returns_out = _project_for_table(TABLE_SALES_RETURN, returns_table)  # type: ignore[arg-type]
             out[TABLE_SALES_RETURN] = _write_table(TABLE_SALES_RETURN, idx_i, returns_out)  # type: ignore[arg-type]
-            returns_agg = _maybe_returns_agg(returns_table, detail_table) if do_budget else None
-            if returns_agg is not None:
-                chunk_aggs["_returns_agg"] = returns_agg
             results.append(_attach_aggs(out, chunk_aggs))
             continue
 
@@ -884,9 +739,6 @@ def _worker_task(args):
                 TABLE_SALES_RETURN, idx_i, _project_for_table(TABLE_SALES_RETURN, returns_table)  # type: ignore[arg-type]
             )
 
-        returns_agg = _maybe_returns_agg(returns_table, detail_table) if do_budget else None
-        if returns_agg is not None:
-            chunk_aggs["_returns_agg"] = returns_agg
         results.append(_attach_aggs(out, chunk_aggs))
 
     return results[0] if single else results

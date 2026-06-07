@@ -7,7 +7,7 @@ from typing import List, Optional, Sequence, Set
 import pyarrow as pa
 
 from ..output_paths import TABLE_SALES, TABLE_SALES_ORDER_DETAIL, TABLE_SALES_ORDER_HEADER, TABLE_SALES_RETURN
-from .returns_builder import RETURNS_SCHEMA as _RETURNS_SCHEMA_BASE
+from .returns_builder import _returns_schema_for
 
 
 def schema_dict_cols(schema: pa.Schema, exclude: Optional[Set[str]] = None) -> List[str]:
@@ -52,7 +52,6 @@ class WorkerSchemaBundle:
     schema_with_order_delta: pa.Schema
 
 
-_INT32_MAX = 2_147_483_647
 _ALL_DELTA_FIELDS = {"Year": pa.field("Year", pa.int16()), "Month": pa.field("Month", pa.int16())}
 
 
@@ -64,7 +63,7 @@ def build_worker_schemas(
     returns_enabled: bool,
     parquet_dict_exclude: Optional[Set[str]] = None,
     models_cfg: Optional[dict] = None,
-    total_rows: int = 0,
+    order_id_int64: bool = False,
     partition_cols: Optional[Sequence[str]] = None,
 ) -> WorkerSchemaBundle:
     """
@@ -126,8 +125,10 @@ def build_worker_schemas(
         pa.field("IsOrderDelayed", pa.bool_()),
     ]
 
-    # Promote SalesOrderNumber to int64 if total_rows approaches int32 limit
-    order_num_type = pa.int64() if total_rows > _INT32_MAX // 2 else pa.int32()
+    # Promote SalesOrderNumber to int64 when the day-based ID space would exceed
+    # int32. `order_id_int64` (computed from the real ~8x-total_rows ID ceiling in
+    # sales.py) is the single authoritative signal.
+    order_num_type = pa.int64() if order_id_int64 else pa.int32()
     order_fields = [
         pa.field("SalesOrderNumber", order_num_type),
         pa.field("SalesOrderLineNumber", pa.int32()),
@@ -210,13 +211,9 @@ def build_worker_schemas(
     # returns_builder.py (single source of truth for column names & types).
     # ---------------------------------------------------------------------
     if returns_enabled:
-        base_return_fields = list(_RETURNS_SCHEMA_BASE)
-        # Promote SalesOrderNumber in returns schema to match sales schema
-        if order_num_type != pa.int32():
-            base_return_fields = [
-                pa.field(f.name, order_num_type) if f.name == "SalesOrderNumber" else f
-                for f in base_return_fields
-            ]
+        # SalesOrderNumber dtype mirrors the sales schema. _returns_schema_for is
+        # the single source for that field swap (shared with returns_builder).
+        base_return_fields = list(_returns_schema_for(order_num_type))
         return_schema = pa.schema(base_return_fields + delta_fields) if is_delta else pa.schema(base_return_fields)
         schema_by_table[TABLE_SALES_RETURN] = return_schema
 

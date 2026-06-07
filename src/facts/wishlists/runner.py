@@ -499,6 +499,10 @@ def run_wishlist_pipeline(
     _has_scd2 = "EffectiveStartDate" in _prod_schema_names
     if _has_scd2:
         _prod_cols.append("EffectiveStartDate")
+        # ProductID is the SCD2 version-family key (WISH-2); needed to resolve
+        # historical wishlist prices since ProductKey is unique per version.
+        if "ProductID" in _prod_schema_names:
+            _prod_cols.append("ProductID")
     if "IsCurrent" in _prod_schema_names:
         _prod_cols.append("IsCurrent")
     all_products = pd.read_parquet(products_fp, columns=_prod_cols)
@@ -511,10 +515,14 @@ def run_wishlist_pipeline(
     product_weights = _build_product_weights(products, parquet_dims)
     purchased_pairs = accumulator.finalize()
 
-    # Build SCD2 price lookup (None if SCD2 not active)
-    prod_keys_arr = products["ProductKey"].to_numpy().astype(np.int64)
+    # Build SCD2 price lookup (None if SCD2 not active). Keyed by ProductID, aligned
+    # with the current-product row order so resolve_scd2_prices' prod_idx matches.
     prod_prices_arr = products["ListPrice"].to_numpy().astype(np.float64)
-    scd2_lookup = build_scd2_price_lookup(all_products, prod_keys_arr, prod_prices_arr)
+    prod_ids_arr = (
+        products["ProductID"].to_numpy().astype(np.int64)
+        if "ProductID" in products.columns else None
+    )
+    scd2_lookup = build_scd2_price_lookup(all_products, prod_ids_arr, prod_prices_arr)
 
     wishlists_dir = fact_out / "customer_wishlists"
     wishlists_dir.mkdir(parents=True, exist_ok=True)
@@ -565,14 +573,16 @@ def run_wishlist_pipeline(
         df = pq.read_table(str(pq_path)).to_pandas()
         pq_path.unlink()
 
+        # Force LF: the generated BULK INSERT uses ROWTERMINATOR='0x0a', but pandas
+        # to_csv defaults to CRLF on Windows (trailing \r breaks the last column).
         if _csv_chunk and _csv_chunk > 0 and n_rows > _csv_chunk:
             n_files = 0
             for start in range(0, n_rows, _csv_chunk):
                 chunk_path = wishlists_dir / f"customer_wishlists_{n_files:05d}.csv"
-                df.iloc[start:start + _csv_chunk].to_csv(str(chunk_path), index=False)
+                df.iloc[start:start + _csv_chunk].to_csv(str(chunk_path), index=False, lineterminator="\n")
                 n_files += 1
         else:
-            df.to_csv(str(wishlists_dir / "customer_wishlists.csv"), index=False)
+            df.to_csv(str(wishlists_dir / "customer_wishlists.csv"), index=False, lineterminator="\n")
 
     elif file_format == "deltaparquet" and n_rows > 0:
         table = pq.read_table(str(pq_path))

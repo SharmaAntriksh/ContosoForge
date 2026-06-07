@@ -295,6 +295,24 @@ def _build_region_pools(geography: pd.DataFrame) -> dict:
     return pools
 
 
+def _event_offsets(rng: np.random.Generator, n_events: int, max_offset: int) -> np.ndarray:
+    """Strictly-increasing day offsets for a customer's SCD2 life events.
+
+    Offsets are drawn in ``[90, max_offset)``, spaced >= 60 days apart, then
+    de-duplicated. The spacing clamp (`min(prev+60, max_offset-1)`) can leave
+    consecutive offsets *equal* when the draws cluster near ``max_offset``; equal
+    offsets would chain two versions sharing an EffectiveStartDate, producing a
+    version row with EffectiveEndDate < EffectiveStartDate (CUST-SCD2-1). Returning
+    only strictly-increasing offsets (possibly fewer than ``n_events``) guarantees
+    every emitted interval has end >= start.
+    """
+    offsets = np.sort(rng.integers(90, max_offset, size=n_events))
+    for i in range(1, len(offsets)):
+        if offsets[i] - offsets[i - 1] < 60:
+            offsets[i] = min(offsets[i - 1] + 60, max_offset - 1)
+    return np.unique(offsets)
+
+
 def expand_changed_customers(
     rng: np.random.Generator,
     changed_df: pd.DataFrame,
@@ -366,10 +384,7 @@ def expand_changed_customers(
             continue
 
         max_offset = max(91, total_days - 90)
-        offsets = np.sort(rng.integers(90, max_offset, size=n_events))
-        for i in range(1, len(offsets)):
-            if offsets[i] - offsets[i - 1] < 60:
-                offsets[i] = min(offsets[i - 1] + 60, max_offset - 1)
+        offsets = _event_offsets(rng, n_events, max_offset)
         _offset_td = offsets.astype("timedelta64[D]")
         event_dates = np.datetime64(cust_start, "D") + _offset_td
 
@@ -439,9 +454,16 @@ def generate_scd2_versions(
     Selects a fraction of individual customers (change_rate), then delegates
     to expand_changed_customers() for the per-row life event simulation.
     """
-    change_rate = float(getattr(cust_cfg, "change_rate", 0.15))
     max_versions = int(getattr(cust_cfg, "max_versions", 4))
 
+    # max_versions <= 1 means "no extra versions": skip expansion entirely (mirrors
+    # products/scd2.py). base_df already carries EffectiveStartDate/EffectiveEndDate/
+    # IsCurrent as a single current version, so it is returned as-is. Also avoids
+    # rng.integers(1, max_versions) raising ValueError when max_versions == 1.
+    if max_versions <= 1:
+        return base_df
+
+    change_rate = float(getattr(cust_cfg, "change_rate", 0.15))
     person_mask = base_df["CustomerType"] == "Individual"
     person_ids = base_df.loc[person_mask, "CustomerID"].to_numpy()
 

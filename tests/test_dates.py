@@ -191,6 +191,22 @@ class TestFiscalBoundaries:
         # FY starts in May 2024, FiscalYear label should be 2025 (end-year convention)
         assert "2025" in str(row["FiscalYearRange"])
 
+    def test_fiscal_offsets_arithmetic_when_as_of_not_in_frame(self):
+        """DATES-2: fiscal offsets are computed arithmetically from as_of, so they
+        are correct even when as_of is not a row in the frame (the old row-lookup
+        fell back to all-zeros)."""
+        dates = pd.date_range("2024-01-01", "2024-12-31", freq="MS")
+        df = pd.DataFrame({"Date": dates,
+                           "Year": dates.year, "Month": dates.month})
+        as_of = pd.Timestamp("2025-03-15")  # outside the 2024 frame
+        out = add_fiscal_columns(df, fiscal_start_month=5, as_of=as_of)
+        # Not all zeros (the old fallback), and all 2024 dates precede as_of's month.
+        assert out["FiscalMonthOffset"].nunique() > 1
+        assert (out["FiscalMonthOffset"] < 0).all()
+        # Dec 2024 is 3 fiscal months before as_of (2025-03), fiscal_start=5.
+        dec = out[out["Month"] == 12].iloc[0]
+        assert int(dec["FiscalMonthOffset"]) == -3
+
     def test_all_fiscal_start_months_valid(self):
         """Every fiscal_start_month 1-12 should produce valid data."""
         for m in range(1, 13):
@@ -397,6 +413,60 @@ class TestWeeklyFiscalColumns:
         if len(q1) >= 13:
             weeks_by_month = q1.groupby("FWMonthNumber")["FWWeekNumber"].nunique()
             assert list(weeks_by_month.values[:3]) == [5, 4, 4]
+
+    def test_period_length_consistency(self):
+        """DATES-1: month/quarter boundaries are arithmetic, not clipped to the
+        data range. start + length - 1 must equal end for EVERY row (including the
+        first/last partial periods), and the day-of-period must stay within range.
+        Under the old groupby min/max this failed at the table edges."""
+        # Fiscal year starts in May, so the table edges are mid-fiscal-period.
+        df = self._make_wf("2023-01-01", "2025-12-31", fiscal=5)
+
+        start_m = pd.to_datetime(df["FWStartOfMonth"])
+        end_m = pd.to_datetime(df["FWEndOfMonth"])
+        assert (start_m + pd.to_timedelta(df["FWMonthDays"] - 1, unit="D") == end_m).all()
+        assert df["FWDayOfMonth"].between(1, df["FWMonthDays"]).all()
+
+        start_q = pd.to_datetime(df["FWStartOfQuarter"])
+        end_q = pd.to_datetime(df["FWEndOfQuarter"])
+        assert (start_q + pd.to_timedelta(df["FWQuarterDays"] - 1, unit="D") == end_q).all()
+        assert df["FWDayOfQuarter"].between(1, df["FWQuarterDays"]).all()
+
+    def test_partial_edge_month_uses_true_boundary(self):
+        """DATES-1: the leading partial fiscal month reports its true start (before
+        the table's first date) and its first in-range day is not forced to 1; the
+        trailing partial month reports its true end (after the table's last date)."""
+        df = self._make_wf("2023-01-01", "2025-12-31", fiscal=5).sort_values("Date")
+        table_start, table_end = df["Date"].min(), df["Date"].max()
+
+        first = df[df["FWMonthIndex"] == df["FWMonthIndex"].min()]
+        assert pd.Timestamp(first["FWStartOfMonth"].iloc[0]) < table_start
+        assert int(first["FWDayOfMonth"].iloc[0]) > 1
+
+        last = df[df["FWMonthIndex"] == df["FWMonthIndex"].max()]
+        assert pd.Timestamp(last["FWEndOfMonth"].iloc[0]) > table_end
+
+    def test_month_label_uses_period_midpoint(self):
+        """DATES-3: the representative calendar month in FWMonthLabel /
+        FWYearMonthLabel is the month containing the fiscal month's midpoint
+        (start + FWMonthDays // 2), not a fixed start + 14 days which lands in
+        the first third for 5-/6-week months."""
+        df = self._make_wf("2023-01-01", "2025-12-31", fiscal=5)
+        fm = df.drop_duplicates("FWMonthIndex")
+
+        start = pd.to_datetime(fm["FWStartOfMonth"])
+        mid = start + pd.to_timedelta(fm["FWMonthDays"] // 2, unit="D")
+        expected_abbr = mid.dt.strftime("%b")
+
+        # Label format: "FM <abbr> - <year>" -> chars [3:6] are the month abbr.
+        got_month = fm["FWMonthLabel"].str.slice(3, 6)
+        got_year_month = fm["FWYearMonthLabel"].str.slice(3, 6)
+        assert (got_month.values == expected_abbr.values).all()
+        assert (got_year_month.values == expected_abbr.values).all()
+
+        # The range actually contains 5-week (35-day) months, so the midpoint
+        # offset (17) genuinely differs from the old +14 heuristic.
+        assert (fm["FWMonthDays"] == 35).any()
 
     def test_every_day_assigned_to_a_year(self):
         """No day should have FWYearNumber == -1 (unassigned)."""

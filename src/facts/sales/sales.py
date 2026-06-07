@@ -137,7 +137,6 @@ class ChunkResultCollector:
         # Extract streaming micro-aggregates (if present)
         if self.budget_acc is not None and isinstance(r, Mapping):
             self.budget_acc.add_sales(r.pop("_budget_agg", None))
-            self.budget_acc.add_returns(r.pop("_returns_agg", None))
 
         if self.inventory_acc is not None and isinstance(r, Mapping):
             self.inventory_acc.add(r.pop("_inventory_agg", None))
@@ -1292,7 +1291,7 @@ def _build_worker_cfg(
     returns_full_line_prob, returns_split_rate,
     returns_max_splits, returns_split_min_gap, returns_split_max_gap,
     returns_logistics_keys, returns_event_key_capacity,
-    month_stride=0, per_chunk_alloc=0,
+    month_stride=0, per_chunk_alloc=0, order_id_int64=False,
 ):
     """Build the worker_cfg dict from typed containers."""
     worker_cfg: SalesWorkerCfg = SalesWorkerCfg(
@@ -1342,6 +1341,7 @@ def _build_worker_cfg(
         order_id_run_id=int(order_id_run_id),
         month_stride=int(month_stride),
         per_chunk_alloc=int(per_chunk_alloc),
+        order_id_int64=bool(order_id_int64),
         max_lines_per_order=int(getattr(sales_cfg, "max_lines_per_order", 5) or 5),
 
         sales_output=sales_output,
@@ -2062,11 +2062,9 @@ def generate_sales_fact(
     # Optional auto chunk sizing
     # ------------------------------------------------------------
     total_rows = _int_or(total_rows, 0)
-    if total_rows > 1_073_741_823:  # > int32_max / 2
-        warn(
-            f"total_rows={total_rows:,} exceeds half of int32 max. "
-            "SalesOrderNumber will use int64 in parquet output."
-        )
+    # NOTE: the SalesOrderNumber int32→int64 decision is made *after* day-ID
+    # sizing below — the ID space is ~8x total_rows, not total_rows, so it can't
+    # be decided from total_rows alone here. See `_order_id_int64`.
     if total_rows <= 0:
         skip("No sales rows to generate (total_rows <= 0).")
         return SalesFactResult(chunk_files=[], manifest=_empty_manifest())
@@ -2129,6 +2127,25 @@ def generate_sales_fact(
     _per_chunk_alloc = int(ceil(total_rows / max(1, _n_days) * _safety / max(1, total_chunks)))
     _per_chunk_alloc = max(_per_chunk_alloc, 1)
     _day_stride = _per_chunk_alloc * total_chunks
+
+    # SalesOrderNumber dtype decision. Day IDs reach up to (day_span+1)*day_stride
+    # (≈ 8x total_rows, since per_chunk_alloc carries an 8x safety factor). That
+    # crosses the int32 ceiling near ~268M rows — far below total_rows itself — so
+    # the promotion must be sized to the real ID space, not total_rows. Promote to
+    # int64 once the worst-case ID would exceed half of int32 (a 2x safety margin).
+    _INT32_MAX = 2_147_483_647
+    if _dp.size:
+        _dp_days = _dp.astype("datetime64[D]")
+        _day_span = int((_dp_days.max() - _dp_days.min()).astype("int64"))
+    else:
+        _day_span = 0
+    _max_order_id = (_day_span + 1) * int(_day_stride)
+    _order_id_int64 = _max_order_id > _INT32_MAX // 2
+    if _order_id_int64 and not skip_order_cols:
+        warn(
+            f"SalesOrderNumber worst-case value ~{_max_order_id:,} exceeds the int32 "
+            "safety margin; emitting int64 for order-number columns."
+        )
 
     rng_master = np.random.default_rng(seed + 1)
     seeds = rng_master.integers(1, 1 << 30, size=total_chunks, dtype=np.int64)
@@ -2274,6 +2291,7 @@ def generate_sales_fact(
         returns_max_splits, returns_split_min_gap, returns_split_max_gap,
         returns_logistics_keys, returns_event_key_capacity,
         month_stride=_day_stride, per_chunk_alloc=_per_chunk_alloc,
+        order_id_int64=_order_id_int64,
     )
 
     # Streaming accumulators (budget, inventory, wishlists, complaints)

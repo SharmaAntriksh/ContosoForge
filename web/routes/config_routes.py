@@ -205,7 +205,6 @@ def get_config():
         "erIncludeMonthly": bool(getattr(er, "include_monthly", True)),
         # Budget detail
         "budgetEnabled": bool(getattr(budget, "enabled", True)),
-        "budgetReportCurrency": str(getattr(budget, "report_currency", "USD")),
         "budgetDefaultGrowth": float(getattr(budget, "default_backcast_growth", 0.05)),
         # Inventory detail
         "inventoryEnabled": bool(getattr(inv, "enabled", True)),
@@ -416,7 +415,6 @@ def update_config(body: ConfigUpdate):
 
         # Budget detail
         if "budgetEnabled" in v: cfg.budget.enabled = bool(v["budgetEnabled"])
-        if "budgetReportCurrency" in v: cfg.budget.report_currency = v["budgetReportCurrency"]
         if "budgetDefaultGrowth" in v: cfg.budget.default_backcast_growth = float(v["budgetDefaultGrowth"])
 
         # Inventory detail

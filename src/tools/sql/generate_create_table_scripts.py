@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping, Sequence, Tuple
 
-from src.utils.static_schemas import STATIC_SCHEMAS, BIGINT_NN, get_dates_schema, get_sales_schema, _INT32_HALF
+from src.utils.static_schemas import STATIC_SCHEMAS, get_dates_schema, get_sales_schema, promote_order_number
 from src.utils.logging_utils import work
 from src.tools.sql.dialect import ColumnSpec, DEFAULT_DIALECT, Dialect
 from src.tools.sql.sql_helpers import (
@@ -199,31 +199,35 @@ def generate_all_create_tables(
     include_returns = _returns_enabled(cfg)
 
     eff_skip_order_cols = _skip_order_cols(cfg, skip_order_cols)
+    # int64 SalesOrderNumber promotion threshold, shared across all fact tables
+    # that carry the column (keeps DDL in sync with the parquet/generation side).
+    sales_total_rows = int(getattr(getattr(cfg, "sales", None), "total_rows", 0) or 0)
 
     fact_scripts: list[str] = []
 
     if include_sales:
-        sales_total_rows = int(getattr(getattr(cfg, "sales", None), "total_rows", 0) or 0)
         fact_scripts.append(
             _emit(TABLE_SALES, get_sales_schema(eff_skip_order_cols, total_rows=sales_total_rows))
         )
 
     if include_sales_order:
-        fact_scripts.append(_emit(TABLE_SALES_ORDER_HEADER, _require_static_schema(TABLE_SALES_ORDER_HEADER)))
-        fact_scripts.append(_emit(TABLE_SALES_ORDER_DETAIL, _require_static_schema(TABLE_SALES_ORDER_DETAIL)))
+        fact_scripts.append(_emit(
+            TABLE_SALES_ORDER_HEADER,
+            promote_order_number(_require_static_schema(TABLE_SALES_ORDER_HEADER), sales_total_rows),
+        ))
+        fact_scripts.append(_emit(
+            TABLE_SALES_ORDER_DETAIL,
+            promote_order_number(_require_static_schema(TABLE_SALES_ORDER_DETAIL), sales_total_rows),
+        ))
 
     # SalesReturn placement:
     # - If sales_order tables exist: emit after detail
     # - Else: emit after Sales (if present) or as the only fact
     if include_returns and (include_sales or include_sales_order):
-        _ret_schema = list(_require_static_schema(TABLE_SALES_RETURN))
-        _tr = int(getattr(getattr(cfg, "sales", None), "total_rows", 0) or 0)
-        if _tr > _INT32_HALF:
-            _ret_schema = [
-                ("SalesOrderNumber", BIGINT_NN) if n == "SalesOrderNumber" else (n, t)
-                for n, t in _ret_schema
-            ]
-        fact_scripts.append(_emit(TABLE_SALES_RETURN, _ret_schema))
+        fact_scripts.append(_emit(
+            TABLE_SALES_RETURN,
+            promote_order_number(_require_static_schema(TABLE_SALES_RETURN), sales_total_rows),
+        ))
 
     # Budget tables (conditional on budget.enabled)
     if _budget_enabled(cfg):
@@ -236,7 +240,10 @@ def generate_all_create_tables(
 
     # Complaints (conditional on complaints.enabled)
     if _complaints_enabled(cfg):
-        fact_scripts.append(_emit(TABLE_COMPLAINTS, _require_static_schema(TABLE_COMPLAINTS)))
+        fact_scripts.append(_emit(
+            TABLE_COMPLAINTS,
+            promote_order_number(_require_static_schema(TABLE_COMPLAINTS), sales_total_rows),
+        ))
 
     # Customer Wishlists (conditional on wishlists.enabled)
     if _wishlists_enabled(cfg):

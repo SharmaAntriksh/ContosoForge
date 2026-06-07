@@ -15,6 +15,13 @@ import numpy as np
 from .constants import NS_PER_DAY, PRIORITY_VALUES, PRIORITY_WEIGHTS
 
 
+# Per-item product de-dup retry bounds. The misc-RNG pool headroom
+# (_MISC_PER_ITEM_MAX in generate_wishlist_items) is derived from these, so they
+# are the single source — changing a loop bound updates the headroom too (WISH-1).
+_AFFINITY_RETRY_LIMIT = 50
+_DEDUP_RETRY_LIMIT = 200
+
+
 # ---------------------------------------------------------------------------
 # Subcategory pool — flat-array format for fast, picklable access
 # ---------------------------------------------------------------------------
@@ -180,6 +187,11 @@ def generate_wishlist_items(
     _conv_rolls = rng.random(total_rows)
     _aff_rolls = rng.random(total_rows)
 
+    # Worst-case misc draws a single item (one `j`) can consume before the
+    # end-of-item refill: anchor (1) + affinity-CDF retry loop + default dedup retry
+    # loop. Refilling with at least this much headroom keeps any one item from
+    # exhausting the pool mid-iteration -> IndexError (WISH-1).
+    _MISC_PER_ITEM_MAX = 1 + _AFFINITY_RETRY_LIMIT + _DEDUP_RETRY_LIMIT
     _MISC_SIZE = max(total_rows * 6, 1024)
     _misc = rng.random(_MISC_SIZE)
     _mi = 0
@@ -267,7 +279,7 @@ def generate_wishlist_items(
                     has_cdf = ce > cs
                     if has_cdf and pool_len > 0:
                         sc_cdf_slice = _cdf_data_list[cs:ce]
-                        for _ in range(50):
+                        for _ in range(_AFFINITY_RETRY_LIMIT):
                             r = float(_misc[_mi]); _mi += 1
                             local_idx = bisect_left(sc_cdf_slice, r)
                             if local_idx >= pool_len:
@@ -290,7 +302,7 @@ def generate_wishlist_items(
             if not picked:
                 pick = int(out_prod_idx[pos])
                 if pick in chosen_set:
-                    for _ in range(200):
+                    for _ in range(_DEDUP_RETRY_LIMIT):
                         r = float(_misc[_mi]); _mi += 1
                         pick = bisect_left(_global_cdf_list, r)
                         if pick >= _n_products:
@@ -305,8 +317,8 @@ def generate_wishlist_items(
                                 break
                 chosen_set.add(int(out_prod_idx[pos]))
 
-            # Refill misc pool if running low
-            if _mi + 60 > len(_misc):
+            # Refill misc pool if it could be exhausted by the next item.
+            if _mi + _MISC_PER_ITEM_MAX > len(_misc):
                 _misc = rng.random(_MISC_SIZE)
                 _mi = 0
 
