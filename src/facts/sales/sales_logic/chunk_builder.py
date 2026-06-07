@@ -103,7 +103,7 @@ def _within_day_cursor(d_off: np.ndarray) -> np.ndarray:
     return cursor
 
 
-# Cached partition cols (immutable after State.seal(); avoids per-chunk getattr).
+# Cached partition cols (read once from the per-worker State; avoids per-chunk getattr).
 _cached_delta_pcols: set[str] | None = None
 
 

@@ -78,7 +78,6 @@ class TestAppConfigFromYAML:
     def test_budget_section(self, normalized_config):
         app = AppConfig.from_raw_dict(normalized_config)
         assert app.budget.enabled is True
-        assert app.budget.report_currency == "USD"
         assert app.budget.scenarios.High == 0.05
 
     def test_inventory_section(self, normalized_config):

@@ -308,12 +308,10 @@ Budget fact tables: yearly and monthly budget forecasts by country and category.
 | Key | Description | Example |
 |-----|-------------|---------|
 | `budget.enabled` | Master toggle for budget generation. | `true` |
-| `budget.report_currency` | Currency code for budget amounts. All budget values are expressed in this currency. | `"USD"` |
 | `budget.scenarios` | Named scenarios with growth adjustments applied on top of the base forecast. Each scenario produces a separate set of budget rows. | `{ Low: -0.03, Medium: 0.00, High: 0.05 }` |
 | `budget.growth_caps` | Upper and lower bounds on computed growth rates. Prevents unrealistic budget swings. | `{ high: 0.30, low: -0.20 }` |
 | `budget.weights` | Blending weights for the three growth signal sources. `local` = country-level historical growth. `category` = product category growth. `global` = overall dataset growth. Must sum to 1.0. | `{ local: 0.60, category: 0.30, global: 0.10 }` |
 | `budget.default_backcast_growth` | Default growth rate used when insufficient historical data exists for backcasting. | `0.05` |
-| `budget.return_rate_cap` | Maximum return rate applied when adjusting budget for returns. Prevents returns from exceeding this fraction of gross sales in the budget. | `0.30` |
 
 ---
 

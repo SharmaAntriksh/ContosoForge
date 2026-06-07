@@ -332,6 +332,13 @@ def _snap_unit_price(rng, up: np.ndarray, acfg: dict) -> np.ndarray:
     rounding up equals the fractional position within the step, so prices
     transition gradually as inflation pushes them through a band rather
     than jumping all at once after a multi-year plateau.
+
+    SM-2 (by design): the stochastic round and the random ending are drawn
+    *per row*, so two sales lines for the same product in the same month can
+    get slightly different UnitPrices. UnitPrice is a fact measure, not a
+    dimension attribute — this models realistic per-transaction price
+    variation. (Product SCD2 mode bypasses this and preserves catalog prices.)
+    See CLAUDE.md gotcha #26.
     """
     if not acfg.get("enabled", False):
         return up
@@ -621,10 +628,21 @@ def build_prices(rng, order_dates, qty, price):
         # Protect positive margin by reducing discount (not distorting cost)
         margin_violated = net < uc + 0.01
         if margin_violated.any():
-            disc[margin_violated] = np.round(
-                np.maximum(up[margin_violated] - uc[margin_violated] - 0.01, 0.0), 2)
-            net[margin_violated] = np.round(
-                np.maximum(up[margin_violated] - disc[margin_violated], 0.0), 2)
+            mv = margin_violated
+            # Largest discount that still preserves a +0.01 margin.
+            safe = np.maximum(up[mv] - uc[mv] - 0.01, 0.0)
+            # SM-1: re-snap the re-fixed discount onto the appearance grid so it
+            # lands on a configured step instead of an arbitrary `up-uc-0.01`
+            # value. Floor (not the configured round mode) so the snapped
+            # discount never rises above the margin-safe ceiling and re-violates.
+            if appearance.get("enabled", False):
+                step = np.maximum(
+                    _choose_step(up[mv], appearance["d_band_max"], appearance["d_band_step"]),
+                    1.0,
+                )
+                safe = np.floor(safe / step) * step
+            disc[mv] = np.round(np.maximum(safe, 0.0), 2)
+            net[mv] = np.round(np.maximum(up[mv] - disc[mv], 0.0), 2)
     uc = np.round(uc, 2)
 
     price["final_unit_price"] = up

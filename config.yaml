@@ -223,12 +223,10 @@ exchange_rates:
 # ------------------------------------------------------------------
 budget:
   enabled: true
-  report_currency: "USD"
   scenarios:   { Low: -0.03, Medium: 0.00, High: 0.05 }
   growth_caps: { high: 0.30, low: -0.20 }
   weights:     { local: 0.60, category: 0.30, global: 0.10 }
   default_backcast_growth: 0.05
-  return_rate_cap: 0.30
 
 # ------------------------------------------------------------------
 # INVENTORY SNAPSHOT

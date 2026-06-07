@@ -186,12 +186,10 @@ class BudgetWeightsConfig(_Base):
 
 class BudgetConfig(_Base):
     enabled: bool = True
-    report_currency: str = "USD"
     scenarios: BudgetScenariosConfig = BudgetScenariosConfig()
     growth_caps: BudgetGrowthCapsConfig = BudgetGrowthCapsConfig()
     weights: BudgetWeightsConfig = BudgetWeightsConfig()
     default_backcast_growth: float = 0.05
-    return_rate_cap: float = 0.30
 
 
 # -- Customers --

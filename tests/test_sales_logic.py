@@ -1035,13 +1035,6 @@ class TestBudgetAccumulator:
         assert len(df) == 1
         assert df["SalesAmount"].iloc[0] == pytest.approx(300.0)
 
-    def test_finalize_returns_none_when_empty(self):
-        acc = BudgetAccumulator(
-            country_labels=np.array(["US"]),
-            category_labels=np.array(["Electronics"]),
-        )
-        assert acc.finalize_returns() is None
-
 
 # ===================================================================
 # 10. Inventory accumulator
@@ -1405,14 +1398,12 @@ class TestBudgetConfig:
         raw = AppConfig.model_validate({
             "budget": {
                 "enabled": True,
-                "report_currency": "EUR",
                 "growth_caps": {"high": 0.50, "low": -0.10},
                 "weights": {"local": 0.70, "category": 0.20, "global": 0.10},
             }
         })
         cfg = load_budget_config(raw)
         assert cfg.enabled is True
-        assert cfg.report_currency == "EUR"
         assert cfg.growth_cap_high == 0.50
         assert cfg.weight_local == 0.70
 

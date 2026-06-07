@@ -14,6 +14,7 @@ from src.facts.sales.sales_models.pricing_pipeline import (
     _parse_endings,
     _quantize,
     _safe_prob,
+    _snap_discount,
 )
 
 
@@ -292,3 +293,63 @@ class TestQuantize:
         result = _quantize(x, step, "floor")
 
         np.testing.assert_array_equal(result, [0.0])
+
+
+# ===================================================================
+# _snap_discount + SM-1 margin re-fix grid invariant
+# ===================================================================
+
+class TestSnapDiscount:
+    def _acfg(self, d_round="nearest"):
+        return {
+            "enabled": True,
+            "d_band_max": np.array([100.0, 1e18]),
+            "d_band_step": np.array([5.0, 25.0]),
+            "d_round": d_round,
+        }
+
+    def test_disabled_passthrough(self):
+        disc = np.array([12.37, 3.10])
+        up = np.array([50.0, 50.0])
+        result = _snap_discount(disc, up, {"enabled": False})
+
+        np.testing.assert_array_equal(result, disc)
+
+    def test_snaps_to_band_step(self):
+        # up=50 -> band step 5; up=500 -> band step 25
+        disc = np.array([12.0, 60.0])
+        up = np.array([50.0, 500.0])
+        result = _snap_discount(disc, up, self._acfg())
+
+        # every snapped discount must be a multiple of its band step
+        np.testing.assert_array_equal(result % np.array([5.0, 25.0]), [0.0, 0.0])
+
+    def test_clipped_to_unit_price(self):
+        disc = np.array([999.0])
+        up = np.array([40.0])
+        result = _snap_discount(disc, up, self._acfg())
+
+        assert result[0] <= up[0]
+
+    def test_sm1_floor_snap_stays_on_grid_and_margin_safe(self):
+        """SM-1: the margin re-fix floors the margin-safe discount onto the grid.
+
+        Mirrors the inline logic in ``build_prices``: ``safe = up - uc - 0.01``
+        floored to the band step must (a) land on a grid multiple and (b) never
+        exceed the margin-safe ceiling, so the re-fixed discount can't re-violate
+        the positive-margin guarantee.
+        """
+        up = np.array([50.0, 120.0, 30.0])
+        uc = np.array([20.0, 40.0, 29.80])
+        acfg = self._acfg()
+
+        safe = np.maximum(up - uc - 0.01, 0.0)
+        step = np.maximum(_choose_step(up, acfg["d_band_max"], acfg["d_band_step"]), 1.0)
+        snapped = np.floor(safe / step) * step
+
+        # (a) on-grid: exact multiple of the per-row step
+        np.testing.assert_array_equal(snapped % step, np.zeros_like(snapped))
+        # (b) never exceeds the margin-safe ceiling
+        assert np.all(snapped <= safe + 1e-9)
+        # thin-margin row (ceiling 0.19 < step 1.0) collapses to 0 discount
+        assert snapped[2] == 0.0

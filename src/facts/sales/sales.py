@@ -137,7 +137,6 @@ class ChunkResultCollector:
         # Extract streaming micro-aggregates (if present)
         if self.budget_acc is not None and isinstance(r, Mapping):
             self.budget_acc.add_sales(r.pop("_budget_agg", None))
-            self.budget_acc.add_returns(r.pop("_returns_agg", None))
 
         if self.inventory_acc is not None and isinstance(r, Mapping):
             self.inventory_acc.add(r.pop("_inventory_agg", None))

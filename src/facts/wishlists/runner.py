@@ -499,6 +499,10 @@ def run_wishlist_pipeline(
     _has_scd2 = "EffectiveStartDate" in _prod_schema_names
     if _has_scd2:
         _prod_cols.append("EffectiveStartDate")
+        # ProductID is the SCD2 version-family key (WISH-2); needed to resolve
+        # historical wishlist prices since ProductKey is unique per version.
+        if "ProductID" in _prod_schema_names:
+            _prod_cols.append("ProductID")
     if "IsCurrent" in _prod_schema_names:
         _prod_cols.append("IsCurrent")
     all_products = pd.read_parquet(products_fp, columns=_prod_cols)
@@ -511,10 +515,14 @@ def run_wishlist_pipeline(
     product_weights = _build_product_weights(products, parquet_dims)
     purchased_pairs = accumulator.finalize()
 
-    # Build SCD2 price lookup (None if SCD2 not active)
-    prod_keys_arr = products["ProductKey"].to_numpy().astype(np.int64)
+    # Build SCD2 price lookup (None if SCD2 not active). Keyed by ProductID, aligned
+    # with the current-product row order so resolve_scd2_prices' prod_idx matches.
     prod_prices_arr = products["ListPrice"].to_numpy().astype(np.float64)
-    scd2_lookup = build_scd2_price_lookup(all_products, prod_keys_arr, prod_prices_arr)
+    prod_ids_arr = (
+        products["ProductID"].to_numpy().astype(np.int64)
+        if "ProductID" in products.columns else None
+    )
+    scd2_lookup = build_scd2_price_lookup(all_products, prod_ids_arr, prod_prices_arr)
 
     wishlists_dir = fact_out / "customer_wishlists"
     wishlists_dir.mkdir(parents=True, exist_ok=True)

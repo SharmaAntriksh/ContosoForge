@@ -330,10 +330,17 @@ def add_weekly_fiscal_columns(
     fw_week_label = "FW" + fw_week.astype(str).str.zfill(2) + " - " + y
     fw_week_date_range = _format_week_date_range(fw_start_week, fw_end_week)
     fw_period_label = "P" + pd.Series(fw_period, index=df.index).astype(str).str.zfill(2) + " - " + y
-    fw_month_label = "FM " + (fw_start_month + pd.Timedelta(days=14)).dt.strftime("%b") + " - " + y
+    # Representative calendar month = the month containing the fiscal month's
+    # midpoint. Use the true period length (fw_month_days: 28/35/42) rather than
+    # a fixed +14 days, which lands in the first third for 5-/6-week months and
+    # can mislabel them (DATES-3).
+    fw_month_mid = fw_start_month + pd.to_timedelta(
+        pd.Series(fw_month_days, index=df.index) // 2, unit="D"
+    )
+    fw_month_label = "FM " + fw_month_mid.dt.strftime("%b") + " - " + y
 
     # Convenience labels
-    fw_year_month_label = "FM " + (fw_start_month + pd.Timedelta(days=14)).dt.strftime("%b %Y")
+    fw_year_month_label = "FM " + fw_month_mid.dt.strftime("%b %Y")
 
     new_cols = pd.DataFrame(
         {

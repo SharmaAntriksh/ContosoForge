@@ -446,6 +446,28 @@ class TestWeeklyFiscalColumns:
         last = df[df["FWMonthIndex"] == df["FWMonthIndex"].max()]
         assert pd.Timestamp(last["FWEndOfMonth"].iloc[0]) > table_end
 
+    def test_month_label_uses_period_midpoint(self):
+        """DATES-3: the representative calendar month in FWMonthLabel /
+        FWYearMonthLabel is the month containing the fiscal month's midpoint
+        (start + FWMonthDays // 2), not a fixed start + 14 days which lands in
+        the first third for 5-/6-week months."""
+        df = self._make_wf("2023-01-01", "2025-12-31", fiscal=5)
+        fm = df.drop_duplicates("FWMonthIndex")
+
+        start = pd.to_datetime(fm["FWStartOfMonth"])
+        mid = start + pd.to_timedelta(fm["FWMonthDays"] // 2, unit="D")
+        expected_abbr = mid.dt.strftime("%b")
+
+        # Label format: "FM <abbr> - <year>" -> chars [3:6] are the month abbr.
+        got_month = fm["FWMonthLabel"].str.slice(3, 6)
+        got_year_month = fm["FWYearMonthLabel"].str.slice(3, 6)
+        assert (got_month.values == expected_abbr.values).all()
+        assert (got_year_month.values == expected_abbr.values).all()
+
+        # The range actually contains 5-week (35-day) months, so the midpoint
+        # offset (17) genuinely differs from the old +14 heuristic.
+        assert (fm["FWMonthDays"] == 35).any()
+
     def test_every_day_assigned_to_a_year(self):
         """No day should have FWYearNumber == -1 (unassigned)."""
         df = self._make_wf("2020-01-01", "2025-12-31")

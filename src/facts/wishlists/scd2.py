@@ -13,14 +13,20 @@ _log = _logging.getLogger(__name__)
 
 def build_scd2_price_lookup(
     all_products_df: pd.DataFrame,
-    prod_keys_current: np.ndarray,
+    prod_ids_current: Optional[np.ndarray],
     prod_prices_current: np.ndarray,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Build SCD2 version lookup tables for wishlist price resolution.
 
+    Versions are grouped by **ProductID** (the version-family identifier, stable
+    across all versions — see gotcha #25), NOT ProductKey. Products SCD2 assigns a
+    unique ProductKey per version, so keying by ProductKey would treat every
+    version as its own family and never resolve a historical price (WISH-2).
+
     Args:
         all_products_df: full products DataFrame (all versions, not filtered to IsCurrent)
-        prod_keys_current: ProductKey array for IsCurrent=1 products
+        prod_ids_current: ProductID array for IsCurrent=1 products, aligned with the
+            current-product index order (0..n_products-1). None if unavailable.
         prod_prices_current: ListPrice array for IsCurrent=1 products
 
     Returns (starts, prices) or None if SCD2 is not active:
@@ -29,12 +35,15 @@ def build_scd2_price_lookup(
     """
     if "EffectiveStartDate" not in all_products_df.columns:
         return None
+    if prod_ids_current is None or "ProductID" not in all_products_df.columns:
+        return None  # cannot resolve version families without ProductID
 
-    all_df = all_products_df[["ProductKey", "ListPrice", "EffectiveStartDate"]].copy()
+    all_df = all_products_df[["ProductID", "ListPrice", "EffectiveStartDate"]].copy()
 
-    n_unique = all_df["ProductKey"].nunique()
-    if len(all_df) <= n_unique:
-        return None  # no SCD2 versions, all products have single row
+    # SCD2 active only if some family has >1 version (more rows than ProductIDs).
+    n_families = all_df["ProductID"].nunique()
+    if len(all_df) <= n_families:
+        return None  # no SCD2 versions, all products have a single row
 
     all_df["eff_start_days"] = (
         pd.to_datetime(all_df["EffectiveStartDate"])
@@ -42,15 +51,15 @@ def build_scd2_price_lookup(
         .astype(np.int64)
     )
 
-    n_products = len(prod_keys_current)
+    n_products = len(prod_ids_current)
 
-    # Map ProductKey → product index (0..n_products-1)
-    max_key = max(int(prod_keys_current.max()), int(all_df["ProductKey"].max())) + 1
-    key_lookup = np.full(max_key, -1, dtype=np.int32)
-    key_lookup[prod_keys_current] = np.arange(n_products, dtype=np.int32)
+    # Map ProductID → current-product index (0..n_products-1)
+    max_pid = max(int(prod_ids_current.max()), int(all_df["ProductID"].max())) + 1
+    pid_lookup = np.full(max_pid, -1, dtype=np.int32)
+    pid_lookup[prod_ids_current] = np.arange(n_products, dtype=np.int32)
 
-    pkey_arr = all_df["ProductKey"].to_numpy()
-    pidx = key_lookup[pkey_arr]
+    pid_arr = all_df["ProductID"].to_numpy()
+    pidx = pid_lookup[pid_arr]
     mask = pidx >= 0
     pidx = pidx[mask]
     eff_start = all_df["eff_start_days"].to_numpy()[mask]

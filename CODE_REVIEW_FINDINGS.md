@@ -25,11 +25,17 @@ SCHEMA-1) are deferred to the end per plan.
 | **SCHEMA-1 / ORCH-1** | Medium | `SalesOrderNumber` int32→int64 decision now sized to the real ~8× day-ID space (single `_order_id_int64` threaded to schema + builder + returns); warning re-thresholded. Generation/parquet facet only — SQL DDL `BIGINT` widening deferred to the SQL pass. | `TestBuildWorkerSchemas::test_order_id_int64_*`, `TestBuildSalesReturns::test_int64_*`; verified end-to-end (forced int64 run, all SO# columns int64 + consistent) |
 | **DATES-1** | Medium | Weekly-fiscal (4-4-5) month/quarter boundaries derived arithmetically from the week pattern instead of `groupby` min/max, so partial edge periods report true boundaries (and `FWDayOfMonth`/`FWDayOfQuarter` no longer undercount). Resolves DATES-3's clipping component too. | `tests/test_dates.py::TestWeeklyFiscalColumns::{test_period_length_consistency,test_partial_edge_month_uses_true_boundary}` |
 | **EMP-1** | Medium | Staff `EmployeeKey` encoding (`STAFF_KEY_BASE + StoreKey*1000 + idx`) now guards against the per-store slot spill (>1000 staff) and online-band collision, raising `DimensionError` instead of silently producing duplicate keys / wrong-store decode. | `tests/test_dimensions.py::TestGenerateEmployeeDimension::{test_over_1000_staff_raises_not_silent_collision,test_just_under_1000_staff_stays_unique}` |
+| **BUDGET-2** | Low (perf) | Removed the dead returns micro-agg chain (computed every chunk, never finalized): dropped `micro_aggregate_returns` + `_join_returns_to_sales`, `_maybe_returns_agg`, `add_returns`/`finalize_returns`, and the never-applied `BudgetConfig` fields (`digital_shift`, `physical_shift`, `mix_current_weight`, `mix_prior_weight`, `return_rate_cap`, `report_currency`) across engine/schema/config.yaml/web/docs. | budget/accumulator/schema tests updated (24 pass) |
+| **TASK-2** | Low | Consolidated the duplicated SalesChannelKey/TimeKey loaders+samplers: `task.py` now delegates to `columns.py`'s `_load_sales_channels` / `_sample_hour_weighted_minute` / `_sample_timekey_by_channel` (verified RNG-equivalent → byte-identical output; one parquet read instead of three). | `tests/test_sales_logic.py`, `tests/test_determinism.py` (174 pass) |
+| **SM-1** | Low | Margin re-fix now floor-snaps the re-fixed discount onto the appearance grid (floor, not the configured round mode, so it can't rise above the margin-safe ceiling and re-violate). | `tests/test_pricing_pipeline.py::TestSnapDiscount` |
+| **DATES-3** | Low | `FWMonthLabel`/`FWYearMonthLabel` representative month now uses the period midpoint (`FWStartOfMonth + FWMonthDays//2`) instead of a fixed `+14 days` that landed in the first third for 5-/6-week months. | `tests/test_dates.py::TestWeeklyFiscalColumns::test_month_label_uses_period_midpoint` |
+| **WISH-2** | Low | Wishlist SCD2 price lookup now keys version history by `ProductID` (the stable family id, gotcha #25), mirroring the sales resolver, so historical wishlist prices actually resolve. Runner loads `ProductID` under SCD2 and passes the current-product ProductID array. | `tests/test_wishlists.py::TestSCD2PriceLookup` (rewritten to realistic unique-ProductKey-per-version schema) |
+| **CHUNK-2** | Low (doc) | Corrected CLAUDE.md gotcha #3 + a stale `chunk_builder.py` comment: `seal()` is never called in prod (test-only); `State` is per-worker, immutable by convention + process isolation, and per-worker scratch is reassigned post-bind (so sealing in prod would break the pipeline). | doc-only |
+| **SM-2** | Low (doc) | Documented per-line UnitPrice variation within a (product, month) as by-design (UnitPrice is a fact measure; non-SCD2 stochastic snap is per-row) — CLAUDE.md gotcha #26 + `_snap_unit_price` comment. | doc-only |
 
-**Remaining next up (suggested order):** the low-severity cluster — start with the quick, isolated
-loud-crash guards (CUST-SCD2-2, FX-CUR-1), then the latent-correctness ones (CHUNK-3, RETURNS-1,
-CUST-SCD2-1, INV-1, WISH-1). SQL findings (TOOLS-1 + SCHEMA-1's `BIGINT` DDL facet) batched for the
-end. See the table below for the full list.
+**Remaining (deferred to the end per plan):** the SQL findings — **TOOLS-1** (CRLF vs `ROWTERMINATOR='0x0a'`)
+and the **SCHEMA-1 `BIGINT` DDL facet**. All non-SQL findings selected for action are now fixed; the
+no-action watch-items (SM-3, WORKER-1, DATES-2-weekly, TASK-1) remain as reviewed/not-bugs.
 
 ---
 
@@ -111,8 +117,10 @@ Covered end-to-end: all **dimensions**, all **facts**, **engine** (config/runner
 Lower-risk plumbing noted inline as not-deep-read.
 
 **Severity tally:** 1 High (CHUNK-1) · 5 Medium (SCHEMA-1/ORCH-1, DATES-1, EMP-1, QR-1, TOOLS-1) ·
-~15 Low/latent. The two highest-leverage fixes remain **CHUNK-1** (most downstream blast radius) and
-**QR-1** (so the quality report can actually detect CHUNK-1).
+~15 Low/latent. **Status:** all High + Medium fixed except the SQL-only **TOOLS-1** (deferred). Of
+the Low/latent cluster, the action items are fixed (BUDGET-2, TASK-2, SM-1, DATES-3, WISH-2, CHUNK-2,
+SM-2-doc, plus the earlier latent-correctness/guard batch); **remaining = SQL pass only** (TOOLS-1 +
+the SCHEMA-1 `BIGINT` DDL facet). Watch-items (SM-3, WORKER-1, WRITER-1, DATES-2) reviewed as not-bugs.
 
 | ID | Sev | One-liner |
 |----|-----|-----------|
@@ -123,20 +131,25 @@ Lower-risk plumbing noted inline as not-deep-read.
 | **RETURNS-1** | Low-Med | Split-return event dates not monotonic by sequence (only if `split_return_rate>0`). |
 | **DATES-2** | Low | Fiscal/FW as-of offsets via row-lookup with all-zeros fallback (dead today; fragile). |
 | **CORE-1..5** | Low | Discovery urgency-order corner; line-adjust loop hard-fail; silent row under-removal; channel-filter silent disable; vestigial pricing params. |
-| **CHUNK-2** | Low | `seal()` never called in prod → CLAUDE.md gotcha #3 inaccurate; discovery state is per-worker. |
+| ✅ **CHUNK-2** | Low | ~~`seal()` never called in prod → CLAUDE.md gotcha #3 inaccurate; discovery state is per-worker.~~ **FIXED** (doc: gotcha #3 + stale chunk_builder comment corrected) |
 | **CUST-SCD2-1** | Low-Med | SCD2 life-event offset collapse can emit version rows with end < start (malformed interval). |
 | **CUST-SCD2-2** | Low | `customers.max_versions: 1` crashes (`rng.integers(1,1)`). |
 | ✅ **EMP-1** | Medium | ~~Staff EmployeeKey collision + wrong-store decode when a store has >1000 staff (only int64 overflow guarded, not the ×1000 encoding mult).~~ **FIXED** (loud guard on per-store slot spill + band disjointness) |
 | **FX-CUR-1** | Low | Explicit `currency.currencies` omitting an FX currency → cryptic NaN→int32 crash in the FX key-join. |
 | **BUDGET-1** | Low | Monthly budget can exceed yearly total for categories missing months (seasonal shares normalized before the 12-month expand + 1/12 fillna). |
-| **BUDGET-2** | Low (perf) | Returns micro-agg computed every chunk (join + bincount) but `finalize_returns()` is never called → wasted compute; several BudgetConfig fields are dead. |
+| ✅ **BUDGET-2** | Low (perf) | ~~Returns micro-agg computed every chunk (join + bincount) but `finalize_returns()` is never called → wasted compute; several BudgetConfig fields are dead.~~ **FIXED** (removed the dead returns chain + dead config fields) |
 | **INV-1** | Low-Med | ABC recompute ranks demand by per-**version** ProductKey + assigns family ABC by arbitrary last-version-wins → distorted ABC when product SCD2 is enabled (correct when off, the default). |
 | **WISH-1** | Low-Med | Wishlist selection misc-RNG pool refill headroom (60) < worst-case per-item retry consumption (~251) → latent `IndexError` for high-collision customers. |
-| **WISH-2** | Low | Wishlist SCD2 price lookup always returns None (detects SCD2 by duplicate ProductKey, but scheme uses unique key per version) → wishlist prices always current, never historical (dead code, graceful fallback). |
+| ✅ **WISH-2** | Low | ~~Wishlist SCD2 price lookup always returns None (detects SCD2 by duplicate ProductKey, but scheme uses unique key per version) → wishlist prices always current, never historical (dead code, graceful fallback).~~ **FIXED** (key version history by ProductID, like the sales resolver) |
 | ✅ **QR-1** | Medium (meta) | ~~Quality report has no uniqueness check on `SalesOrderHeader.SalesOrderNumber` and no fact-to-fact FK check → CHUNK-1's duplicate order numbers pass undetected (false green).~~ **FIXED** |
 | **TOOLS-1** | Medium | Batch facts (budget/inventory/complaints/wishlists) written CRLF by pandas `to_csv` on Windows, but generated BULK INSERT hardcodes `ROWTERMINATOR='0x0a'` (LF) → import failure (numeric last col) or silent trailing-`\r` (string last col). Dims/sales use pyarrow (LF) and are safe. |
 | **RETURNS-2** | Low | Logistics return reason can leak to on-time orders via CDF boundary overwrite. |
-| **WORKER-1 / WRITER-1 / TASK-2 / DATES-3 / SM-1..3** | Low | CSV unquoted; back-compat unsafe cast; duplicated channel/time logic; label heuristics; pricing nits. |
+| **WORKER-1 / WRITER-1** | Low | CSV unquoted; back-compat unsafe cast. (Watch-items, reviewed — not bugs.) |
+| ✅ **TASK-2** | Low | ~~Duplicated SalesChannelKey/TimeKey channel/time logic in columns.py vs task.py.~~ **FIXED** (task.py delegates to columns.py; RNG-equivalent) |
+| ✅ **DATES-3** | Low | ~~`FWMonthLabel` representative month via `+14 days` lands in first third for 5-/6-week months.~~ **FIXED** (period-midpoint via FWMonthDays//2) |
+| ✅ **SM-1** | Low | ~~Margin re-fix recomputes discount off-grid.~~ **FIXED** (floor-snap to appearance grid after the margin fix) |
+| ✅ **SM-2** | Low | ~~Non-SCD2: same product+month can carry different UnitPrice per row.~~ **DOCUMENTED as by-design** (UnitPrice is a fact measure; gotcha #26) |
+| **SM-3** | Low | Defensive fallbacks that would drift/hard-error if worker-cfg assumptions change. (Watch-item, reviewed — not a live bug.) |
 
 **Downstream of CHUNK-1 (resolved by fixing it):** duplicate `SalesOrderHeader` rows (TASK-1),
 ambiguous returns→sales joins, and earlier int32 overflow.
@@ -195,17 +208,17 @@ indices across year boundaries, leap-safe month-end snapping, correct 4-4-5 engi
 
 ### DATES-3 — `FWMonthLabel` representative-month heuristic
 - **Severity:** Low (cosmetic)
-- **Status:** open
-- **Where:** [weekly_fiscal.py:316](src/dimensions/dates/weekly_fiscal.py#L316),
-  [:319](src/dimensions/dates/weekly_fiscal.py#L319)
-- **What:** picks the label month via `fw_start_month + 14 days`. For 5-/6-week fiscal
-  months that lands in the first third (possible mislabel); also inherits DATES-1 clipping
+- **Status:** **fixed** — `FWMonthLabel`/`FWYearMonthLabel` now pick the representative
+  calendar month from the fiscal-month midpoint (`fw_start_month + FWMonthDays // 2`), using
+  the true period length (28/35/42) instead of a fixed `+14 days`. For a 28-day month this is
+  unchanged (day 15); for 35-/42-day months it lands at the true middle rather than the first
+  third. Test: `tests/test_dates.py::TestWeeklyFiscalColumns::test_month_label_uses_period_midpoint`.
+- **Where:** [weekly_fiscal.py:333-340](src/dimensions/dates/weekly_fiscal.py#L333)
+- **What:** picked the label month via `fw_start_month + 14 days`. For 5-/6-week fiscal
+  months that lands in the first third (possible mislabel); also inherited DATES-1 clipping
   at boundaries.
-- **Proposed fix:** pick the month containing the period midpoint computed from the
-  pattern length, after DATES-1 is fixed.
-- **Update:** the DATES-1 fix makes `fw_start_month` correct at the edges, so the *clipping*
-  component is resolved; the `+14 days` representative-month heuristic for 5-/6-week months
-  remains (still open, cosmetic).
+- **Resolution:** the DATES-1 fix made `fw_start_month` correct at the edges (clipping
+  component), and this fix replaces the `+14 days` heuristic with the pattern-length midpoint.
 
 ### Not yet reviewed in this area
 - `time.py` (1440-row minute grid) — low risk, skipped.
@@ -455,7 +468,13 @@ alignment, deterministic md5 jitter) is correct.
 
 #### BUDGET-2 — Returns micro-agg computed every chunk but never used; dead config
 - **Severity:** Low (perf waste + misleading config; output is correct)
-- **Status:** confirmed
+- **Status:** **fixed** — removed the dead returns chain end-to-end (`micro_aggregate_returns`
+  + `_join_returns_to_sales`, `_maybe_returns_agg` + its call sites, `add_returns` accumulation,
+  `finalize_returns`/`_returns_parts`/`_RETURNS_OUTPUT_COLS`) so chunks no longer pay for a
+  discarded returns→sales join+bincount. Also removed the never-applied `BudgetConfig` fields
+  (`digital_shift`, `physical_shift`, `mix_current_weight`, `mix_prior_weight`, `return_rate_cap`,
+  `report_currency`) from the dataclass, loader, Pydantic schema, `config.yaml`, web routes/UI, and
+  docs (per decision: no FX conversion wanted). Output unchanged (returns were never used in budget).
 - **Where:** `_maybe_returns_agg` runs per chunk
   ([task.py:856-858](src/facts/sales/sales_worker/task.py#L856-L858)), accumulated via
   `add_returns` ([sales.py:140](src/facts/sales/sales.py#L140)), but
@@ -523,11 +542,25 @@ product. SCD2 `resolve_scd2_prices` uses the correct `sum(starts<=date)-1` patte
 
 #### WISH-2 — Wishlist SCD2 price resolution is dead (keys by ProductKey, not ProductID)
 - **Severity:** Low (price-on-wishlist accuracy only; graceful current-price fallback; SCD2 non-default)
-- **Status:** confirmed
-- **Where:** [scd2.py:35-37](src/facts/wishlists/scd2.py#L35-L37); fallback at
-  [runner.py:225-230](src/facts/wishlists/runner.py#L225-L230)
-- **What:** `build_scd2_price_lookup` decides "SCD2 is active" via `len(all_df) <= ProductKey.nunique()`,
-  and maps history by `ProductKey`. But products SCD2 assigns a **unique ProductKey per version**
+- **Status:** **fixed** — `build_scd2_price_lookup` now keys version history by `ProductID`
+  (the stable family id) and detects SCD2 via `len(all_df) > ProductID.nunique()`, mirroring the
+  sales resolver. The runner loads `ProductID` under SCD2 and passes the current-product ProductID
+  array (aligned with the product-index order `resolve_scd2_prices` uses). Guards to a graceful
+  `None` (current-price fallback) if `ProductID` is unavailable. Historical wishlist prices now
+  resolve. Tests: `tests/test_wishlists.py::TestSCD2PriceLookup` (rewritten to the realistic
+  unique-ProductKey-per-version schema, incl. a no-ProductID guard case).
+- **Where:** [scd2.py:14-87](src/facts/wishlists/scd2.py#L14); runner load+call at
+  [runner.py:499-517](src/facts/wishlists/runner.py#L499)
+- **Deferred (altitude, not done now):** `build_scd2_price_lookup` is now structurally near-identical
+  to sales' `_build_scd2_product_versions` (ProductID grouping + lexsort version slots + sparse scatter).
+  A single shared SCD2 version-table builder would enforce "entity key = ProductID, not the per-version
+  ProductKey" at the machinery level and could have pre-empted both WISH-2 and INV-1. Not extracted here:
+  it would refactor pre-existing sales code outside this batch's scope, and the two callers scatter
+  different payloads (sales: 3D `[ProductKey, ListPrice, UnitCost]`; wishlists: 2D `starts`+`prices`),
+  so the shared form needs careful parameterization. Worth doing in a dedicated SCD2-consolidation pass
+  (would also cover INV-1's ProductKey-keyed ABC rollup).
+- **What:** `build_scd2_price_lookup` decided "SCD2 is active" via `len(all_df) <= ProductKey.nunique()`,
+  and mapped history by `ProductKey`. But products SCD2 assigns a **unique ProductKey per version**
   (versions grouped by ProductID, gotcha #25), so `nunique == len` **always** → returns `None`, and
   wishlist prices always use the **current** ListPrice regardless of wishlist date. The historical-price
   code path never runs. (Sales does this correctly by keying on ProductID — see
@@ -651,18 +684,25 @@ workers (global `State.date_pool`).
 
 #### SM-1 — Margin re-fix bypasses the appearance grid
 - **Severity:** Low (cosmetic)
-- **Status:** confirmed
-- **Where:** [pricing_pipeline.py:620-628](src/facts/sales/sales_models/pricing_pipeline.py#L620-L628)
-- **What:** the final positive-margin safety net recomputes `disc = up - uc - 0.01`
-  directly, *after* `_snap_discount`. So the handful of margin-violating rows carry
+- **Status:** **fixed** — after the positive-margin safety net computes the margin-safe ceiling
+  (`up - uc - 0.01`), the discount is **floor**-snapped onto the appearance grid (per-row step from
+  `_choose_step`). Floor (not the configured round mode) guarantees the snapped value never rises
+  above the ceiling and re-violates the margin; thin-margin rows whose ceiling is below one grid step
+  collapse to a 0 discount (on every grid). Test: `tests/test_pricing_pipeline.py::TestSnapDiscount`.
+- **Where:** [pricing_pipeline.py:619-637](src/facts/sales/sales_models/pricing_pipeline.py#L619)
+- **What:** the final positive-margin safety net recomputed `disc = up - uc - 0.01`
+  directly, *after* `_snap_discount`. So the handful of margin-violating rows carried
   discounts that are not on the configured appearance/step grid (e.g. `12.37` instead of
   a snapped `12.50`). No constraint violated; just grid inconsistency on a few rows.
-- **Proposed fix:** re-snap `disc` to the grid after the margin fix, then re-clip net,
-  or accept as-is (negligible).
 
 #### SM-2 — Non-SCD2 mode: same product+month can have different UnitPrice per row
-- **Severity:** Low (likely by-design; document the expectation)
-- **Status:** open / needs intent confirmation
+- **Severity:** Low (by-design)
+- **Status:** **documented as by-design** (decision: document, assume price changes frequently) —
+  `UnitPrice` is a *fact* (transaction) measure, not a dimension attribute, so per-line variation is
+  legitimate; the per-row stochastic round also smooths price transitions through bands as inflation
+  rises. Captured in CLAUDE.md gotcha #26 + a comment at `_snap_unit_price`. If a deterministic
+  per-(product, month) sales price is ever required, the correct fix is hash-seeded snapping keyed by
+  `(ProductID, month)` — not a chunk-local group (which would only look fixed within a chunk).
 - **Where:** [pricing_pipeline.py:342-358](src/facts/sales/sales_models/pricing_pipeline.py#L342-L358)
   (stochastic rounding + per-row `rng.choice` ending)
 - **What:** with product SCD2 off, inflation is per-month (consistent), but `_snap_unit_price`
@@ -670,8 +710,6 @@ workers (global `State.date_pool`).
   for the same product in the same month can carry different `UnitPrice`. Realistic, but
   surprising for BI that assumes a deterministic price-by-(product,date). SCD2-on mode
   preserves catalog prices and is immune.
-- **Proposed fix:** none if intentional; otherwise snap per (product,month) rather than per
-  row. Flagging so we decide deliberately.
 
 #### SM-3 — Defensive fallbacks that would hard-error / drift if assumptions change
 - **Severity:** Low (fragility; not live)

@@ -47,20 +47,6 @@ class BudgetConfig:
     # Default fallback growth (when all tiers are NULL)
     fallback_growth: float = 0.05
 
-    # Channel digital/physical shift factors
-    digital_shift: float = 1.02
-    physical_shift: float = 0.98
-
-    # Month/channel mix weights (LY vs LY-1)
-    mix_current_weight: float = 0.70
-    mix_prior_weight: float = 0.30
-
-    # Return rate cap
-    return_rate_cap: float = 0.30
-
-    # FX
-    report_currency: str = "USD"
-
     # Rolling window for category/global growth
     rolling_window: int = 3   # 3-year rolling average
 
@@ -78,14 +64,12 @@ def load_budget_config(cfg: Dict[str, Any]) -> BudgetConfig:
     return BudgetConfig(
         enabled=bool(getattr(raw, "enabled", False)),
         scenarios=getattr(raw, "scenarios", {"Low": -0.03, "Medium": 0.00, "High": 0.05}),
-        report_currency=str(getattr(raw, "report_currency", "USD")),
         growth_cap_high=float(getattr(growth_caps, "high", 0.30)),
         growth_cap_low=float(getattr(growth_caps, "low", -0.20)),
         weight_local=float(getattr(weights, "local", 0.60)),
         weight_category=float(getattr(weights, "category", 0.30)),
         weight_global=float(getattr(weights, "global_", getattr(weights, "global", 0.10))),
         default_backcast_growth=float(getattr(raw, "default_backcast_growth", 0.05)),
-        return_rate_cap=float(getattr(raw, "return_rate_cap", 0.30)),
     )
 
 # ================================================================
