@@ -386,7 +386,7 @@ def _urgency_pick(
 def _sample_customers(
     rng: np.random.Generator,
     customer_keys: np.ndarray,
-    eligible_mask: np.ndarray,
+    eligible_mask: np.ndarray | None,
     seen_set,
     n: int,
     use_discovery: bool,
@@ -395,6 +395,7 @@ def _sample_customers(
     target_distinct: int | None = None,
     end_month_norm: np.ndarray | None = None,
     m_offset: int = 0,
+    eligible_idx: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Returns array of CustomerKeys of length n, sampled from eligible customers.
@@ -403,15 +404,22 @@ def _sample_customers(
     - If target_distinct is provided: builds a distinct pool then repeats from it.
     - If end_month_norm is provided: undiscovered customers closest to expiry are
       discovered first so they are not lost to churn.
+
+    ``eligible_idx`` may be passed precomputed (the per-month eligible row indices)
+    to skip the ``flatnonzero(mask)`` derivation; otherwise it is derived from
+    ``eligible_mask``.
     """
     n = int(n)
     if n <= 0:
         return np.empty(0, dtype=np.asarray(customer_keys).dtype)
 
     customer_keys = np.asarray(customer_keys)
-    eligible_mask = np.asarray(eligible_mask, dtype=bool)
 
-    eligible_idx = np.flatnonzero(eligible_mask)
+    if eligible_idx is None:
+        eligible_mask = np.asarray(eligible_mask, dtype=bool)
+        eligible_idx = np.flatnonzero(eligible_mask)
+    else:
+        eligible_idx = np.asarray(eligible_idx)
     if eligible_idx.size == 0:
         return np.empty(0, dtype=customer_keys.dtype)
 

@@ -71,6 +71,7 @@ class PostgresDialect(Dialect):
         table: str,
         csv_path: Path,
         use_csv_format: bool = False,  # COPY ... FORMAT csv is always CSV-aware.
+        batch_rows: int = 1_000_000,   # N/A: COPY commits per chunk file.
     ) -> str:
         path_literal = sql_escape_literal(str(csv_path.resolve()))
         return (

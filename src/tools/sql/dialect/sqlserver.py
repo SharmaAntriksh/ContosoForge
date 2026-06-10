@@ -42,6 +42,58 @@ class SqlServerDialect(Dialect):
         raw = self._strip_ident_wrappers(name)
         return f"[{raw.replace(']', ']]')}]"
 
+    def prepare_load_script(self) -> str | None:
+        # Switch to BULK_LOGGED so the existing heap + TABLOCK load becomes
+        # minimally logged (the missing third ingredient of the trifecta), and
+        # remember the prior model in a global temp table so the finish script
+        # can restore it. The pre-grow ALTER is left as a commented template
+        # because the right size is hardware/row-width specific
+        # (~1.2 × BATCHSIZE × row_bytes × concurrent_sessions).
+        return (
+            "-- Run ONCE before the load scripts. Reversed by the finish script.\n"
+            "-- Minimal logging requires: heap (PK dropped) + TABLOCK + "
+            "BULK_LOGGED/SIMPLE recovery.\n"
+            "SET NOCOUNT ON;\n"
+            "\n"
+            "-- Remember the current recovery model so the finish script can restore it.\n"
+            "IF OBJECT_ID('tempdb..##sdg_prev_recovery') IS NOT NULL\n"
+            "    DROP TABLE ##sdg_prev_recovery;\n"
+            "SELECT recovery_model_desc AS prev_model\n"
+            "    INTO ##sdg_prev_recovery\n"
+            "    FROM sys.databases WHERE name = DB_NAME();\n"
+            "\n"
+            "ALTER DATABASE CURRENT SET RECOVERY BULK_LOGGED;\n"
+            "\n"
+            "-- Optional: pre-grow the log up front to avoid autogrowth stalls / VLF\n"
+            "-- fragmentation during the load. Size to ~1.2 × BATCHSIZE × row_bytes ×\n"
+            "-- concurrent load sessions, then uncomment and set the logical log name:\n"
+            "-- ALTER DATABASE CURRENT MODIFY FILE (NAME = N'<your_log_logical_name>', "
+            "SIZE = 8GB);"
+        )
+
+    def finish_load_script(self) -> str | None:
+        # Restore the recovery model captured by the prepare script (defaulting
+        # to FULL if it was not captured), then remind the operator to take a
+        # log backup to re-establish the log chain after minimal logging.
+        return (
+            "-- Run ONCE after all load scripts complete. Reverses the prepare script.\n"
+            "SET NOCOUNT ON;\n"
+            "\n"
+            "DECLARE @prev SYSNAME = N'FULL';\n"
+            "IF OBJECT_ID('tempdb..##sdg_prev_recovery') IS NOT NULL\n"
+            "    SELECT @prev = prev_model FROM ##sdg_prev_recovery;\n"
+            "\n"
+            "DECLARE @sql NVARCHAR(MAX) =\n"
+            "    N'ALTER DATABASE CURRENT SET RECOVERY ' + @prev + N';';\n"
+            "EXEC sys.sp_executesql @sql;\n"
+            "\n"
+            "IF OBJECT_ID('tempdb..##sdg_prev_recovery') IS NOT NULL\n"
+            "    DROP TABLE ##sdg_prev_recovery;\n"
+            "\n"
+            "-- Recommended after returning to FULL recovery: BACKUP LOG [<db>] TO "
+            "DISK = N'<path>'; to restart the log chain."
+        )
+
     def drop_table_if_exists(self, schema: str, table: str) -> str:
         fq = self.qualify(schema, table)
         return (
@@ -56,6 +108,7 @@ class SqlServerDialect(Dialect):
         table: str,
         csv_path: Path,
         use_csv_format: bool = False,
+        batch_rows: int = 1_000_000,
     ) -> str:
         qualified = self.qualify(schema, table)
         path_literal = sql_escape_literal(str(csv_path.resolve()))
@@ -76,6 +129,12 @@ class SqlServerDialect(Dialect):
                 "TABLOCK",
             ]
         )
+        # BATCHSIZE makes each batch its own transaction so the log can truncate
+        # between batches (under SIMPLE/BULK_LOGGED recovery), bounding peak LDF
+        # growth to ~one batch instead of the whole table — without it a
+        # billion-row load is one transaction whose log must hold the entire file.
+        if batch_rows and int(batch_rows) > 0:
+            opts.append(f"BATCHSIZE = {int(batch_rows)}")
         opts_sql = ",\n    ".join(opts)
 
         return (

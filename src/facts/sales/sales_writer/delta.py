@@ -78,30 +78,6 @@ def _delta_resolve_part_files(
     return part_files
 
 
-def _delta_write_table(
-    write_deltalake,
-    delta_output_abs: str,
-    table,
-    *,
-    first: bool,
-    pcols: List[str],
-    max_partitions: Optional[int],
-):
-    """Write a single table to delta, handling unsupported kwargs gracefully."""
-    kwargs = dict(
-        mode="overwrite" if first else "append",
-        partition_by=pcols,
-    )
-    if max_partitions is not None:
-        kwargs["max_partitions"] = int(max_partitions)
-
-    try:
-        write_deltalake(delta_output_abs, table, **kwargs)
-    except TypeError:
-        kwargs.pop("max_partitions", None)
-        write_deltalake(delta_output_abs, table, **kwargs)
-
-
 def _open_parquet_mapped(path: str, pa, pq):
     """Open a parquet file with memory mapping for efficient I/O."""
     try:
@@ -153,55 +129,6 @@ def _read_and_project_part(pf, canonical_schema, *, needs_projection: bool, pa):
     return table
 
 
-def _process_single_part(
-    pf_path: str,
-    canonical_schema,
-    *,
-    write_deltalake,
-    delta_output_abs: str,
-    pcols: List[str],
-    sort_small_parts: bool,
-    sort_row_limit: int,
-    max_partitions: Optional[int],
-    first: bool,
-    pa,
-    pq,
-) -> None:
-    """Read, optionally sort, project, and write a single part file to Delta."""
-    source, pf = _open_parquet_mapped(pf_path, pa, pq)
-    try:
-        num_rows = 0
-        try:
-            if pf.metadata is not None:
-                num_rows = int(pf.metadata.num_rows)
-        except (AttributeError, TypeError, ValueError):
-            num_rows = 0
-
-        needs_sort = pcols and sort_small_parts and num_rows and num_rows <= int(sort_row_limit)
-        needs_projection = not _pm_schema_equals(
-            pf.schema_arrow, canonical_schema, check_metadata=False
-        )
-
-        table = _read_and_project_part(pf, canonical_schema, needs_projection=needs_projection, pa=pa)
-
-        if needs_sort:
-            try:
-                sort_keys = [(c, "ascending") for c in pcols]
-                table = table.sort_by(sort_keys)
-            except (KeyError, ValueError, TypeError) as ex:
-                warn(f"[DELTA] Sort failed for {os.path.basename(pf_path)}: {ex}")
-
-        _delta_write_table(
-            write_deltalake, delta_output_abs, table,
-            first=first, pcols=pcols, max_partitions=max_partitions,
-        )
-    finally:
-        try:
-            source.close()
-        except OSError:
-            pass
-
-
 def _cleanup_parts_folder(
     delta_output_abs: str,
     parts_folder_abs: Optional[str],
@@ -222,6 +149,98 @@ def _cleanup_parts_folder(
             warn(f"[DELTA] Failed to clean up parts folder {parts_folder_abs}: {ex}")
 
 
+def write_delta_single_commit(
+    *,
+    part_files: List[str],
+    delta_output_abs: str,
+    canonical_schema,
+    pcols: List[str],
+    sort_small_parts: bool,
+    sort_row_limit: int,
+    write_deltalake,
+    pa,
+    pq,
+    target_file_size: int = 256 * 1024 * 1024,
+) -> None:
+    """Write all part files to Delta in ONE streamed commit (mode='overwrite').
+
+    Replaces the per-part ``append`` loop, which (a) paid Delta's full-state log
+    replay on *every* append — O(N²) in the number of parts — and (b) scattered
+    a tiny file per (part × partition it touched), producing the small-file
+    problem.  Here a single ``RecordBatchReader`` streams one row group at a time
+    into one ``write_deltalake`` call: one commit (one log entry), peak memory of
+    ~one row group (also removes the per-part ``concat_tables`` double-buffer),
+    and file sizing handed to delta-rs via ``target_file_size``.
+
+    Small parts are still materialized and sorted by the partition columns for
+    locality (bounded by ``sort_row_limit``); large parts stream row-group by
+    row-group.
+    """
+    def _rebatch(b):
+        # RecordBatchReader.from_batches requires each batch to carry the reader
+        # schema; rewrap cheaply (zero-copy) when only metadata differs.
+        if b.schema.equals(canonical_schema):
+            return b
+        return pa.record_batch(b.columns, schema=canonical_schema)
+
+    def _batch_stream():
+        for pf_path in part_files:
+            source, pf = _open_parquet_mapped(pf_path, pa, pq)
+            try:
+                needs_proj = not _pm_schema_equals(
+                    pf.schema_arrow, canonical_schema, check_metadata=False
+                )
+                num_rows = 0
+                try:
+                    if pf.metadata is not None:
+                        num_rows = int(pf.metadata.num_rows)
+                except (AttributeError, TypeError, ValueError):
+                    num_rows = 0
+                needs_sort = bool(
+                    pcols and sort_small_parts and num_rows
+                    and num_rows <= int(sort_row_limit)
+                )
+
+                if needs_sort:
+                    table = _read_and_project_part(
+                        pf, canonical_schema, needs_projection=needs_proj, pa=pa
+                    )
+                    try:
+                        table = table.sort_by([(c, "ascending") for c in pcols])
+                    except (KeyError, ValueError, TypeError) as ex:
+                        warn(f"[DELTA] Sort failed for {os.path.basename(pf_path)}: {ex}")
+                    for b in table.to_batches():
+                        yield _rebatch(b)
+                else:
+                    for rg in range(pf.num_row_groups):
+                        table = pf.read_row_group(rg)
+                        if needs_proj:
+                            table = project_table_to_schema(
+                                table, canonical_schema,
+                                cast_safe=False, on_cast_error="warn",
+                            )
+                        for b in table.to_batches():
+                            yield _rebatch(b)
+            finally:
+                try:
+                    source.close()
+                except OSError:
+                    pass
+
+    # Try with target_file_size (delta-rs packs to ~that size); degrade
+    # gracefully on older deltalake that lacks the kwarg.
+    for extra in ({"target_file_size": int(target_file_size)}, {}):
+        reader = pa.RecordBatchReader.from_batches(canonical_schema, _batch_stream())
+        try:
+            write_deltalake(
+                delta_output_abs, reader,
+                partition_by=pcols, mode="overwrite", **extra,
+            )
+            return
+        except TypeError:
+            continue
+
+
 def write_delta_from_parquet_parts(
     *,
     parts_folder: Optional[str],
@@ -237,8 +256,6 @@ def write_delta_from_parquet_parts(
     sort_row_limit: int = DEFAULT_SORT_ROW_LIMIT,
     # Housekeeping
     cleanup_parts_folder: bool = False,
-    # Delta writer passthrough (best-effort; ignored if unsupported by installed deltalake)
-    max_partitions: Optional[int] = None,
 ) -> DeltaWriteResult:
     pa, _, pq = _arrow()
     write_deltalake = _delta_import_write_deltalake()
@@ -265,20 +282,18 @@ def write_delta_from_parquet_parts(
     os.makedirs(delta_output_abs, exist_ok=True)
 
     suffix = f" table={table_name}" if table_name else ""
-    info(f"[DELTA] Writing {len(part_files)} parts (Arrow -> Delta){suffix}")
+    info(f"[DELTA] Writing {len(part_files)} parts (Arrow -> Delta, single commit){suffix}")
 
-    for i, pf_path in enumerate(part_files):
-        _process_single_part(
-            pf_path, canonical_schema,
-            write_deltalake=write_deltalake,
-            delta_output_abs=delta_output_abs,
-            pcols=pcols,
-            sort_small_parts=sort_small_parts,
-            sort_row_limit=sort_row_limit,
-            max_partitions=max_partitions,
-            first=(i == 0),
-            pa=pa, pq=pq,
-        )
+    write_delta_single_commit(
+        part_files=part_files,
+        delta_output_abs=delta_output_abs,
+        canonical_schema=canonical_schema,
+        pcols=pcols,
+        sort_small_parts=sort_small_parts,
+        sort_row_limit=sort_row_limit,
+        write_deltalake=write_deltalake,
+        pa=pa, pq=pq,
+    )
 
     if cleanup_parts_folder and parts is None:
         _cleanup_parts_folder(delta_output_abs, parts_folder_abs)

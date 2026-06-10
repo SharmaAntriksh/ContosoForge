@@ -17,7 +17,6 @@ from src.exceptions import SalesError
 from src.utils.config_helpers import int_or as _int_or, float_or as _float_or
 from .globals import PA_AVAILABLE, State
 from .core import (
-    _eligible_customer_mask_for_month,
     _make_seen_lookup,
     _normalize_cdf,
     _normalize_end_month,
@@ -125,10 +124,55 @@ _brand_flat_cache_data: tuple | None = None  # (flat_idx, offsets)
 # and product weights — all identical across chunks in the same worker).
 _worker_cdf_cache: dict = {}
 
+# Worker-lifetime cache of per-month eligible customer row indices.
+# The eligibility predicate depends only on the lifecycle arrays
+# (is_active / start_month / end_month), which bind_globals sets once per
+# worker and never reassigns — so the same masks would otherwise be rebuilt
+# for every chunk the worker processes.  seen_customers (discovery) changes
+# across chunks but does NOT enter the eligibility predicate, so caching the
+# eligible index set is safe.  Keyed on the month count T alone: the lifecycle
+# arrays are invariant within a worker and this cache is cleared at each worker
+# init, so no per-chunk array key is needed (and end_month_norm is reallocated
+# every chunk, so an id()-based key would never hit).
+_worker_eligible_cache: dict = {}
+
+# Worker-lifetime cache of per-calendar-month product weights (12 distinct).
+# _build_product_weight_for_month depends only on cal_month (1-12) once the
+# popularity base is fixed for the worker, so over a long horizon it is
+# otherwise rebuilt T times instead of at most 12.
+_worker_prodweight_cache: dict = {}
+
 
 def reset_worker_cdf_cache() -> None:
-    """Clear the worker-lifetime CDF cache (called once per worker init)."""
+    """Clear the worker-lifetime caches (called once per worker init)."""
     _worker_cdf_cache.clear()
+    _worker_eligible_cache.clear()
+    _worker_prodweight_cache.clear()
+
+
+def _eligible_idx_by_month(T, is_active, start_month, end_month_norm) -> list:
+    """Per-month eligible customer row indices, cached for the worker's lifetime.
+
+    Returns the flatnonzero indices directly and memoizes them.  The lifecycle
+    arrays are bound once per worker (and this cache is cleared at worker init),
+    so the result is invariant across the chunks a worker processes — keyed on
+    the month count T alone.
+    """
+    T = int(T)
+    cached = _worker_eligible_cache.get(T)
+    if cached is not None:
+        return cached
+
+    is_active = np.asarray(is_active, dtype="int64", order="C")
+    start_month = np.asarray(start_month, dtype="int64", order="C")
+    end_month_norm = np.asarray(end_month_norm, dtype="int64", order="C")
+    active = is_active == 1
+    idx_by_month: list = []
+    for m in range(T):
+        mask = active & (start_month <= m) & ((end_month_norm < 0) | (m <= end_month_norm))
+        idx_by_month.append(np.flatnonzero(mask))
+    _worker_eligible_cache[T] = idx_by_month
+    return idx_by_month
 
 
 def _get_brand_flat_cache(brand_to_rows: list, B: int) -> tuple:
@@ -492,6 +536,15 @@ def _build_product_weight_for_month(
     if pop is None:
         return None
 
+    # The result depends only on cal_month (the popularity base and seasonality
+    # arrays are bound once per worker), so memoize by cal_month — over a long
+    # horizon this avoids rebuilding the length-n_products array T times.
+    # Downstream consumers treat the weight as read-only (the CDF cache keyed by
+    # cal_month already relies on this), so returning the shared array is safe.
+    cached = _worker_prodweight_cache.get(cal_month)
+    if cached is not None:
+        return cached
+
     # Base weight: popularity (clamp to avoid zeros)
     # np.maximum already returns a new array — no .copy() needed
     w = np.maximum(pop, 1.0)
@@ -505,6 +558,7 @@ def _build_product_weight_for_month(
                 if mask.any():
                     w[mask] *= 1.0 + boosts[cal_month]
 
+    _worker_prodweight_cache[cal_month] = w
     return w
 
 
@@ -618,13 +672,17 @@ def _to_pa_array(name: str, data: object, n_rows: int, schema_types: dict) -> pa
     if np.isscalar(data):
         data = np.full(n_rows, data)
 
-    # date32: build as timestamp first (inference), then cast to date32
+    # date32: build directly from days-since-epoch (datetime64[D] stores exactly
+    # that), skipping the datetime64[ns] multiply + downcast round-trip.  This is
+    # also robust to dates beyond the ns-representable range (post-2262).
     if pa.types.is_date32(t):
-        dt = _as_datetime64_D(data)
-        arr = pa.array(np.asarray(dt).astype("datetime64[ns]"))
-        if arr.type != t:
-            arr = arr.cast(t, safe=False)
-        return arr
+        dt = np.asarray(_as_datetime64_D(data), dtype="datetime64[D]")
+        isnat = np.isnat(dt)
+        days = dt.astype("int64")
+        if isnat.any():
+            days = np.where(isnat, 0, days)  # null-masked; value irrelevant
+            return pa.array(days.astype("int32"), type=t, mask=isnat)
+        return pa.array(days.astype("int32"), type=t)
 
     return pa.array(data, type=t, safe=False)
 
@@ -1379,6 +1437,10 @@ def build_chunk_table(
     # intersection + CDF recomputation entirely (contents are deterministic).
     _product_cdf_cache = _worker_cdf_cache
 
+    # Per-month eligible row indices, computed once per worker (chunk-invariant).
+    eligible_idx_all = _eligible_idx_by_month(
+        T, is_active_in_sales, start_month, end_month_norm)
+
     for m_offset in range(T):
         m_rows = int(rows_per_month[m_offset])
         if m_rows <= 0:
@@ -1401,15 +1463,10 @@ def build_chunk_table(
             month_date_prob = None
 
         # --------------------------------------------------------
-        # Eligibility mask (compute only for months that generate rows)
+        # Eligibility (precomputed per-month indices, chunk-invariant)
         # --------------------------------------------------------
-        eligible_mask = _eligible_customer_mask_for_month(
-            m_offset=int(m_offset),
-            is_active_in_sales=is_active_in_sales,
-            start_month=start_month,
-            end_month_norm=end_month_norm,
-        )
-        if not eligible_mask.any():
+        eligible_idx = eligible_idx_all[m_offset]
+        if eligible_idx.size == 0:
             continue
 
         # --------------------------------------------------------
@@ -1444,7 +1501,7 @@ def build_chunk_table(
         # --------------------------------------------------------
         target_distinct = None
         if distinct_ratio > 0.0:
-            eligible_count = int(eligible_mask.sum())
+            eligible_count = int(eligible_idx.size)
             k = distinct_ratio * eligible_count
 
             if cycle_amplitude > 0.0:
@@ -1469,7 +1526,7 @@ def build_chunk_table(
         customer_keys_for_orders = _sample_customers(
             rng=rng,
             customer_keys=customer_keys,
-            eligible_mask=eligible_mask,
+            eligible_mask=None,
             seen_set=seen_customers,
             n=int(n_sample),
             use_discovery=use_discovery,
@@ -1478,6 +1535,7 @@ def build_chunk_table(
             target_distinct=target_distinct,
             end_month_norm=end_month_norm,
             m_offset=int(m_offset),
+            eligible_idx=eligible_idx,
         )
 
 
@@ -1701,6 +1759,15 @@ def build_chunk_table(
         # DATE LOGIC (CORRELATION #3: channel-aware delivery)
         # --------------------------------------------------------
         _ch_fulfill = getattr(State, "channel_fulfillment_days", None)
+        # Pass the precomputed order grouping (order_starts/order_idx) so
+        # compute_dates skips a redundant np.unique sort.  Safe regardless of
+        # whether order_ids_int is ascending: the due-date hash is a pure
+        # function of the id value re-indexed by inv_idx, so ordering is
+        # irrelevant to the result.
+        _uniq_for_dates = order_ids_int[order_starts] if (
+            order_ids_int is not None and order_starts is not None) else None
+        _inv_for_dates = order_idx if (
+            order_ids_int is not None and order_idx is not None) else None
         dates = compute_dates(
             rng=rng,
             n=n_lines,
@@ -1709,6 +1776,8 @@ def build_chunk_table(
             order_dates=order_dates,
             channel_keys=sales_channel_key_arr,
             channel_fulfillment_days=_ch_fulfill,
+            unique_orders=_uniq_for_dates,
+            inv_idx=_inv_for_dates,
         )
         
         # --------------------------------------------------------
@@ -1774,8 +1843,25 @@ def build_chunk_table(
 
         # --- Sampling mode ---
         if not skip_cols and order_ids_int is not None:
-            # Order-level salesperson: sample per unique order, then broadcast back to lines
-            uniq_orders, first_idx, inv_idx = np.unique(order_ids_int, return_index=True, return_inverse=True)
+            # Order-level salesperson: sample per unique order, then broadcast back to lines.
+            # order_ids_int from the standard path is sequential/ascending & grouped, so the
+            # grouping the chunk builder already computed (order_starts/order_idx) equals
+            # np.unique's (return_index/return_inverse) in O(n) — no O(n log n) sort.
+            # Guard on monotonicity: the day-based SalesOrderNumber path can reorder ids,
+            # which would change np.unique's ordering AND the per-order RNG draw sequence
+            # below, so fall back to np.unique there to keep output byte-identical.
+            _ids_ascending = (
+                order_starts is not None and order_idx is not None
+                and (order_ids_int.size < 2
+                     or bool((order_ids_int[1:] >= order_ids_int[:-1]).all()))
+            )
+            if _ids_ascending:
+                first_idx = np.flatnonzero(order_starts)
+                uniq_orders = order_ids_int[first_idx]
+                inv_idx = order_idx
+            else:
+                uniq_orders, first_idx, inv_idx = np.unique(
+                    order_ids_int, return_index=True, return_inverse=True)
             order_store_sp = store_key_arr[first_idx]
             order_date_sp = order_dates[first_idx].astype("datetime64[D]", copy=False)
 

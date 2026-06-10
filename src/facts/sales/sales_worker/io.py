@@ -190,10 +190,13 @@ def write_csv_table(
 
     _ensure_dir(path)
 
+    # batch_size raises the writer's internal block size so it makes far fewer,
+    # larger syscalls (the default 1024 rows ⇒ ~1M write calls per GB).
     pacsv.write_csv(
         table,
         path,
-        write_options=pacsv.WriteOptions(include_header=True, quoting_style="none"),
+        write_options=pacsv.WriteOptions(
+            include_header=True, quoting_style="none", batch_size=1 << 20),
     )
 
 
