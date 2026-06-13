@@ -1,6 +1,5 @@
 import pandas as pd
 from pathlib import Path
-import yfinance as yf
 from datetime import timedelta
 
 from src.utils.logging_utils import info, warn
@@ -19,6 +18,11 @@ def download_history(currency, start_date, end_date):
     - Prefer Yahoo ticker: USD{CUR}=X  (usually already USD -> CUR)
     - Fallback to: {CUR}USD=X and invert
     """
+    # Imported lazily: yfinance (and its transitive deps) is heavy, and importing it
+    # at module scope pulled it into every spawned sales worker via the dimensions
+    # import chain. Workers never download FX, so defer the cost to actual use.
+    import yfinance as yf
+
     # Normalize input dates to Timestamps (safe for yfinance + pd.date_range)
     start_ts = pd.to_datetime(start_date).normalize()
     end_ts = pd.to_datetime(end_date).normalize()

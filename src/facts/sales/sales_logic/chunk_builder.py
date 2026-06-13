@@ -717,6 +717,22 @@ _FAR_PAST = np.datetime64("1900-01-01", "D")
 _FAR_FUTURE = np.datetime64("2262-04-11", "D")
 
 
+def _weighted_choice_idx(
+    rng: np.random.Generator,
+    weights: np.ndarray,
+    size: int,
+) -> np.ndarray:
+    """Sample `size` indices into `weights` with replacement, proportional to weights.
+
+    Inverse-CDF via searchsorted — substantially faster than
+    ``rng.choice(n, size=size, p=...)`` for repeated weighted sampling. Statistically
+    identical to ``rng.choice`` with replacement; only the consumed RNG stream differs.
+    Callers must ensure the weights sum is positive (see ``_normalize_cdf``).
+    """
+    cdf = _normalize_cdf(weights)
+    return np.searchsorted(cdf, rng.random(size), side="right")
+
+
 def _sample_salesperson_vectorized(
     store_ids: np.ndarray,
     dates_D: np.ndarray,
@@ -831,8 +847,7 @@ def _sample_salesperson_vectorized(
                 if sw <= 1e-12:
                     all_picked = emp2[rng.integers(0, emp2.size, size=total_count)]
                 else:
-                    p = w2 / sw
-                    all_picked = emp2[rng.choice(emp2.size, size=total_count, p=p)]
+                    all_picked = emp2[_weighted_choice_idx(rng, w2, total_count)]
 
                 _gi_s = pair_starts[gi_arr]
                 _gi_e = pair_starts[gi_arr + 1]
@@ -852,8 +867,7 @@ def _sample_salesperson_vectorized(
                 if sw <= 1e-12:
                     picked = emp2[rng.integers(0, emp2.size, size=count)]
                 else:
-                    p = w2 / sw
-                    picked = emp2[rng.choice(emp2.size, size=count, p=p)]
+                    picked = emp2[_weighted_choice_idx(rng, w2, count)]
                 s, e = int(pair_starts[gi]), int(pair_starts[gi + 1])
                 out[pair_order[s:e]] = picked
 
