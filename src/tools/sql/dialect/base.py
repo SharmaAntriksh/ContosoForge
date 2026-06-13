@@ -99,6 +99,24 @@ class Dialect(ABC):
             return raw[1:-1]
         return raw
 
+    def prepare_load_script(self) -> str | None:
+        """Optional SQL to run *before* the bulk load (own script file).
+
+        Used to switch the database into a minimal-logging-friendly recovery
+        model and pre-grow the transaction log so a large load does not blow the
+        log out to the full table size. Returns None for dialects that do not
+        need it (the generator then emits no prepare file).
+        """
+        return None
+
+    def finish_load_script(self) -> str | None:
+        """Optional SQL to run *after* the bulk load (own script file).
+
+        Reverses :meth:`prepare_load_script` (e.g. restore the recovery model).
+        Returns None when not applicable.
+        """
+        return None
+
     @abstractmethod
     def quote_ident(self, name: str) -> str: ...
 
@@ -118,6 +136,7 @@ class Dialect(ABC):
         table: str,
         csv_path: Path,
         use_csv_format: bool = False,
+        batch_rows: int = 1_000_000,
     ) -> str:
         """Return a single bulk-load statement for one CSV file.
 
@@ -125,4 +144,9 @@ class Dialect(ABC):
         embedded delimiters/quotes. SQL Server toggles to ``FORMAT='CSV'``;
         dialects whose load mechanism is always CSV-aware (e.g. Postgres
         ``COPY ... FORMAT csv``) can ignore the flag.
+
+        ``batch_rows`` sizes the load's commit granularity (SQL Server
+        ``BATCHSIZE``) so the transaction log truncates between batches.
+        Dialects that commit per statement (e.g. Postgres ``COPY``, where the
+        chunk file already is the commit unit) ignore it.
         """

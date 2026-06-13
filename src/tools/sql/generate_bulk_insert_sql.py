@@ -280,6 +280,20 @@ def generate_dims_and_facts_bulk_insert_scripts(
     dims_sql = load_output_folder / f"01_{kind}_dims.sql"
     facts_sql = load_output_folder / f"02_{kind}_facts.sql"
 
+    # Optional load-window recovery management (SQL Server): a prepare script
+    # (switch to BULK_LOGGED, optionally pre-grow the log) and a finish script
+    # (restore the recovery model). Dialects that don't need it return None.
+    prepare_text = dialect.prepare_load_script()
+    if prepare_text:
+        prepare_sql = load_output_folder / f"00_{kind}_prepare_load.sql"
+        prepare_sql.write_text(prepare_text.rstrip() + "\n", encoding="utf-8")
+        work(f"Wrote load script: {prepare_sql.name}")
+    finish_text = dialect.finish_load_script()
+    if finish_text:
+        finish_sql = load_output_folder / f"99_{kind}_finish_load.sql"
+        finish_sql.write_text(finish_text.rstrip() + "\n", encoding="utf-8")
+        work(f"Wrote load script: {finish_sql.name}")
+
     generate_bulk_insert_script(
         dims_folder,
         output_sql_file=str(dims_sql),

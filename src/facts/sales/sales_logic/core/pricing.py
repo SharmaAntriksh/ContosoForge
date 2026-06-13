@@ -49,5 +49,7 @@ def compute_prices(
         "final_unit_price": up,
         "final_unit_cost": uc,
         "discount_amt": np.zeros(n, dtype=np.float64),
-        "final_net_price": up.copy(),
+        # build_prices always overwrites final_net_price (and never reads the
+        # passed value), so share the up reference instead of a wasted copy.
+        "final_net_price": up,
     }

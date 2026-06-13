@@ -583,6 +583,83 @@ def _resolve_partitioning(cfg: dict, partition_enabled: bool, partition_cols: Op
     return bool(partition_enabled), partition_cols
 
 
+_CSV_COPY_BUF = 1 << 22  # 4 MiB block size for byte-level CSV concatenation
+
+
+def _available_phys_bytes() -> int | None:
+    """Best-effort available physical RAM in bytes (cross-platform).
+
+    Returns None if it cannot be queried, in which case callers skip the cap.
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MEMSTATEX(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            stat = _MEMSTATEX(dwLength=ctypes.sizeof(_MEMSTATEX))
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            return int(stat.ullAvailPhys)
+        return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _inflight_bytes_per_order(bytes_per_order: int = 512, safety: float = 3.0) -> float:
+    """Per-order resident bytes assumed in flight per worker.
+
+    ``bytes_per_order`` ≈ avg_lines_per_order × row_width; ``safety`` covers the
+    derived-column + group-by + returns transients; the ``2×`` is the ``2×
+    processes`` submission window (up to two chunks per worker in flight).
+    Shared by the projection and the cap so they stay exact inverses.
+    """
+    return float(bytes_per_order) * safety * 2.0
+
+
+def _projected_peak_chunk_bytes(chunk_size: int, n_workers: int,
+                                *, bytes_per_order: int = 512,
+                                safety: float = 3.0) -> int:
+    """Estimate peak resident bytes from in-flight chunks across all workers."""
+    per_worker = _inflight_bytes_per_order(bytes_per_order, safety)
+    return int(chunk_size * per_worker * max(1, n_workers))
+
+
+def _cap_chunk_size_by_ram(chunk_size: int, n_workers: int,
+                           *, bytes_per_order: int = 512,
+                           safety: float = 3.0) -> int:
+    """Shrink chunk_size so n_workers can each hold their in-flight chunks.
+
+    Only used on the auto-tune path (``tune_chunk=True``), where chunk_size is
+    already derived from the machine's worker count; pinned chunk_size values
+    are never silently changed (determinism), only warned about.
+    """
+    avail = _available_phys_bytes()
+    if not avail:
+        return int(chunk_size)
+    budget = avail * 0.75  # leave headroom for OS + page cache
+    per_worker = budget / max(1, n_workers)
+    max_orders = int(per_worker / _inflight_bytes_per_order(bytes_per_order, safety))
+    return max(50_000, min(int(chunk_size), max_orders))
+
+
+def _merge_parquet_job(job: tuple) -> None:
+    """Pool task: merge one table's parquet chunks (top-level for spawn pickling)."""
+    t, chunks, out, delete_after, compression = job
+    merge_parquet_files(
+        chunks, out, delete_after=delete_after,
+        compression=compression, table_name=t, log=False,
+    )
+
+
 def _merge_fact_csv_chunks(
     csv_chunks: list,
     out_dir: Path,
@@ -595,14 +672,27 @@ def _merge_fact_csv_chunks(
     Output files keep the existing chunk_prefix naming convention
     (e.g. ``sales_chunk0000.csv``, ``sales_return_chunk0000.csv``).
 
+    Concatenation is done at the **byte** level (raw block copy with inline
+    newline counting) rather than the old per-row Python loop, which decoded and
+    re-encoded UTF-8 for every one of up to 10⁹ rows on a single GIL-bound core.
+    A new output file is started at whole-source-chunk boundaries once the
+    current file has reached ``chunk_size`` rows, so each output file holds
+    approximately ``chunk_size`` rows (source chunks are never split mid-file).
+    Exact per-file row counts are not preserved — no consumer depends on them
+    (``BULK INSERT``/``COPY`` ignore per-file row counts, and the SQL generators
+    enumerate whatever ``.csv`` files exist) — but the row *data* is identical.
+
+    Files are written in binary mode so LF terminators pass through verbatim
+    (no CRLF translation on Windows).
+
     Writes to a temporary directory first, then moves files into out_dir
     to avoid overwriting source chunks that share the same filename.
     """
     if not csv_chunks:
         return
 
-    with open(csv_chunks[0], "r", encoding="utf-8") as f:
-        header = f.readline()
+    with open(csv_chunks[0], "rb") as f:
+        header = f.readline()  # raw header bytes, including the line terminator
 
     # Write to a temp directory so we never clobber source chunks.
     import tempfile
@@ -619,7 +709,7 @@ def _merge_fact_csv_chunks(
             out_f.close()
         path = tmp_dir / f"{chunk_prefix}{file_idx:04d}.csv"
         tmp_files.append(path)
-        out_f = open(path, "w", newline="", encoding="utf-8")
+        out_f = open(path, "wb")
         out_f.write(header)
         rows_in_current = 0
         file_idx += 1
@@ -627,13 +717,18 @@ def _merge_fact_csv_chunks(
     try:
         _open_next()
         for chunk_path in csv_chunks:
-            with open(chunk_path, "r", encoding="utf-8") as in_f:
-                next(in_f, None)  # skip header
-                for line in in_f:
-                    if rows_in_current >= chunk_size:
-                        _open_next()
-                    out_f.write(line)
-                    rows_in_current += 1
+            # Roll to a fresh output file at the chunk boundary once the current
+            # file has met its row target (keeps whole source chunks intact).
+            if rows_in_current >= chunk_size:
+                _open_next()
+            with open(chunk_path, "rb") as in_f:
+                in_f.readline()  # skip this chunk's header
+                while True:
+                    buf = in_f.read(_CSV_COPY_BUF)
+                    if not buf:
+                        break
+                    out_f.write(buf)
+                    rows_in_current += buf.count(b"\n")  # data rows (header skipped)
     finally:
         if out_f is not None:
             out_f.close()
@@ -1830,7 +1925,28 @@ def _assemble_output(
                 else:
                     info("Merge parquet: " + ", ".join(f"{name}={n}" for name, n in counts))
 
-                for t, chunks, out in merge_jobs:
+                # The per-table merges are independent (disjoint chunk sets),
+                # and each is a full re-decode+re-encode pass that holds the GIL
+                # in its Python-level row-group loop — so run them across
+                # processes when there is more than one table.  For a single
+                # table there is nothing to overlap, so merge inline and skip
+                # the process-spawn overhead.
+                if len(merge_jobs) > 1:
+                    from src.utils.pool import iter_imap_unordered, PoolRunSpec
+                    n_merge = min(len(merge_jobs), max(1, (os.cpu_count() or 1) - 1))
+                    jobs = [
+                        (t, chunks, out, bool(delete_chunks), compression)
+                        for (t, chunks, out) in merge_jobs
+                    ]
+                    # Drain to completion; iter_imap_unordered surfaces any worker
+                    # exception and shares the pipeline's Windows CTRL_C spawn guard.
+                    for _ in iter_imap_unordered(
+                        tasks=jobs, task_fn=_merge_parquet_job,
+                        spec=PoolRunSpec(processes=n_merge, label="parquet-merge"),
+                    ):
+                        pass
+                else:
+                    t, chunks, out = merge_jobs[0]
                     merge_parquet_files(
                         chunks,
                         out,
@@ -2076,6 +2192,15 @@ def generate_sales_fact(
 
     if tune_chunk:
         chunk_size = suggest_chunk_size(total_rows, target_workers=n_workers_planned, preferred_chunks_per_worker=2)
+        # Joint RAM cap: the OOM surface is workers × chunk_size, not either
+        # alone.  Safe to apply here because the auto-tuned chunk_size is already
+        # a function of the machine's worker count (not reproducible across
+        # machines); pinned chunk_size is handled by a warning below instead.
+        _capped = _cap_chunk_size_by_ram(chunk_size, n_workers_planned)
+        if _capped < chunk_size:
+            info(f"Auto-capping chunk_size {chunk_size:,} -> {_capped:,} to bound "
+                 f"in-flight memory across {n_workers_planned} workers")
+            chunk_size = _capped
 
     chunk_size = max(1_000, _int_or(chunk_size, 1_000_000))
 
@@ -2174,33 +2299,32 @@ def generate_sales_fact(
     # Auto-cap workers on Windows to prevent page-file thrashing during
     # spawn-mode init.  Each worker imports numpy/pandas/pyarrow (~350 MB).
     if os.name == "nt":
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            class MEMORYSTATUSEX(ctypes.Structure):
-                _fields_ = [("dwLength", ctypes.c_ulong),
-                             ("dwMemoryLoad", ctypes.c_ulong),
-                             ("ullTotalPhys", ctypes.c_ulonglong),
-                             ("ullAvailPhys", ctypes.c_ulonglong),
-                             ("ullTotalPageFile", ctypes.c_ulonglong),
-                             ("ullAvailPageFile", ctypes.c_ulonglong),
-                             ("ullTotalVirtual", ctypes.c_ulonglong),
-                             ("ullAvailVirtual", ctypes.c_ulonglong),
-                             ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-            stat = MEMORYSTATUSEX(dwLength=ctypes.sizeof(MEMORYSTATUSEX))
-            kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-            avail_mb = stat.ullAvailPhys / (1024 * 1024)
+        _avail_bytes = _available_phys_bytes()
+        if _avail_bytes:
+            avail_mb = _avail_bytes / (1024 * 1024)
             from src.defaults import WORKER_OS_RESERVE_MB, WORKER_ESTIMATE_MB
             usable_mb = max(0, avail_mb - WORKER_OS_RESERVE_MB)
-            per_worker_mb = WORKER_ESTIMATE_MB
-            mem_cap = max(1, int(usable_mb / per_worker_mb))
+            mem_cap = max(1, int(usable_mb / WORKER_ESTIMATE_MB))
             if mem_cap < n_workers:
                 info(f"Auto-capping workers {n_workers} -> {mem_cap} (available RAM: {avail_mb:.0f} MB)")
                 n_workers = mem_cap
-        except (OSError, AttributeError) as exc:
-            logging.getLogger(__name__).debug(
-                "Could not query available RAM (%s); skipping worker cap", exc
-            )
+
+    # When chunk_size is pinned (not auto-tuned), we never silently shrink it
+    # (that would change output and break reproducibility) — but warn if the
+    # projected in-flight memory across all workers looks likely to exhaust RAM,
+    # so the user can lower chunk_size or enable tune_chunk deliberately.
+    if not tune_chunk:
+        _avail = _available_phys_bytes()
+        if _avail:
+            _peak = _projected_peak_chunk_bytes(chunk_size, n_workers)
+            if _peak > _avail * 0.75:
+                logging.getLogger(__name__).warning(
+                    "chunk_size=%s × %d workers projects ~%.1f GB in-flight "
+                    "(~%.1f GB available); reduce sales.chunk_size or set "
+                    "sales.tune_chunk=true to avoid possible OOM.",
+                    f"{chunk_size:,}", n_workers,
+                    _peak / (1024 ** 3), _avail / (1024 ** 3),
+                )
 
     info(f"Spawning {n_workers} worker processes...")
 

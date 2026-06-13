@@ -82,7 +82,8 @@ def _stable_row_hash(order_dates: np.ndarray, product_keys: np.ndarray) -> np.nd
 # ----------------------------------------------------------------
 
 def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
-                   *, channel_keys=None, channel_fulfillment_days=None):
+                   *, channel_keys=None, channel_fulfillment_days=None,
+                   unique_orders=None, inv_idx=None):
     """
     Compute due dates, delivery dates, delivery status, and order delay flag.
 
@@ -115,8 +116,15 @@ def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
     if has_orders:
         order_ids_int = np.asarray(order_ids_int, dtype=np.int64)
 
-        # Map rows → order index (order-level coherence)
-        unique_orders, inv_idx = np.unique(order_ids_int, return_inverse=True)
+        # Map rows → order index (order-level coherence).  The caller can pass
+        # the precomputed grouping (the chunk builder already derives it from
+        # the line-number cumsum), avoiding a redundant O(n log n) np.unique
+        # sort.  order_ids_int is np.repeat(sequential_ids, repeats) — already
+        # sorted/grouped — so the derived outputs equal np.unique's.
+        if inv_idx is None:
+            unique_orders, inv_idx = np.unique(order_ids_int, return_inverse=True)
+        else:
+            inv_idx = np.asarray(inv_idx, dtype=np.int64)
 
         # Mix sequential order IDs to break visible due-date patterns
         mixed = _mix_u64(unique_orders.astype(np.uint64).copy())
