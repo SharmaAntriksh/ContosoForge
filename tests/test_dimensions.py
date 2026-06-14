@@ -46,7 +46,10 @@ from src.dimensions.products.pricing import apply_product_pricing
 # ---------------------------------------------------------------------------
 # Employees
 # ---------------------------------------------------------------------------
-from src.dimensions.employees import generate_employee_dimension
+from src.dimensions.employees import (
+    generate_employee_dimension,
+    generate_employee_store_assignments,
+)
 
 
 # ===================================================================
@@ -179,6 +182,41 @@ class TestGenerateStoreTable:
                 num_stores=5,
                 seed=1,
             )
+
+    def test_close_share_keeps_one_store_open(self, geo_keys):
+        """Layer 1b: close_share=1.0 must not close every physical store — at
+        least one stays open so Sales always has a staffed store and never
+        falls back to an unstaffed store (which would emit EmployeeKey=-1)."""
+        df = generate_store_table(
+            geo=GeoContext(geo_keys=geo_keys),
+            num_stores=20,
+            seed=3,
+            dataset_start="2021-01-01",
+            dataset_end="2025-12-31",
+            close_share=1.0,
+            closing_enabled=True,
+            online_stores=0,
+        )
+        assert (df["Status"] != "Closed").any(), "every store was closed"
+        assert (df["Status"] == "Open").sum() >= 1
+
+    def test_physical_stores_have_min_two_employees(self, geo_keys):
+        """Physical stores must have EmployeeCount >= 2 (manager + >= 1
+        salesperson) even when staffing_ranges asks for fewer; online stores
+        keep 1. Floor lives where EmployeeCount is born so it stays consistent
+        with the derived employee roster."""
+        df = generate_store_table(
+            geo=GeoContext(geo_keys=geo_keys),
+            num_stores=40,
+            seed=5,
+            online_stores=5,
+            staffing_overrides={"Supermarket": [1, 1], "Convenience": [0, 1]},
+        )
+        physical = df[df["StoreType"] != "Online"]
+        assert (physical["EmployeeCount"] >= 2).all()
+        online = df[df["StoreType"] == "Online"]
+        if len(online):
+            assert (online["EmployeeCount"] == 1).all()
 
     def test_square_footage_positive(self, geo_keys):
         df = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=30, seed=1)
@@ -790,10 +828,13 @@ class TestGenerateEmployeeDimension:
                     f"Store {sk}: no SA hired before {global_start}"
                 )
 
-    def test_employee_count_one_means_no_staff(self, people_pools):
-        """EmployeeCount=1 means only the store manager, zero staff."""
+    def test_employee_count_one_still_gets_salesperson(self, people_pools):
+        """Backstop (Layer 2): a physical store budgeted for only a manager
+        (EmployeeCount=1) must still get >= 1 Sales Associate, otherwise Sales
+        emits EmployeeKey=-1 (orphan FK) for that store."""
         stores = self._make_stores(n=3)
-        stores["EmployeeCount"] = 1  # just the manager
+        stores["StoreType"] = "Supermarket"  # all physical
+        stores["EmployeeCount"] = 1  # only the manager budgeted
         df = generate_employee_dimension(
             stores=stores,
             seed=42,
@@ -801,9 +842,9 @@ class TestGenerateEmployeeDimension:
             global_end=pd.Timestamp("2025-12-31"),
             people_pools=people_pools,
         )
-        # Should still have corporate + regional + district + store managers
-        staff = df[df["OrgLevel"] == 6]
-        assert len(staff) == 0
+        for sk in stores["StoreKey"].astype(int):
+            store_sa = df[(df["StoreKey"] == sk) & (df["Title"] == "Sales Associate")]
+            assert len(store_sa) >= 1, f"Store {sk} has no Sales Associate"
 
     def test_names_populated(self, people_pools):
         stores = self._make_stores()
@@ -816,6 +857,126 @@ class TestGenerateEmployeeDimension:
         )
         assert df["EmployeeName"].notna().all()
         assert (df["EmployeeName"].str.len() > 0).all()
+
+
+# ===================================================================
+# SALESPERSON COVERAGE INVARIANT (employees -> bridge)
+# ===================================================================
+
+class TestSalespersonCoverageInvariant:
+    """Every physical store must have >= 1 salesperson in the bridge table.
+
+    Without this, the Sales fact has no eligible salesperson for those
+    (store, date) rows and emits EmployeeKey=-1 — an orphan FK that breaks the
+    generated SQL constraints. Exercises the employee-generator backstop
+    (Layer 2) end-to-end through the assignments bridge, including the
+    production EmployeeKey->StoreKey decode path.
+    """
+
+    def _physical_stores(self, n=6, seed=7):
+        rng = np.random.default_rng(seed)
+        return pd.DataFrame({
+            "StoreKey": np.arange(1, n + 1, dtype=np.int32),
+            "GeographyKey": rng.integers(1, 10, size=n, dtype=np.int32),
+            # Manager-only budget for every store — the adversarial case.
+            "EmployeeCount": np.ones(n, dtype=np.int64),
+            "StoreType": np.array(["Supermarket"] * n, dtype=object),
+            "StoreDistrict": [f"District {i // 3 + 1}" for i in range(n)],
+            "StoreRegion": [f"Region {i // 6 + 1}" for i in range(n)],
+        })
+
+    def test_every_physical_store_has_salesperson_in_bridge(self, people_pools):
+        global_start = pd.Timestamp("2021-01-01")
+        global_end = pd.Timestamp("2025-12-31")
+        stores = self._physical_stores()
+        emp = generate_employee_dimension(
+            stores=stores,
+            seed=42,
+            global_start=global_start,
+            global_end=global_end,
+            people_pools=people_pools,
+        )
+        # Drop StoreKey to force the production decode path (run_employee_store_
+        # assignments reads employees.parquet without the StoreKey column).
+        emp_for_bridge = emp.drop(columns=["StoreKey"])
+        bridge = generate_employee_store_assignments(
+            employees=emp_for_bridge,
+            global_start=global_start,
+            global_end=global_end,
+        )
+        sp = bridge[bridge["RoleAtStore"] == "Sales Associate"]
+        covered = set(sp["StoreKey"].astype(int).unique())
+        for sk in stores["StoreKey"].astype(int):
+            assert sk in covered, f"Physical store {sk} has no salesperson in bridge"
+        # No salesperson row should ever resolve to a Store Manager key band.
+        assert (sp["EmployeeKey"].astype(np.int64) >= 40_000_000).all()
+
+    def test_employee_count_matches_roster_size(self, people_pools):
+        """Regression: through the normal store->employee path, every store's
+        Stores.EmployeeCount must equal its employee-row count — the invariant
+        the shipped SQL verification scripts assert (verify_cross_dimension.sql,
+        25_stores.sql). The store-generator EmployeeCount floor keeps this true
+        even under minimal staffing (the employee backstop, which would break
+        it, must not fire for pipeline-generated stores)."""
+        geo_keys = np.arange(1, 11, dtype=np.int64)
+        stores = generate_store_table(
+            geo=GeoContext(geo_keys=geo_keys),
+            num_stores=30,
+            seed=11,
+            online_stores=3,
+            closing_enabled=False,  # no terminations -> roster == EmployeeCount
+            staffing_overrides={"Supermarket": [1, 1], "Convenience": [1, 2]},
+        )
+        emp = generate_employee_dimension(
+            stores=stores,
+            seed=42,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+            people_pools=people_pools,
+        )
+        roster = emp[emp["StoreKey"] > 0].groupby("StoreKey").size()
+        for _, srow in stores.iterrows():
+            sk = int(srow["StoreKey"])
+            assert int(roster.get(sk, 0)) == int(srow["EmployeeCount"]), (
+                f"Store {sk}: EmployeeCount={int(srow['EmployeeCount'])} "
+                f"but roster has {int(roster.get(sk, 0))}"
+            )
+
+
+# ===================================================================
+# CONFIG CROSS-SECTION RULES (staffing floor)
+# ===================================================================
+
+class TestStaffingFloorRule:
+    """apply_cross_section_rules floors physical staffing to >= 2 staff so
+    every store keeps >= 1 salesperson after the manager (Layer 1)."""
+
+    def test_low_staffing_min_raised(self):
+        from src.engine.config.config import apply_cross_section_rules
+        cfg = {"stores": {"staffing_ranges": {
+            "Supermarket": [1, 1],   # min and max both below floor
+            "Convenience": [0, 4],   # only min below floor
+            "Hypermarket": [15, 40], # healthy — untouched
+            "Online": [1, 1],        # fixed to 1 — skipped
+        }}}
+        out = apply_cross_section_rules(cfg)
+        sr = out["stores"]["staffing_ranges"]
+        assert sr["Supermarket"] == [2, 2]
+        assert sr["Convenience"] == [2, 4]
+        assert sr["Hypermarket"] == [15, 40]
+        assert sr["Online"] == [1, 1]
+
+    def test_healthy_staffing_unchanged(self):
+        from src.engine.config.config import apply_cross_section_rules
+        cfg = {"stores": {"staffing_ranges": {
+            "Supermarket": [8, 20],
+            "Convenience": [2, 6],
+        }}}
+        out = apply_cross_section_rules(cfg)
+        assert out["stores"]["staffing_ranges"] == {
+            "Supermarket": [8, 20],
+            "Convenience": [2, 6],
+        }
 
 
 # ===================================================================

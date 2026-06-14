@@ -49,6 +49,7 @@ from src.defaults import (
     ONLINE_STORE_KEY_BASE as _ONLINE_SK_BASE,
     STORE_STAFFING_RANGES as _STAFFING_RANGES,
     STORE_STAFFING_DEFAULT as _STAFFING_DEFAULT,
+    MIN_PHYSICAL_EMPLOYEE_COUNT as _MIN_PHYSICAL_EMP,
 )
 
 
@@ -248,6 +249,15 @@ def _employee_count_by_store_type(
         mask = st == stype
         lo, hi = ranges.get(stype, _STAFFING_DEFAULT)
         out[mask] = rng.integers(lo, hi + 1, size=int(mask.sum()))
+
+    # Physical stores must have >= MIN_PHYSICAL_EMPLOYEE_COUNT (manager + >= 1
+    # salesperson) so every store keeps salesperson coverage and EmployeeCount
+    # stays consistent with the employee roster derived from it (1 manager +
+    # EmployeeCount-1 staff). Applied after sampling so it consumes no extra RNG
+    # (determinism preserved); online stores keep their fixed count of 1.
+    phys_mask = st != "Online"
+    if phys_mask.any():
+        out[phys_mask] = np.maximum(out[phys_mask], _MIN_PHYSICAL_EMP)
 
     return out
 
@@ -740,6 +750,19 @@ def generate_store_table(
             if n_phys_eligible > 0 and close_share > 0.0
             else 0
         )
+        # Always keep >= 1 physical store open for the whole window. A
+        # close_share high enough to close every physical store leaves late
+        # months with no open store; if there are also no online stores, Sales
+        # falls back to unstaffed stores and emits EmployeeKey=-1 (orphan FK).
+        # A count-aware clamp here is the only correct fix — a plain config
+        # ceiling cannot protect small physical-store counts.
+        if n_phys_eligible > 0 and n_phys_close >= n_phys_eligible:
+            warn(
+                f"close_share ({close_share}) would close all {n_phys_eligible} "
+                "physical store(s); keeping 1 open to preserve salesperson "
+                "coverage in Sales."
+            )
+            n_phys_close = n_phys_eligible - 1
         phys_close_idx = rng.choice(phys_idx, size=min(n_phys_close, n_phys_eligible), replace=False) if n_phys_close > 0 else np.array([], dtype=np.intp)
 
         # Of the remaining physical stores, ~5% are Renovating

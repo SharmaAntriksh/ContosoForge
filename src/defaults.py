@@ -116,6 +116,15 @@ STORE_STAFFING_RANGES: Dict[str, Tuple[int, int]] = {
 # Fallback for store types not listed above
 STORE_STAFFING_DEFAULT: Tuple[int, int] = (2, 6)
 
+# Minimum EmployeeCount for a physical store: 1 store manager + >= 1
+# salesperson. Sales emits EmployeeKey=-1 (an orphan FK that breaks the
+# generated SQL FK constraints) for any (store, date) with no eligible
+# salesperson, so this is a hard floor. The "+1 salesperson" pairs with the
+# manager reservation (``EmployeeCount - 1`` staff) in employees/generator.py;
+# if that reservation changes, update this floor in lockstep. Online stores
+# are exempt (fixed at 1 — they get a dedicated online sales representative).
+MIN_PHYSICAL_EMPLOYEE_COUNT: int = 2
+
 # Online store key ranges — easily distinguishable from physical stores
 ONLINE_STORE_KEY_BASE: int = 10_000    # Online StoreKeys: 10_001, 10_002, ...
 ONLINE_EMP_KEY_BASE: int = 50_000_000  # Online EmployeeKeys: 50_000_901, 50_000_902, ...

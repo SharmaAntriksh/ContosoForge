@@ -953,6 +953,8 @@ def apply_cross_section_rules(cfg: Dict[str, Any]) -> Dict[str, Any]:
        ``sales_output='sales'`` because returns need ``SalesOrderNumber``.
     2. Exchange-rate date range is always overridden to match
        ``defaults.dates`` (FX dates cannot be set independently).
+    3. Physical store staffing is floored so every store keeps at least one
+       salesperson (otherwise Sales emits ``EmployeeKey=-1`` orphan FKs).
     """
     from src.utils.logging_utils import warn as _warn
 
@@ -980,5 +982,40 @@ def apply_cross_section_rules(cfg: Dict[str, Any]) -> Dict[str, Any]:
         if "currencies" in fx_cfg and "to_currencies" not in fx_cfg:
             fx_cfg["to_currencies"] = fx_cfg.pop("currencies")
         cfg["exchange_rates"] = fx_cfg
+
+    # Rule 4: physical store staffing must leave room for >= 1 salesperson.
+    # EmployeeCount includes the store manager, so a per-type minimum below 2
+    # produces stores with a manager and zero Sales Associates. Sales then has
+    # no eligible salesperson for those (store, date) rows and emits
+    # EmployeeKey=-1 — an orphan FK that breaks the generated SQL constraints.
+    # Floor each physical type's minimum to 2 (the smallest change that keeps
+    # >= 1 salesperson per store). "Online" is fixed to 1 by the store generator
+    # and is skipped — online stores get a dedicated sales representative.
+    stores_cfg = cfg.get("stores")
+    if isinstance(stores_cfg, Mapping):
+        staffing = stores_cfg.get("staffing_ranges")
+        if isinstance(staffing, Mapping):
+            from src.defaults import MIN_PHYSICAL_EMPLOYEE_COUNT as _min_physical_staff
+            new_staffing = dict(staffing)
+            changed = False
+            for stype, spec in list(new_staffing.items()):
+                if str(stype) == "Online":
+                    continue
+                if isinstance(spec, (list, tuple)) and len(spec) == 2:
+                    lo, hi = int(spec[0]), int(spec[1])
+                    if lo < _min_physical_staff:
+                        new_lo = _min_physical_staff
+                        new_hi = max(hi, new_lo)
+                        _warn(
+                            f"stores.staffing_ranges[{stype!r}]=[{lo}, {hi}] is too low: "
+                            "a store needs >= 2 staff so >= 1 Sales Associate remains "
+                            f"after the manager; raising to [{new_lo}, {new_hi}]."
+                        )
+                        new_staffing[stype] = [new_lo, new_hi]
+                        changed = True
+            if changed:
+                stores_cfg = dict(stores_cfg)
+                stores_cfg["staffing_ranges"] = new_staffing
+                cfg["stores"] = stores_cfg
 
     return cfg

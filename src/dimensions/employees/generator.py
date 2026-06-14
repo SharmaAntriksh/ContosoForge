@@ -543,6 +543,27 @@ def generate_employee_dimension(
         # EmployeeCount includes the store manager, so subtract 1 for staff
         staff_counts = np.maximum(0, emp_counts - 1)
 
+        # Last-resort backstop: every physical store must have >= 1 staff slot
+        # so that at least one Sales Associate exists (the first k_ps staff are
+        # forced to the primary sales role below). A store with only a manager
+        # has no salesperson, and Sales emits EmployeeKey=-1 (orphan FK) for it.
+        # The store generator floors physical EmployeeCount to
+        # MIN_PHYSICAL_EMPLOYEE_COUNT, so this is a no-op for pipeline-generated
+        # stores; it only fires when generate_employee_dimension is called on a
+        # hand-built / legacy stores frame with EmployeeCount<=1. In that case
+        # it prevents the hard -1 FK failure, but the forced extra associate
+        # makes the roster exceed Stores.EmployeeCount (a soft count-mismatch
+        # the SQL verifier flags) — regenerate stores to resolve it cleanly.
+        _understaffed = staff_counts < 1
+        if _understaffed.any():
+            warn(
+                f"{int(_understaffed.sum())} physical store(s) had no staff after "
+                "reserving the manager; forcing 1 Sales Associate each to keep "
+                "salesperson coverage (prevents EmployeeKey=-1 in Sales). "
+                "Regenerate stores so EmployeeCount matches the roster."
+            )
+            staff_counts = np.maximum(staff_counts, 1)
+
     # ---------------------------------------------------------------
     # Staff rows — vectorized via np.repeat (physical stores only)
     # ---------------------------------------------------------------
