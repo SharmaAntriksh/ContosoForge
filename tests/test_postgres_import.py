@@ -15,6 +15,8 @@ from src.tools.sql._import_common import (
     _extract_tables_from_create_sql,
     _short_path,
     find_create_sql,
+    find_finish_load_script,
+    find_prepare_load_script,
     list_sql_files,
     ordered_load_files,
 )
@@ -112,6 +114,61 @@ class TestOrderedLoadFiles:
 
     def test_empty_folder(self, tmp_path: Path) -> None:
         assert ordered_load_files(tmp_path) == []
+
+    def test_prepare_finish_not_warned_as_extras(self, tmp_path: Path, capsys) -> None:
+        # The recovery-window scripts are handled by the importer, so they are
+        # NOT listed as skipped extras and must not appear in the warning.
+        (tmp_path / "00_bulk_insert_prepare_load.sql").write_text("")
+        (tmp_path / "01_bulk_insert_dims.sql").write_text("")
+        (tmp_path / "02_bulk_insert_facts.sql").write_text("")
+        (tmp_path / "99_bulk_insert_finish_load.sql").write_text("")
+        ordered = ordered_load_files(tmp_path)
+        assert [p.name for p in ordered] == [
+            "01_bulk_insert_dims.sql", "02_bulk_insert_facts.sql",
+        ]
+        out = capsys.readouterr().out
+        assert "Extra load scripts present" not in out
+
+    def test_genuine_extra_still_warned(self, tmp_path: Path, capsys) -> None:
+        (tmp_path / "01_bulk_insert_dims.sql").write_text("")
+        (tmp_path / "02_bulk_insert_facts.sql").write_text("")
+        (tmp_path / "50_something_unexpected.sql").write_text("")
+        ordered_load_files(tmp_path)
+        out = capsys.readouterr().out
+        assert "Extra load scripts present" in out
+        assert "50_something_unexpected.sql" in out
+
+
+class TestFindRecoveryScripts:
+    def test_finds_prepare_and_finish(self, tmp_path: Path) -> None:
+        prep = tmp_path / "00_bulk_insert_prepare_load.sql"
+        fin = tmp_path / "99_bulk_insert_finish_load.sql"
+        (tmp_path / "01_bulk_insert_dims.sql").write_text("")
+        prep.write_text(""); fin.write_text("")
+        assert find_prepare_load_script(tmp_path) == prep
+        assert find_finish_load_script(tmp_path) == fin
+
+    def test_absent_returns_none(self, tmp_path: Path) -> None:
+        (tmp_path / "01_bulk_insert_dims.sql").write_text("")
+        assert find_prepare_load_script(tmp_path) is None
+        assert find_finish_load_script(tmp_path) is None
+
+    def test_unrelated_prepare_finish_named_files_ignored(self, tmp_path: Path, capsys) -> None:
+        # Files that merely contain "prepare"/"finish" but not the documented
+        # *_prepare_load / *_finish_load suffix must NOT be treated as recovery
+        # scripts (else e.g. a facts-load file could run twice), and they are
+        # still surfaced normally by ordered_load_files.
+        (tmp_path / "01_bulk_insert_dims.sql").write_text("")
+        (tmp_path / "02_bulk_insert_facts.sql").write_text("")
+        (tmp_path / "03_facts_prepare_index.sql").write_text("")
+        (tmp_path / "04_finish_report.sql").write_text("")
+        assert find_prepare_load_script(tmp_path) is None
+        assert find_finish_load_script(tmp_path) is None
+        # The unrelated files are genuine extras and stay in the warning.
+        ordered_load_files(tmp_path)
+        out = capsys.readouterr().out
+        assert "03_facts_prepare_index.sql" in out
+        assert "04_finish_report.sql" in out
 
 
 class TestFindCreateSql:

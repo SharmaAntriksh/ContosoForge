@@ -171,6 +171,19 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--no-recovery-management",
+        action="store_true",
+        help=(
+            "Disable automatic recovery-model tuning. By default, if the target "
+            "database is in FULL recovery the importer switches it to BULK_LOGGED "
+            "for the load (faster, smaller transaction log) and restores it after "
+            "(databases already in SIMPLE/BULK_LOGGED are left untouched). Pass "
+            "this to leave the recovery model alone — e.g. on a production "
+            "database whose log-backup chain must not be broken."
+        ),
+    )
+
+    parser.add_argument(
         "--provision-tabular-user",
         action="store_true",
         help=(
@@ -238,6 +251,7 @@ def main() -> int:
             tabular_login=args.tabular_login,
             tabular_password=tabular_password,
             load_workers=int(args.load_workers),
+            manage_recovery=not bool(args.no_recovery_management),
         )
 
     except ValueError as exc:

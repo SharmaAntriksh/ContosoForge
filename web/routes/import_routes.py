@@ -69,6 +69,7 @@ class ImportRequest(BaseModel):
     apply_cci: bool = False
     drop_pk: bool = False
     verify: bool = False
+    manage_recovery: bool = True
     odbc_driver: Optional[str] = None
     provision_tabular_user: bool = False
     tabular_login: Optional[str] = None
@@ -206,6 +207,10 @@ def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
 
         if req.verify:
             cmd.append("--verify")
+
+        # Recovery-model tuning is on by default; only forward the opt-out.
+        if not req.manage_recovery:
+            cmd.append("--no-recovery-management")
 
         if req.provision_tabular_user:
             cmd.append("--provision-tabular-user")

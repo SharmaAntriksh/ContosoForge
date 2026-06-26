@@ -185,9 +185,34 @@ def ordered_load_files(load_dir: Path) -> list[Path]:
     if not ordered:
         return load_files
 
-    extras = [p for p in load_files if p not in ordered]
+    # The prepare/finish recovery-window scripts are expected and handled
+    # separately by the importer (smart recovery management), so they are not
+    # "stray" extras — only warn about genuinely unexpected files. Match the
+    # documented ``*_prepare_load`` / ``*_finish_load`` suffixes (not bare
+    # "prepare"/"finish"), so an unrelated file like ``03_facts_prepare_index``
+    # is neither silenced here nor mistaken for a recovery script below.
+    extras = [
+        p for p in load_files
+        if p not in ordered
+        and "prepare_load" not in p.name.lower()
+        and "finish_load" not in p.name.lower()
+    ]
     if extras:
         _log("WARN", "Extra load scripts present; skipping by default:")
         for f in extras:
             _log("WARN", f"    {f.name}")
     return ordered
+
+
+def find_prepare_load_script(load_dir: Path) -> Path | None:
+    """Locate the optional pre-load recovery script (``00_*_prepare_load.sql``)."""
+    return next(
+        (p for p in list_sql_files(load_dir) if "prepare_load" in p.name.lower()), None
+    )
+
+
+def find_finish_load_script(load_dir: Path) -> Path | None:
+    """Locate the optional post-load recovery script (``99_*_finish_load.sql``)."""
+    return next(
+        (p for p in list_sql_files(load_dir) if "finish_load" in p.name.lower()), None
+    )

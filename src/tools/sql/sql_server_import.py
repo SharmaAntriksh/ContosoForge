@@ -14,6 +14,8 @@ from src.tools.sql._import_common import (
     _log,
     _short_path,
     find_create_sql as _find_create_sql,
+    find_prepare_load_script,
+    find_finish_load_script,
     list_sql_files,
     ordered_load_files,
 )
@@ -883,6 +885,7 @@ def import_sql_server(
     tabular_login: str = TABULAR_LOGIN_DEFAULT,
     tabular_password: str | None = None,
     load_workers: int = 4,
+    manage_recovery: bool = True,
 ) -> None:
     if pyodbc is None:
         raise SqlServerImportError(
@@ -1007,35 +1010,85 @@ def import_sql_server(
                         f"Failed pre-load PK/FK drop in '{database}'. Details: {exc.args}"
                     ) from exc
 
-            # --- 2.2 Data loading ---
-            ordered_load = ordered_load_files(load_dir)
+            # --- 2.2 Data loading (with smart recovery-model management) ---
+            # Minimal logging needs heap (PK dropped) + TABLOCK + a non-FULL
+            # recovery model. The first two are already in place; if the database
+            # is in FULL recovery we switch it to BULK_LOGGED for the load (much
+            # faster, far smaller log on big loads) and restore it afterwards in a
+            # finally so a failed load can never leave it stuck. Databases already
+            # in SIMPLE/BULK_LOGGED are left untouched.
+            recovery_conn = None
+            recovery_managed = False
+            finish_script = find_finish_load_script(load_dir) if manage_recovery else None
+            try:
+                if manage_recovery and finish_script is not None:
+                    prepare_script = find_prepare_load_script(load_dir)
+                    if prepare_script is not None:
+                        recovery_conn = pyodbc.connect(db_conn_str, autocommit=True)
+                        _try_disable_query_timeout(recovery_conn)
+                        _rc = recovery_conn.cursor()
+                        _rc.execute(
+                            "SELECT recovery_model_desc FROM sys.databases "
+                            "WHERE name = DB_NAME()"
+                        )
+                        _row = _rc.fetchone()
+                        _model = str(_row[0]).upper() if _row else ""
+                        if _model == "FULL":
+                            _log("INFO", "  Recovery model FULL -> BULK_LOGGED for a "
+                                         "minimally-logged load (auto-restored after)")
+                            execute_sql_batches(_rc, prepare_script)
+                            recovery_managed = True
+                        else:
+                            _log("INFO", f"  Recovery model {_model or 'unknown'}; load "
+                                         "already minimally logged (no change)")
 
-            for load_file in ordered_load:
-                is_dims = "dim" in load_file.name.lower()
-                section = "Dimensions" if is_dims else "Facts"
+                ordered_load = ordered_load_files(load_dir)
 
-                # Count tables in this load file
-                sql_text = _read_sql_text(load_file)
-                stmts = _split_load_statements(sql_text)
-                table_names = [t for t, _ in stmts if t and t != "batch"]
-                n_tables = len(set(table_names))
+                for load_file in ordered_load:
+                    is_dims = "dim" in load_file.name.lower()
+                    section = "Dimensions" if is_dims else "Facts"
 
-                _t_load = _time.time()
-                _log("INFO", f"  Loading {section} ({n_tables} tables)")
-                _log("WORK", f"    {load_file.name}")
-                # Dimensions are tiny and single-chunk; only parallelize facts.
-                file_workers = load_workers if not is_dims else 1
-                _execute_load_with_progress(
-                    cursor,
-                    load_file,
-                    base=run_dir,
-                    label=section,
-                    db_conn_str=db_conn_str,
-                    load_workers=file_workers,
-                )
-                # Release any outer-cursor work between load files.
-                conn.commit()
-                _log("DONE", f"  Loading {section} completed in {_time.time() - _t_load:.1f}s")
+                    # Count tables in this load file
+                    sql_text = _read_sql_text(load_file)
+                    stmts = _split_load_statements(sql_text)
+                    table_names = [t for t, _ in stmts if t and t != "batch"]
+                    n_tables = len(set(table_names))
+
+                    _t_load = _time.time()
+                    _log("INFO", f"  Loading {section} ({n_tables} tables)")
+                    _log("WORK", f"    {load_file.name}")
+                    # Dimensions are tiny and single-chunk; only parallelize facts.
+                    file_workers = load_workers if not is_dims else 1
+                    _execute_load_with_progress(
+                        cursor,
+                        load_file,
+                        base=run_dir,
+                        label=section,
+                        db_conn_str=db_conn_str,
+                        load_workers=file_workers,
+                    )
+                    # Release any outer-cursor work between load files.
+                    conn.commit()
+                    _log("DONE", f"  Loading {section} completed in {_time.time() - _t_load:.1f}s")
+            finally:
+                if recovery_managed and recovery_conn is not None and finish_script is not None:
+                    try:
+                        _log("INFO", "  Restoring recovery model (reverses the BULK_LOGGED switch)")
+                        execute_sql_batches(recovery_conn.cursor(), finish_script)
+                        _log("INFO", "  Recovery model restored. Recommended: "
+                                     "BACKUP LOG to restart the log-backup chain.")
+                    # execute_sql_batches wraps driver errors as SqlServerImportError,
+                    # so catch that too — otherwise a finish-script failure would skip
+                    # the close() below (leak) and mask the original load exception.
+                    except (pyodbc.Error, SqlServerImportError) as _rexc:
+                        _log("WARN", f"  Auto-restore of recovery model failed: {_rexc}. "
+                                     f"Run {finish_script.name} manually.")
+                if recovery_conn is not None:
+                    # Never let a cleanup-close error mask the real load exception.
+                    try:
+                        recovery_conn.close()
+                    except pyodbc.Error:
+                        pass
 
             # --- 2.3 Row count verification ---
             try:
