@@ -15,21 +15,17 @@ concurrency:
 
 jobs:
   test:
-    name: Tests (py${{ matrix.python-version }})
+    name: Tests (py3.13)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        # Minimum supported (pyproject requires-python >=3.11) and latest.
-        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          # Matches .python-version and requires-python (>=3.13).
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: pyproject.toml
 

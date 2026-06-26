@@ -3,7 +3,7 @@ name = "synthetic-data-generator"
 version = "0.6.1"
 description = "Analytics-ready retail data generator (star-schema) for BI, analytics, and data engineering"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 dependencies = [
     "deltalake>=0.14.0,<2",

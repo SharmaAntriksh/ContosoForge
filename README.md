@@ -37,7 +37,7 @@ Each run produces a self-contained output folder under `generated_datasets/` wit
 
 ## Prerequisites
 
-- **Python 3.11+** (project pins **3.13** via `.python-version` for reproducible builds; uv will auto-install it if missing)
+- **Python 3.13** (pinned via `.python-version` for reproducible builds; uv will auto-install it if missing)
 - Git
 
 Optional:
