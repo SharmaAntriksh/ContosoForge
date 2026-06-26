@@ -121,8 +121,9 @@ models:
   # RETURNS
   # ================================================================
   returns:
-    enabled: true
-
+    # Returns on/off is controlled by config.yaml -> returns.enabled.
+    # This section only shapes returns when they are enabled there
+    # (reason mix, timing, and quantity behavior).
     reasons:                               # keys/labels/categories defined in defaults.py
       - { key: 1, weight: 0.20 }           # Defective (Quality)
       - { key: 2, weight: 0.12 }           # Damaged in shipping (Logistics)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -733,6 +733,8 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         returns_max_splits = int(worker_cfg.get("returns_max_splits", 3))
         returns_split_min_gap = int(worker_cfg.get("returns_split_min_gap", 3))
         returns_split_max_gap = int(worker_cfg.get("returns_split_max_gap", 20))
+        returns_lag_distribution = str(worker_cfg.get("returns_lag_distribution", "uniform") or "uniform")
+        returns_lag_mode = int(worker_cfg.get("returns_lag_mode", 7))
         returns_event_key_capacity = int(worker_cfg.get("returns_event_key_capacity", 100000))
         returns_logistics_keys = worker_cfg.get("returns_logistics_keys", [])
 
@@ -1198,6 +1200,8 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "returns_max_splits": returns_max_splits,
             "returns_split_min_gap": returns_split_min_gap,
             "returns_split_max_gap": returns_split_max_gap,
+            "returns_lag_distribution": returns_lag_distribution,
+            "returns_lag_mode": returns_lag_mode,
             "returns_event_key_capacity": returns_event_key_capacity,
             "returns_logistics_keys": returns_logistics_keys,
             # EMPLOYEE assignment (canonical + optional legacy)

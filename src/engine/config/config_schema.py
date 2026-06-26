@@ -8,10 +8,9 @@ Typed config models with attribute access::
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date as _date
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # =========================================================================
@@ -122,9 +121,16 @@ class _MutationMixin:
                 pass
 
     def copy(self):
-        """Shallow copy — delegates to Pydantic's model_copy to avoid deprecation."""
+        """Shallow copy — delegates to Pydantic's model_copy to avoid deprecation.
+
+        Pylance false positive (suppressed below): _MutationMixin is type-checked
+        in isolation, but at runtime it is only ever mixed into a BaseModel
+        subclass (_Base), so ``model_copy`` always exists. The incompatible
+        ``copy`` override is reported on the _Base class declaration (suppressed
+        there). See CLAUDE.md gotcha #24.
+        """
         if hasattr(self, "model_copy"):
-            return self.model_copy()
+            return self.model_copy()  # pyright: ignore[reportAttributeAccessIssue]
         return self
 
 
@@ -132,7 +138,7 @@ class _MutationMixin:
 # Base model with dict compat + permissive extras
 # =========================================================================
 
-class _Base(_MutationMixin, BaseModel):
+class _Base(_MutationMixin, BaseModel):  # pyright: ignore[reportIncompatibleMethodOverride]
     model_config = ConfigDict(
         extra="forbid",         # catch typos in config keys
         populate_by_name=True,
@@ -143,7 +149,9 @@ class _Base(_MutationMixin, BaseModel):
 # Register _Base as a virtual Mapping so isinstance(cfg, Mapping) is True.
 # This lets us replace isinstance(x, dict) guards with isinstance(x, Mapping)
 # during the migration — both plain dicts and Pydantic models pass.
-Mapping.register(_Base)
+# (Pylance false positive on the ABCMeta.register call — _Base structurally
+# satisfies Mapping via _MutationMixin's __getitem__/__iter__/__len__.)
+Mapping.register(_Base)  # pyright: ignore
 
 
 # =========================================================================
@@ -886,7 +894,10 @@ class ReturnReasonEntry(_Base):
 
 
 class LagDaysConfig(_Base):
-    distribution: str = "triangular"
+    # Return-lag shape, consumed by sales_worker/returns_builder.py.
+    # Constrained so a typo errors at config-load instead of silently
+    # falling back to uniform in the worker.
+    distribution: Literal["uniform", "triangular", "normal"] = "triangular"
     mode: int = 7
     split_min_gap: int = 3
     split_max_gap: int = 20
@@ -899,10 +910,20 @@ class ReturnQuantityConfig(_Base):
 
 
 class ReturnsModelsConfig(_Base):
-    enabled: bool = True
     reasons: List[ReturnReasonEntry] = []
     lag_days: LagDaysConfig = LagDaysConfig()
     quantity: ReturnQuantityConfig = ReturnQuantityConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_removed_keys(cls, data: Any) -> Any:
+        # `enabled` removed: returns on/off is controlled solely by
+        # config.yaml -> returns.enabled. Strip it from legacy models.yaml
+        # files so extra="forbid" doesn't reject them.
+        if isinstance(data, dict):
+            data = dict(data)
+            data.pop("enabled", None)
+        return data
 
     @model_validator(mode="after")
     def _validate_reason_keys(self) -> "ReturnsModelsConfig":

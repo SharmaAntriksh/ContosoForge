@@ -43,6 +43,12 @@ class ReturnsConfig:
     return_rate: float = 0.0
     min_lag_days: int = 0
     max_lag_days: int = 60
+    # Lag shape between delivery and return. Source: models.yaml ->
+    # returns.lag_days.{distribution,mode}. Default "uniform" preserves the
+    # historical behavior for direct construction (e.g. tests); the pipeline
+    # passes the configured value (models.yaml ships "triangular").
+    lag_distribution: str = "uniform"
+    lag_mode: int = 7
     reason_keys: Sequence[int] = RETURN_REASON_KEYS
     reason_probs: Sequence[float] = tuple(RETURN_REASON_DEFAULT_WEIGHTS[k] for k in RETURN_REASON_KEYS)
     full_line_probability: float = 0.85
@@ -206,6 +212,43 @@ def _validate_cfg(cfg: ReturnsConfig) -> tuple[float, int, int, np.ndarray, np.n
     return rr, min_lag, max_lag, rk, rp
 
 
+def _draw_base_lag(
+    rng: np.random.Generator,
+    m: int,
+    lo: int,
+    hi: int,
+    distribution: str,
+    mode: int,
+) -> np.ndarray:
+    """Draw ``m`` integer return lags (days), each in ``[lo, hi]``.
+
+    The shape is set by ``distribution`` (from models.yaml ->
+    returns.lag_days.distribution):
+
+      - "uniform"     : flat over [lo, hi] (historical behavior)
+      - "triangular"  : peaked at ``mode`` (clamped into [lo, hi])
+      - "normal"      : centered at ``mode``, sigma ≈ (hi-lo)/6 so ~99.7% of
+                        mass falls within [lo, hi] before clamping
+
+    Unknown names fall back to uniform. For a degenerate range (hi <= lo) every
+    lag is ``lo`` and the RNG is not consumed — matching the old fixed-lag path.
+    """
+    if hi <= lo:
+        return np.full(m, lo, dtype=np.int32)
+
+    dist = str(distribution or "uniform").strip().lower()
+    if dist in ("triangular", "normal"):
+        peak = float(min(max(int(mode), lo), hi))  # clamp mode into [lo, hi]
+        if dist == "triangular":
+            vals = rng.triangular(lo, peak, hi, size=m)
+        else:  # normal
+            vals = rng.normal(peak, max(1.0, (hi - lo) / 6.0), size=m)
+        return np.clip(np.rint(vals), lo, hi).astype(np.int32)
+
+    # uniform (default / unrecognized) — identical RNG draw to the legacy path
+    return rng.integers(lo, hi + 1, size=m, dtype=np.int32)
+
+
 def build_sales_returns_from_detail(
     detail: pa.Table,
     *,
@@ -335,18 +378,14 @@ def build_sales_returns_from_detail(
     # --- Compute dates ---
     lo = max(0, int(min_lag))
     hi = max(lo, int(max_lag))
-    if hi <= 0:
-        base_lag = np.full(total_events, lo, dtype=np.int32)
-    else:
-        # RETURNS-1: one base lag per PARENT LINE, broadcast to its events — not an
-        # independent draw per event. Sharing the base means the cumulative split
-        # gaps below make ReturnDate non-decreasing by ReturnSequence; a fresh base
-        # per event could let a later event land earlier than an earlier one. In the
-        # no-split case (num_events all 1, total_events == m) this draws the same m
-        # values as before, so default-config output is unchanged.
-        base_lag = np.repeat(
-            rng.integers(lo, hi + 1, size=m, dtype=np.int32), num_events
-        )
+    # RETURNS-1: one base lag per PARENT LINE, broadcast to its events — not an
+    # independent draw per event. Sharing the base means the cumulative split
+    # gaps below make ReturnDate non-decreasing by ReturnSequence; a fresh base
+    # per event could let a later event land earlier than an earlier one. The lag
+    # shape (uniform/triangular/normal) + peak come from models.yaml ->
+    # returns.lag_days.{distribution,mode}.
+    per_line_lag = _draw_base_lag(rng, m, lo, hi, cfg.lag_distribution, cfg.lag_mode)
+    base_lag = np.repeat(per_line_lag, num_events)
 
     # For split events (seq > 1), add cumulative incremental gaps
     # Each subsequent event adds an independent gap, accumulated via cumsum

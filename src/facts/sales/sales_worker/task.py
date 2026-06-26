@@ -12,7 +12,6 @@ from ..sales_logic import State, build_chunk_table
 from ..sales_logic.columns import (
     SALES_CHANNEL_CORE_KEYS,
     _load_sales_channels,
-    _sample_hour_weighted_minute,
     _sample_timekey_by_channel,
 )
 from ..output_paths import TABLE_SALES, TABLE_SALES_ORDER_DETAIL, TABLE_SALES_ORDER_HEADER
@@ -261,6 +260,8 @@ def _build_returns_config(chunk_idx: int = 0) -> Optional[ReturnsConfig]:
         max_splits=int(getattr(State, "returns_max_splits", 3)),
         split_min_gap=int(getattr(State, "returns_split_min_gap", 3)),
         split_max_gap=int(getattr(State, "returns_split_max_gap", 20)),
+        lag_distribution=str(getattr(State, "returns_lag_distribution", "uniform") or "uniform"),
+        lag_mode=int(getattr(State, "returns_lag_mode", 7)),
         event_key_offset=chunk_idx * capacity,
         logistics_keys=frozenset(getattr(State, "returns_logistics_keys", ())),
     )
@@ -615,8 +616,6 @@ def _worker_task(args):
         raise RuntimeError(f"State.chunk_size must be > 0, got {cap_orders}")
 
     no_discount_key = State.no_discount_key
-    file_format = State.file_format
-    output_paths = State.output_paths
     skip_order_cols_flag = bool(getattr(State, "skip_order_cols_requested", False))
 
     mode = _mode()

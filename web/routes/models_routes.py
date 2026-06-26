@@ -131,8 +131,7 @@ def get_models_form():
         "brandSeed": int(bp.get("seed", 123) or 123),
         "brandWinnerBoost": float(bp.get("winner_boost", 2.5)),
         "brandWeights": {},  # deprecated: kept for frontend compat
-        # Returns
-        "retEnabled": bool(ret.get("enabled", True)),
+        # Returns (on/off lives in config.yaml -> returns.enabled, not here)
         "retReasons": list(ret.get("reasons", [])),
         "retLagDist": str(lag.get("distribution", "triangular")),
         "retLagMode": int(lag.get("mode", 7)),
@@ -189,8 +188,7 @@ def update_models_form(body: ConfigUpdate):
         if "brandWinnerBoost" in v: m["brand_popularity"]["winner_boost"] = float(v["brandWinnerBoost"])
         # brand_weights deprecated — ignore if sent by frontend
 
-        # Returns
-        if "retEnabled" in v: m["returns"]["enabled"] = bool(v["retEnabled"])
+        # Returns (on/off lives in config.yaml -> returns.enabled, not here)
         if "retLagDist" in v: m["returns"]["lag_days"]["distribution"] = v["retLagDist"]
         if "retLagMode" in v: m["returns"]["lag_days"]["mode"] = int(v["retLagMode"])
         if "retFullLinePct" in v: m["returns"]["quantity"]["full_line_probability"] = float(v["retFullLinePct"])

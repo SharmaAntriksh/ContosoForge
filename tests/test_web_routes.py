@@ -241,7 +241,7 @@ class TestModelsFormGet:
         resp = client.get("/api/models/form")
         data = resp.json()
         expected = ["qtyLambda", "qtyMin", "qtyMax", "inflationRate",
-                     "markdownEnabled", "brandEnabled", "retEnabled"]
+                     "markdownEnabled", "brandEnabled", "retReasons"]
         for k in expected:
             assert k in data, f"Missing key: {k}"
 

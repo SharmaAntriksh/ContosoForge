@@ -12,7 +12,7 @@ converts them back.  Types here reflect the *logical* contract
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Required, Sequence, TypedDict, Union
+from typing import Any, Dict, List, Optional, Required, TypedDict, Union
 
 import numpy as np
 
@@ -118,6 +118,8 @@ class SalesWorkerCfg(TypedDict, total=False):
     returns_max_splits: int
     returns_split_min_gap: int
     returns_split_max_gap: int
+    returns_lag_distribution: str
+    returns_lag_mode: int
     returns_logistics_keys: list
     returns_event_key_capacity: int
 

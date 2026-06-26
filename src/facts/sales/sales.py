@@ -1385,6 +1385,7 @@ def _build_worker_cfg(
     returns_reason_keys, returns_reason_probs,
     returns_full_line_prob, returns_split_rate,
     returns_max_splits, returns_split_min_gap, returns_split_max_gap,
+    returns_lag_distribution, returns_lag_mode,
     returns_logistics_keys, returns_event_key_capacity,
     month_stride=0, per_chunk_alloc=0, order_id_int64=False,
 ):
@@ -1467,6 +1468,8 @@ def _build_worker_cfg(
         returns_max_splits=int(returns_max_splits),
         returns_split_min_gap=int(returns_split_min_gap),
         returns_split_max_gap=int(returns_split_max_gap),
+        returns_lag_distribution=str(returns_lag_distribution),
+        returns_lag_mode=int(returns_lag_mode),
         returns_logistics_keys=returns_logistics_keys,
         returns_event_key_capacity=int(returns_event_key_capacity),
 
@@ -2110,6 +2113,8 @@ def generate_sales_fact(
     returns_max_splits = _int_or(getattr(_ret_qty_cfg, "max_splits", 3), 3)
     returns_split_min_gap = _int_or(getattr(_ret_lag_cfg, "split_min_gap", 3), 3)
     returns_split_max_gap = _int_or(getattr(_ret_lag_cfg, "split_max_gap", 20), 20)
+    returns_lag_distribution = _str_or(getattr(_ret_lag_cfg, "distribution", "triangular"), "triangular")
+    returns_lag_mode = _int_or(getattr(_ret_lag_cfg, "mode", 7), 7)
 
     # Merge models.yaml weight overrides with defaults.py canonical reasons
     from src.defaults import (
@@ -2413,6 +2418,7 @@ def generate_sales_fact(
         returns_reason_keys, returns_reason_probs,
         returns_full_line_prob, returns_split_rate,
         returns_max_splits, returns_split_min_gap, returns_split_max_gap,
+        returns_lag_distribution, returns_lag_mode,
         returns_logistics_keys, returns_event_key_capacity,
         month_stride=_day_stride, per_chunk_alloc=_per_chunk_alloc,
         order_id_int64=_order_id_int64,

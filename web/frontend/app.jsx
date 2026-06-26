@@ -872,14 +872,13 @@ function App() {
 
             {/* ── Returns ── */}
             <Section num="R" title="Returns" defaultOpen={false}>
-              <Check checked={mf.retEnabled} onChange={v => sm("retEnabled", v)} label="Enable return modeling" />
-              {mf.retEnabled && <>
-                <R3>
-                  <F label="Lag distribution"><Sel value={mf.retLagDist} onChange={v => sm("retLagDist", v)} options={["triangular", "uniform", "normal"]} /></F>
-                  <F label="Lag mode (days)" help="Peak of the triangular distribution."><N value={mf.retLagMode} onChange={v => sm("retLagMode", v)} min={1} max={90} step={1} /></F>
-                  <F label="Full-line return %"><N value={mf.retFullLinePct} onChange={v => sm("retFullLinePct", v)} min={0} max={1} step={.01} /></F>
-                </R3>
-                {mf.retReasons && mf.retReasons.length > 0 && <Box title="Return reasons">
+              <div style={{fontSize: 10.5, color: "var(--muted)", marginBottom: 8}}>Returns on/off is set in config (Returns → Enabled). This section only shapes returns when they're enabled there.</div>
+              <R3>
+                <F label="Lag distribution"><Sel value={mf.retLagDist} onChange={v => sm("retLagDist", v)} options={["triangular", "uniform", "normal"]} /></F>
+                <F label="Lag mode (days)" help="Peak of the triangular distribution."><N value={mf.retLagMode} onChange={v => sm("retLagMode", v)} min={1} max={90} step={1} /></F>
+                <F label="Full-line return %"><N value={mf.retFullLinePct} onChange={v => sm("retFullLinePct", v)} min={0} max={1} step={.01} /></F>
+              </R3>
+              {mf.retReasons && mf.retReasons.length > 0 && <Box title="Return reasons">
                   <div style={{display: "grid", gridTemplateColumns: "30px 1fr 1fr 50px", gap: "4px 10px", alignItems: "center", fontSize: 12}}>
                     <span style={{fontWeight: 600, color: "var(--muted)", fontSize: 10}}>KEY</span>
                     <span style={{fontWeight: 600, color: "var(--muted)", fontSize: 10}}>REASON</span>
@@ -896,7 +895,6 @@ function App() {
                   </div>
                   <div style={{fontSize: 10.5, color: "var(--muted)", marginTop: 6}}>Edit reasons in the YAML tab.</div>
                 </Box>}
-              </>}
             </Section>
             </div>
           ) : (<div style={{padding: 40, textAlign: "center", color: "var(--muted)"}}>Loading models...</div>)}
