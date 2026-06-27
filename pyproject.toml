@@ -1,6 +1,6 @@
 [project]
 name = "synthetic-data-generator"
-version = "0.6.1"
+version = "1.10.0"
 description = "Analytics-ready retail data generator (star-schema) for BI, analytics, and data engineering"
 readme = "README.md"
 requires-python = ">=3.13"
