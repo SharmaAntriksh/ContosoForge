@@ -156,7 +156,7 @@ def build_orders(
     # ------------------------------------------------------------
     if order_id_start is None:
         raise RuntimeError(
-            "order_id_start is required to guarantee unique SalesOrderNumber "
+            "order_id_start is required to guarantee unique OrderNumber "
             "(caller must assign a disjoint range per chunk)."
         )
 

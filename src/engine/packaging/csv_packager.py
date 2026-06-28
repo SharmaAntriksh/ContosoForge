@@ -82,9 +82,9 @@ def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str]) -> Non
     # Concise summary log
     short = {
         "sales": "sales",
-        "sales_order_detail": "detail",
-        "sales_order_header": "header",
-        "sales_return": "return",
+        "order_detail": "detail",
+        "order_header": "header",
+        "returns": "return",
     }
     counts = [(short.get(table_dir_name(t), table_dir_name(t)), len(files)) for (t, _src, files, _dst) in plan]
     total = sum(n for _name, n in counts)

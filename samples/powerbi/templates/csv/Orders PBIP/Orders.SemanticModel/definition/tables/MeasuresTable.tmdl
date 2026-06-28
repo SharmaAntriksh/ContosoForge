@@ -4,8 +4,8 @@ table MeasuresTable
 	measure '# Customers' = ```
 			
 			CALCULATE ( 
-			    DISTINCTCOUNT ( SalesOrderHeader[CustomerKey] ),
-			    SalesOrderDetail
+			    DISTINCTCOUNT ( OrderHeader[CustomerKey] ),
+			    OrderDetail
 			)
 			```
 		formatString: #,0
@@ -17,8 +17,8 @@ table MeasuresTable
 	measure 'Cost Amount' = ```
 			
 			SUMX ( 
-			    SalesOrderDetail, 
-			    SalesOrderDetail[Quantity] * SalesOrderDetail[UnitCost]
+			    OrderDetail, 
+			    OrderDetail[Quantity] * OrderDetail[UnitCost]
 			)
 			```
 		formatString: #,0
@@ -43,8 +43,8 @@ table MeasuresTable
 	measure 'Sales Amount' = ```
 			
 			SUMX ( 
-			    SalesOrderDetail, 
-			    SalesOrderDetail[Quantity] * SalesOrderDetail[NetPrice]
+			    OrderDetail, 
+			    OrderDetail[Quantity] * OrderDetail[NetPrice]
 			)
 			```
 		formatString: #,0
@@ -58,8 +58,8 @@ table MeasuresTable
 	measure 'Sales Amount (SOD)' = ```
 			
 			SUMX ( 
-			    SalesOrderDetail, 
-			    SalesOrderDetail[Quantity] * SalesOrderDetail[NetPrice]
+			    OrderDetail, 
+			    OrderDetail[Quantity] * OrderDetail[NetPrice]
 			)
 			```
 		formatString: #,0
@@ -72,7 +72,7 @@ table MeasuresTable
 
 	measure Transactions =
 			
-			COUNTROWS ( SalesOrderDetail )
+			COUNTROWS ( OrderDetail )
 		formatString: #,0
 		displayFolder: 01 - Base Measures
 		lineageTag: f941d2a9-2c52-4441-ba75-afa6c2f91413
@@ -96,8 +96,8 @@ table MeasuresTable
 			                CALCULATE ( MAX ( EmployeeStoreAssignment[EndDate] ) )
 			            )
 			        ),
-			        SalesOrderHeader[StoreKey],
-			        SalesOrderHeader[EmployeeKey],
+			        OrderHeader[StoreKey],
+			        OrderHeader[EmployeeKey],
 			        Dates[Date]
 			    )
 			)

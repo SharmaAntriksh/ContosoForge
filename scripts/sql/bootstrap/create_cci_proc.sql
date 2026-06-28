@@ -74,11 +74,11 @@ BEGIN
         PRINT N'';
         PRINT N'  -- 2. Create CCI on specific tables (schema-qualified ok)';
         PRINT N'  EXEC [admin].[ManageColumnstoreIndexes]';
-        PRINT N'      @Tables = N''Sales, dbo.SalesReturn, Complaints'';';
+        PRINT N'      @Tables = N''Sales, dbo.Returns, Complaints'';';
         PRINT N'';
         PRINT N'  -- 3. Drop CCI from specific tables';
         PRINT N'  EXEC [admin].[ManageColumnstoreIndexes]';
-        PRINT N'      @Action = ''DROP'', @Tables = N''Sales, SalesReturn'';';
+        PRINT N'      @Action = ''DROP'', @Tables = N''Sales, Returns'';';
         PRINT N'';
         PRINT N'  -- 4. Drop ALL CCIs';
         PRINT N'  EXEC [admin].[ManageColumnstoreIndexes] @Action = ''DROP'';';

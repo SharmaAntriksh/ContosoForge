@@ -44,21 +44,21 @@ table Budget
 
 		annotation PBI_FormatHint = {"isGeneralNumber":true}
 
-	column BudgetSalesAmount
+	column BudgetAmount
 		dataType: double
 		lineageTag: 07f5b7da-79b2-4390-815c-42dd3eb155d2
 		summarizeBy: sum
-		sourceColumn: BudgetSalesAmount
+		sourceColumn: BudgetAmount
 
 		annotation SummarizationSetBy = Automatic
 
 		annotation PBI_FormatHint = {"isGeneralNumber":true}
 
-	column BudgetSalesQuantity
+	column BudgetQuantity
 		dataType: double
 		lineageTag: 69407b83-a0cc-41f3-9592-059291a57de3
 		summarizeBy: sum
-		sourceColumn: BudgetSalesQuantity
+		sourceColumn: BudgetQuantity
 
 		annotation SummarizationSetBy = Automatic
 
@@ -78,7 +78,7 @@ table Budget
 		source =
 				let
 				    Source = FxReadCSVFile ( "facts\budget_yearly\", "budget_yearly" ),
-				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Country", type text}, {"Category", type text}, {"BudgetYear", Int64.Type}, {"Scenario", type text}, {"BudgetGrowthPct", type number}, {"BudgetSalesAmount", type number}, {"BudgetSalesQuantity", type number}, {"BudgetMethod", type text}})
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Country", type text}, {"Category", type text}, {"BudgetYear", Int64.Type}, {"Scenario", type text}, {"BudgetGrowthPct", type number}, {"BudgetAmount", type number}, {"BudgetQuantity", type number}, {"BudgetMethod", type text}})
 				in
 				    #"Changed Type"
 

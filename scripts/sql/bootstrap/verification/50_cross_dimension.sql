@@ -92,16 +92,16 @@ BEGIN
             CAST(@no_asgn AS VARCHAR) + ' without assignments');
     END
 
-    -- SalesPerson has SalesPersonFlag
+    -- SalesPerson has IsSalesperson
     IF OBJECT_ID(N'dbo.Sales', N'U') IS NOT NULL
        AND OBJECT_ID(N'dbo.Employees', N'U') IS NOT NULL
     BEGIN
         DECLARE @no_flag INT;
         SELECT @no_flag = COUNT(DISTINCT f.EmployeeKey)
         FROM dbo.Sales f JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
-        WHERE e.SalesPersonFlag = 0;
-        INSERT INTO #R VALUES ('Domain', 'SalesPerson has SalesPersonFlag=1',
-            'Employees appearing in Sales should have SalesPersonFlag set',
+        WHERE e.IsSalesperson = 0;
+        INSERT INTO #R VALUES ('Domain', 'SalesPerson has IsSalesperson=1',
+            'Employees appearing in Sales should have IsSalesperson set',
             CASE WHEN @no_flag = 0 THEN 'PASS' ELSE 'FAIL' END,
             CAST(@no_flag AS VARCHAR) + ' without flag');
     END

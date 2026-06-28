@@ -4,7 +4,7 @@ createOrReplace
 
 		measure '# Customers' =
 				
-				DISTINCTCOUNT ( SalesOrderHeader[CustomerKey] )
+				DISTINCTCOUNT ( OrderHeader[CustomerKey] )
 			formatString: #,0
 			displayFolder: 01 - Base Measures
 			lineageTag: 6ec8f0ae-723d-46cd-b46d-b9c1cedc3068
@@ -14,8 +14,8 @@ createOrReplace
 		measure 'Cost Amount' = ```
 				
 				SUMX ( 
-				    SalesOrderDetail, 
-				    SalesOrderDetail[Quantity] * SalesOrderDetail[UnitCost]
+				    OrderDetail, 
+				    OrderDetail[Quantity] * OrderDetail[UnitCost]
 				)
 				```
 			formatString: \$#,0.###############;(\$#,0.###############);\$#,0.###############
@@ -43,8 +43,8 @@ createOrReplace
 				                CALCULATE ( MAX ( EmployeeStoreAssignment[EndDate] ) )
 				            )
 				        ),
-				        SalesOrderHeader[StoreKey],
-				        SalesOrderHeader[SalesPersonEmployeeKey],
+				        OrderHeader[StoreKey],
+				        OrderHeader[SalesPersonEmployeeKey],
 				        Dates[Date]
 				    )
 				)
@@ -69,8 +69,8 @@ createOrReplace
 		measure 'Sales Amount' = ```
 				
 				SUMX ( 
-				    SalesOrderDetail, 
-				    SalesOrderDetail[Quantity] * SalesOrderDetail[NetPrice]
+				    OrderDetail, 
+				    OrderDetail[Quantity] * OrderDetail[NetPrice]
 				)
 				```
 			formatString: #,0
@@ -84,8 +84,8 @@ createOrReplace
 		measure 'Sales Amount (SOD)' = ```
 				
 				SUMX ( 
-				    SalesOrderDetail, 
-				    SalesOrderDetail[Quantity] * SalesOrderDetail[NetPrice]
+				    OrderDetail, 
+				    OrderDetail[Quantity] * OrderDetail[NetPrice]
 				)
 				```
 			formatString: #,0
@@ -98,7 +98,7 @@ createOrReplace
 
 		measure Transactions =
 				
-				COUNTROWS ( SalesOrderDetail )
+				COUNTROWS ( OrderDetail )
 			formatString: #,0
 			displayFolder: 01 - Base Measures
 			lineageTag: f941d2a9-2c52-4441-ba75-afa6c2f91413

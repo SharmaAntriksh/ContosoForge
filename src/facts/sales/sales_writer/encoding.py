@@ -8,7 +8,7 @@ from ..output_paths import TABLE_SALES, TABLE_SALES_ORDER_DETAIL
 # Sales policy/constants
 # ===============================================================
 
-DICT_EXCLUDE: frozenset[str] = frozenset({"SalesOrderNumber", "CustomerKey"})
+DICT_EXCLUDE: frozenset[str] = frozenset({"OrderNumber", "CustomerKey"})
 
 REQUIRED_PRICING_COLS: frozenset[str] = frozenset({
     "UnitPrice",

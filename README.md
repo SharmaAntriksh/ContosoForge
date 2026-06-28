@@ -19,9 +19,9 @@ The generator produces a full star-schema data model across dimension and fact t
 | Locations & org | Stores, Employees, EmployeeStoreAssignments, Geography |
 | Time | Dates (calendar + fiscal + weekly fiscal), Time |
 | Currency | Currency, ExchangeRates |
-| Other lookups | SalesChannels, ReturnReason |
+| Other lookups | Channels, ReturnReason |
 
-**Fact tables:** Sales (flat or split into SalesOrderHeader + SalesOrderDetail), SalesReturn, BudgetYearly, BudgetMonthly, InventorySnapshot, CustomerWishlists, Complaints
+**Fact tables:** Sales (flat or split into OrderHeader + OrderDetail), Returns, BudgetYearly, BudgetMonthly, InventorySnapshot, CustomerWishlists, Complaints
 
 ### Output formats
 
@@ -146,7 +146,7 @@ generated_datasets/
       │   └── ... (22 dimension tables total)
       ├── facts/
       │   ├── sales/
-      │   ├── sales_return/                    ← if returns enabled
+      │   ├── returns/                         ← if returns enabled
       │   ├── budget/                          ← if budget enabled
       │   ├── inventory/                       ← if inventory enabled
       │   ├── customer_wishlists/              ← if wishlists enabled

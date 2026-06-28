@@ -228,14 +228,14 @@ def check_employees(employees: pd.DataFrame) -> None:
                  orphans == 0,
                  f"{orphans} broken parent link(s)")
 
-    # --- No managers should have SalesPersonFlag ---
-    if "SalesPersonFlag" in employees.columns:
+    # --- No managers should be flagged as salespeople ---
+    if "IsSalesperson" in employees.columns:
         mgr_mask = (employees["EmployeeKey"].astype(np.int64) >= STORE_MGR_KEY_BASE) & \
                    (employees["EmployeeKey"].astype(np.int64) < STAFF_KEY_BASE)
-        mgr_sp = (mgr_mask & (employees["SalesPersonFlag"].astype(int) == 1)).sum()
+        mgr_sp = (mgr_mask & (employees["IsSalesperson"].astype(int) == 1)).sum()
         _add(cat, "No managers flagged as salespeople",
              mgr_sp == 0,
-             f"{mgr_sp} manager(s) with SalesPersonFlag=1")
+             f"{mgr_sp} manager(s) with IsSalesperson=1")
 
 
 # ============================================================================
@@ -981,13 +981,13 @@ def main() -> int:
     employees = _load(folder, "dimensions", "employees")
     esa = _load(folder, "dimensions", "employee_store_assignments")
 
-    # Sales: try sales.parquet first, then sales_order_header.parquet
+    # Sales: try sales.parquet first, then order_header.parquet
     # (sales_output can be "sales", "sales_order", or "both")
     sales = _load(folder, "facts", "sales")
     sales_table = "sales"
     if sales is None:
-        sales = _load(folder, "facts", "sales_order_header")
-        sales_table = "sales_order_header"
+        sales = _load(folder, "facts", "order_header")
+        sales_table = "order_header"
 
     if stores is None or employees is None or esa is None or sales is None:
         print("\nCannot proceed: required files missing.")

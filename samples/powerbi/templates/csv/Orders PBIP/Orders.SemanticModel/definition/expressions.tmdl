@@ -48,7 +48,7 @@ expression Parameter_SOD = Sample_File_SOD meta [IsParameterQuery=true, BinaryId
 
 expression Sample_File_SOH =
 		let
-		    Source = Folder.Files ( ContosoFolder & "\facts\sales_order_header" ),
+		    Source = Folder.Files ( ContosoFolder & "\facts\order_header" ),
 		    Navigation1 = Source{0}[Content]
 		in
 		    Navigation1
@@ -97,7 +97,7 @@ expression Transform_SOH_File =
 
 expression Sample_File_SOD =
 		let
-		    Source = Folder.Files ( ContosoFolder & "\facts\sales_order_detail" ),
+		    Source = Folder.Files ( ContosoFolder & "\facts\order_detail" ),
 		    Navigation1 = Source{0}[Content]
 		in
 		    Navigation1
@@ -143,7 +143,7 @@ expression Transform_SOD_File =
 
 	annotation PBI_ResultType = Function
 
-expression Parameter_SalesReturns = Sample_File_SalesReturns meta [IsParameterQuery=true, BinaryIdentifier=Sample_File_SalesReturns, Type="Binary", IsParameterQueryRequired=true]
+expression Parameter_Returns = Sample_File_Returns meta [IsParameterQuery=true, BinaryIdentifier=Sample_File_Returns, Type="Binary", IsParameterQueryRequired=true]
 	lineageTag: eaab4cf4-629c-4180-9f22-150004175dd3
 	queryGroup: 'Sales Returns Transformations\Helper Queries'
 
@@ -151,9 +151,9 @@ expression Parameter_SalesReturns = Sample_File_SalesReturns meta [IsParameterQu
 
 	annotation PBI_ResultType = Binary
 
-expression Sample_File_SalesReturns =
+expression Sample_File_Returns =
 		let
-		    Source = Folder.Files ( ContosoFolder & "\facts\sales_return" ),
+		    Source = Folder.Files ( ContosoFolder & "\facts\returns" ),
 		    Navigation1 = Source{0}[Content]
 		in
 		    Navigation1
@@ -164,12 +164,12 @@ expression Sample_File_SalesReturns =
 
 	annotation PBI_ResultType = Binary
 
-expression Transform_SalesReturns_File =
+expression Transform_Returns_File =
 		let
-		    Source = ( Parameter_SalesReturns as binary ) =>
+		    Source = ( Parameter_Returns as binary ) =>
 		        let
 		            Source = Csv.Document (
-		                Parameter_SalesReturns,
+		                Parameter_Returns,
 		                [ Delimiter = ",", Encoding = 1252, QuoteStyle = QuoteStyle.None ]
 		            ),
 		            PromotedHeaders = Table.PromoteHeaders ( Source, [ PromoteAllScalars = true ] )
@@ -184,10 +184,10 @@ expression Transform_SalesReturns_File =
 
 	annotation PBI_ResultType = Function
 
-expression Transform_Sample_SalesReturns =
+expression Transform_Sample_Returns =
 		let
 		    Source = Csv.Document (
-		        Parameter_SalesReturns,
+		        Parameter_Returns,
 		        [ Delimiter = ",", Encoding = 1252, QuoteStyle = QuoteStyle.None ]
 		    ),
 		    PromotedHeaders = Table.PromoteHeaders ( Source, [ PromoteAllScalars = true ] )

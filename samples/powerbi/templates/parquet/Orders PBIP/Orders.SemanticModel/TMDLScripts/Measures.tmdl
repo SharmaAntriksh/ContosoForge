@@ -5,8 +5,8 @@ createOrReplace
 		measure '# Customers' = ```
 				
 				CALCULATE ( 
-				    DISTINCTCOUNT ( SalesOrderHeader[CustomerKey] ),
-				    CROSSFILTER ( SalesOrderDetail[SalesOrderNumber], SalesOrderHeader[SalesOrderNumber], Both )
+				    DISTINCTCOUNT ( OrderHeader[CustomerKey] ),
+				    CROSSFILTER ( OrderDetail[OrderNumber], OrderHeader[OrderNumber], Both )
 				)
 				```
 			formatString: 0
@@ -16,8 +16,8 @@ createOrReplace
 		measure 'Cost Amount' = ```
 				
 				SUMX ( 
-				    SalesOrderDetail, 
-				    SalesOrderDetail[Quantity] * SalesOrderDetail[UnitCost]
+				    OrderDetail, 
+				    OrderDetail[Quantity] * OrderDetail[UnitCost]
 				)
 				```
 			formatString: #,0
@@ -38,8 +38,8 @@ createOrReplace
 		measure 'Sales Amount' = ```
 				
 				SUMX ( 
-				    SalesOrderDetail, 
-				    SalesOrderDetail[Quantity] * SalesOrderDetail[NetPrice]
+				    OrderDetail, 
+				    OrderDetail[Quantity] * OrderDetail[NetPrice]
 				)
 				```
 			formatString: #,0
@@ -50,7 +50,7 @@ createOrReplace
 
 		measure Transactions =
 				
-				COUNTROWS ( SalesOrderDetail )
+				COUNTROWS ( OrderDetail )
 			formatString: #,0
 			displayFolder: 01 - Base Measures
 			lineageTag: f941d2a9-2c52-4441-ba75-afa6c2f91413

@@ -1,12 +1,12 @@
-table SalesOrderHeader
+table OrderHeader
 	lineageTag: 5eef46cf-46bc-42a2-bd57-f3576ed2f418
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: ea91cc9f-88ab-4172-874a-c1783cc1e60d
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		annotation SummarizationSetBy = Automatic
 
@@ -55,12 +55,12 @@ table SalesOrderHeader
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelKey
+	column ChannelKey
 		dataType: int64
 		formatString: 0
 		lineageTag: d60cf49d-18df-487e-902d-82e1fa06b828
 		summarizeBy: count
-		sourceColumn: SalesChannelKey
+		sourceColumn: ChannelKey
 
 		annotation SummarizationSetBy = Automatic
 
@@ -95,12 +95,12 @@ table SalesOrderHeader
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesOrderHeader = m
+	partition OrderHeader = m
 		mode: import
 		queryGroup: Fact\Sales
 		source =
 				let
-				    Source = FxReadParquetFile ( "facts\sales_order_header" )
+				    Source = FxReadParquetFile ( "facts\order_header" )
 				in
 				    Source
 

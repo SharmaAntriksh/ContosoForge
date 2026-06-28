@@ -1,4 +1,4 @@
-"""CHUNK-1 regression tests: day-based SalesOrderNumber uniqueness.
+"""CHUNK-1 regression tests: day-based OrderNumber uniqueness.
 
 The day-based ID scheme assigns each order
 ``id = day_offset * day_stride + chunk_idx * per_chunk_alloc + cursor + 1``
@@ -77,7 +77,7 @@ class TestCrossChunkUniqueness:
             all_ids.append(ids)
 
         merged = np.concatenate(all_ids)
-        assert len(np.unique(merged)) == merged.shape[0], "duplicate SalesOrderNumber"
+        assert len(np.unique(merged)) == merged.shape[0], "duplicate OrderNumber"
 
     def test_naive_cursor_collides_when_clamp_reorders(self):
         # A concrete reordering where the old cursor over-counts and the fixed

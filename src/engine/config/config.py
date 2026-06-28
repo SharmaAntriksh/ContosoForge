@@ -950,7 +950,7 @@ def apply_cross_section_rules(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     Rules applied:
     1. Returns are silently disabled when ``skip_order_cols=true`` with
-       ``sales_output='sales'`` because returns need ``SalesOrderNumber``.
+       ``sales_output='sales'`` because returns need ``OrderNumber``.
     2. Exchange-rate date range is always overridden to match
        ``defaults.dates`` (FX dates cannot be set independently).
     3. Physical store staffing is floored so every store keeps at least one

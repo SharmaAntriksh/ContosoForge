@@ -18847,7 +18847,7 @@ cultureInfo en-US
 			      "Definition": {
 			        "Binding": {
 			          "ConceptualEntity": "Employee",
-			          "ConceptualProperty": "SalesPersonFlag"
+			          "ConceptualProperty": "IsSalesperson"
 			        }
 			      },
 			      "State": "Generated",
@@ -18865,7 +18865,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesPersonFlag": {
+			          "IsSalesperson": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -20999,7 +20999,7 @@ cultureInfo en-US
 			    "sales_channel": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel"
+			          "ConceptualEntity": "Channel"
 			        }
 			      },
 			      "State": "Generated",
@@ -21017,7 +21017,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesChannel": {
+			          "Channel": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -21118,8 +21118,8 @@ cultureInfo en-US
 			    "sales_channel.sales_channel_key": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
-			          "ConceptualProperty": "SalesChannelKey"
+			          "ConceptualEntity": "Channel",
+			          "ConceptualProperty": "ChannelKey"
 			        }
 			      },
 			      "State": "Generated",
@@ -21137,7 +21137,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesChannelKey": {
+			          "ChannelKey": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -21250,8 +21250,8 @@ cultureInfo en-US
 			    "sales_channel.sales_channel": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
-			          "ConceptualProperty": "SalesChannel"
+			          "ConceptualEntity": "Channel",
+			          "ConceptualProperty": "Channel"
 			        }
 			      },
 			      "State": "Generated",
@@ -21281,7 +21281,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesChannel": {
+			          "Channel": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -21383,8 +21383,8 @@ cultureInfo en-US
 			    "sales_channel.sales_channel_description": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
-			          "ConceptualProperty": "SalesChannelDescription"
+			          "ConceptualEntity": "Channel",
+			          "ConceptualProperty": "ChannelDescription"
 			        }
 			      },
 			      "State": "Generated",
@@ -21402,7 +21402,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesChannelDescription": {
+			          "ChannelDescription": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -21525,7 +21525,7 @@ cultureInfo en-US
 			    "sales_channel.channel_group": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "ChannelGroup"
 			        }
 			      },
@@ -21608,7 +21608,7 @@ cultureInfo en-US
 			    "sales_channel.channel_group_description": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "ChannelGroupDescription"
 			        }
 			      },
@@ -21743,8 +21743,8 @@ cultureInfo en-US
 			    "sales_channel.sales_channel_code": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
-			          "ConceptualProperty": "SalesChannelCode"
+			          "ConceptualEntity": "Channel",
+			          "ConceptualProperty": "ChannelCode"
 			        }
 			      },
 			      "State": "Generated",
@@ -21768,7 +21768,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesChannelCode": {
+			          "ChannelCode": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -21816,7 +21816,7 @@ cultureInfo en-US
 			    "sales_channel.sort_order": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "SortOrder"
 			        }
 			      },
@@ -21945,7 +21945,7 @@ cultureInfo en-US
 			    "sales_channel.is_digital": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "IsDigital"
 			        }
 			      },
@@ -22004,7 +22004,7 @@ cultureInfo en-US
 			    "sales_channel.is_physical": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "IsPhysical"
 			        }
 			      },
@@ -22103,7 +22103,7 @@ cultureInfo en-US
 			    "sales_channel.is_third_party": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "IsThirdParty"
 			        }
 			      },
@@ -22238,7 +22238,7 @@ cultureInfo en-US
 			    "sales_channel.is_B2B": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "IsB2B"
 			        }
 			      },
@@ -22267,7 +22267,7 @@ cultureInfo en-US
 			    "sales_channel.is_assisted": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "IsAssisted"
 			        }
 			      },
@@ -22290,7 +22290,7 @@ cultureInfo en-US
 			    "sales_channel.is_owned_channel": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "IsOwnedChannel"
 			        }
 			      },
@@ -22413,7 +22413,7 @@ cultureInfo en-US
 			    "sales_channel.is_2_4x_7": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "Is24x7"
 			        }
 			      },
@@ -22436,7 +22436,7 @@ cultureInfo en-US
 			    "sales_channel.open_time": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "OpenTime"
 			        }
 			      },
@@ -22509,7 +22509,7 @@ cultureInfo en-US
 			    "sales_channel.close_time": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "CloseTime"
 			        }
 			      },
@@ -22582,7 +22582,7 @@ cultureInfo en-US
 			    "sales_channel.commission_rate": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "CommissionRate"
 			        }
 			      },
@@ -22705,7 +22705,7 @@ cultureInfo en-US
 			    "sales_channel.typical_fulfillment_day": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesChannel",
+			          "ConceptualEntity": "Channel",
 			          "ConceptualProperty": "TypicalFulfillmentDays"
 			        }
 			      },
@@ -29430,7 +29430,7 @@ cultureInfo en-US
 			      "Definition": {
 			        "Binding": {
 			          "ConceptualEntity": "Sales",
-			          "ConceptualProperty": "SalesOrderNumber"
+			          "ConceptualProperty": "OrderNumber"
 			        }
 			      },
 			      "State": "Generated",
@@ -29448,7 +29448,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesOrderNumber": {
+			          "OrderNumber": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -29486,7 +29486,7 @@ cultureInfo en-US
 			      "Definition": {
 			        "Binding": {
 			          "ConceptualEntity": "Sales",
-			          "ConceptualProperty": "SalesOrderLineNumber"
+			          "ConceptualProperty": "OrderLineNumber"
 			        }
 			      },
 			      "State": "Generated",
@@ -29504,7 +29504,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesOrderLineNumber": {
+			          "OrderLineNumber": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -30334,7 +30334,7 @@ cultureInfo en-US
 			      "Definition": {
 			        "Binding": {
 			          "ConceptualEntity": "Sales",
-			          "ConceptualProperty": "SalesChannelKey"
+			          "ConceptualProperty": "ChannelKey"
 			        }
 			      },
 			      "State": "Generated",
@@ -30355,7 +30355,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesChannelKey": {
+			          "ChannelKey": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -31529,10 +31529,10 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return": {
+			    "returns": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn"
+			          "ConceptualEntity": "Returns"
 			        }
 			      },
 			      "State": "Generated",
@@ -31550,7 +31550,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesReturn": {
+			          "Returns": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -31654,11 +31654,11 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return.sales_order_number": {
+			    "returns.sales_order_number": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn",
-			          "ConceptualProperty": "SalesOrderNumber"
+			          "ConceptualEntity": "Returns",
+			          "ConceptualProperty": "OrderNumber"
 			        }
 			      },
 			      "State": "Generated",
@@ -31676,7 +31676,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesOrderNumber": {
+			          "OrderNumber": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -31710,11 +31710,11 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return.sales_order_line_number": {
+			    "returns.sales_order_line_number": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn",
-			          "ConceptualProperty": "SalesOrderLineNumber"
+			          "ConceptualEntity": "Returns",
+			          "ConceptualProperty": "OrderLineNumber"
 			        }
 			      },
 			      "State": "Generated",
@@ -31732,7 +31732,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesOrderLineNumber": {
+			          "OrderLineNumber": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -31766,10 +31766,10 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return.return_date": {
+			    "returns.return_date": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn",
+			          "ConceptualEntity": "Returns",
 			          "ConceptualProperty": "ReturnDate"
 			        }
 			      },
@@ -31816,10 +31816,10 @@ cultureInfo en-US
 			      ],
 			      "SemanticType": "Time"
 			    },
-			    "sales_return.return_reason_key": {
+			    "returns.return_reason_key": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn",
+			          "ConceptualEntity": "Returns",
 			          "ConceptualProperty": "ReturnReasonKey"
 			        }
 			      },
@@ -31954,10 +31954,10 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return.return_quantity": {
+			    "returns.return_quantity": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn",
+			          "ConceptualEntity": "Returns",
 			          "ConceptualProperty": "ReturnQuantity"
 			        }
 			      },
@@ -32057,10 +32057,10 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return.return_net_price": {
+			    "returns.return_net_price": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn",
+			          "ConceptualEntity": "Returns",
 			          "ConceptualProperty": "ReturnNetPrice"
 			        }
 			      },
@@ -32186,10 +32186,10 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return.return_sequence": {
+			    "returns.return_sequence": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn",
+			          "ConceptualEntity": "Returns",
 			          "ConceptualProperty": "ReturnSequence"
 			        }
 			      },
@@ -32315,10 +32315,10 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return.return_event_key": {
+			    "returns.return_event_key": {
 			      "Definition": {
 			        "Binding": {
-			          "ConceptualEntity": "SalesReturn",
+			          "ConceptualEntity": "Returns",
 			          "ConceptualProperty": "ReturnEventKey"
 			        }
 			      },
@@ -32773,7 +32773,7 @@ cultureInfo en-US
 			      "Definition": {
 			        "Binding": {
 			          "ConceptualEntity": "Budget",
-			          "ConceptualProperty": "BudgetSalesAmount"
+			          "ConceptualProperty": "BudgetAmount"
 			        }
 			      },
 			      "State": "Generated",
@@ -32791,7 +32791,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "BudgetSalesAmount": {
+			          "BudgetAmount": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -32908,7 +32908,7 @@ cultureInfo en-US
 			      "Definition": {
 			        "Binding": {
 			          "ConceptualEntity": "Budget",
-			          "ConceptualProperty": "BudgetSalesQuantity"
+			          "ConceptualProperty": "BudgetQuantity"
 			        }
 			      },
 			      "State": "Generated",
@@ -32926,7 +32926,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "BudgetSalesQuantity": {
+			          "BudgetQuantity": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -36245,7 +36245,7 @@ cultureInfo en-US
 			      "Definition": {
 			        "Binding": {
 			          "ConceptualEntity": "Complaints",
-			          "ConceptualProperty": "SalesOrderNumber"
+			          "ConceptualProperty": "OrderNumber"
 			        }
 			      },
 			      "State": "Generated",
@@ -36263,7 +36263,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "SalesOrderNumber": {
+			          "OrderNumber": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -50505,7 +50505,7 @@ cultureInfo en-US
 			    },
 			    "sales_channel_is_named_sales_channel": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -50532,7 +50532,7 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_are_names_IDs_of_sales_channels"
+			          "ID": "channels_are_names_IDs_of_channels"
 			        },
 			        {
 			          "Attribute": {
@@ -50545,13 +50545,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_sales_channels"
+			          "ID": "channels_have_channels"
 			        }
 			      ]
 			    },
 			    "sales_channel_is_named_sales_channel_code": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -50578,7 +50578,7 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channel_codes_are_names_IDs_of_sales_channels"
+			          "ID": "sales_channel_codes_are_names_IDs_of_channels"
 			        },
 			        {
 			          "Attribute": {
@@ -50591,7 +50591,7 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_sales_channel_codes"
+			          "ID": "channels_have_sales_channel_codes"
 			        }
 			      ]
 			    },
@@ -51368,7 +51368,7 @@ cultureInfo en-US
 			    },
 			    "sales_channel_is_digital": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -51412,13 +51412,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "some_sales_channels_are_digital_sales_channels"
+			          "ID": "some_channels_are_digital_channels"
 			        }
 			      ]
 			    },
 			    "sales_channel_is_physical": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -51462,13 +51462,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "some_sales_channels_are_physical_sales_channels"
+			          "ID": "some_channels_are_physical_channels"
 			        }
 			      ]
 			    },
 			    "sales_channel_is_assisted": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -51512,7 +51512,7 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "some_sales_channels_are_assisted_sales_channels"
+			          "ID": "some_channels_are_assisted_channels"
 			        }
 			      ]
 			    },
@@ -51996,20 +51996,20 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return_is_expensive": {
+			    "returns_is_expensive": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
-			        "sales_return.return_net_price": {
+			        "returns.return_net_price": {
 			          "Target": {
-			            "Entity": "sales_return.return_net_price"
+			            "Entity": "returns.return_net_price"
 			          }
 			        }
 			      },
@@ -52017,7 +52017,7 @@ cultureInfo en-US
 			        {
 			          "Adjective": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Adjectives": [
 			              {
@@ -52034,25 +52034,25 @@ cultureInfo en-US
 			              }
 			            ],
 			            "Measurement": {
-			              "Role": "sales_return.return_net_price"
+			              "Role": "returns.return_net_price"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "return_net_price_indicates_how_expensive_sales_returns_are"
+			          "ID": "return_net_price_indicates_how_expensive_returnss_are"
 			        },
 			        {
 			          "Attribute": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Object": {
-			              "Role": "sales_return.return_net_price"
+			              "Role": "returns.return_net_price"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_returns_have_return_net_prices"
+			          "ID": "returnss_have_return_net_prices"
 			        }
 			      ]
 			    },
@@ -52593,26 +52593,26 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return_is_returned_on_return_date": {
+			    "returns_is_returned_on_return_date": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
-			        "sales_return.return_date": {
+			        "returns.return_date": {
 			          "Target": {
-			            "Entity": "sales_return.return_date"
+			            "Entity": "returns.return_date"
 			          }
 			        }
 			      },
 			      "SemanticSlots": {
 			        "When": {
-			          "Role": "sales_return.return_date"
+			          "Role": "returns.return_date"
 			        }
 			      },
 			      "Phrasings": [
@@ -52626,12 +52626,12 @@ cultureInfo en-US
 			              }
 			            ],
 			            "Object": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.9,
-			          "ID": "sales_returns_are_returned_on_return_dates"
+			          "ID": "returnss_are_returned_on_return_dates"
 			        }
 			      ]
 			    },
@@ -60339,7 +60339,7 @@ cultureInfo en-US
 			    },
 			    "sales_channel_has_sales_channel_key": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60366,13 +60366,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_sales_channel_keys"
+			          "ID": "channels_have_sales_channel_keys"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_sales_channel_description": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60399,13 +60399,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_sales_channel_descriptions"
+			          "ID": "channels_have_sales_channel_descriptions"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_channel_group": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60432,13 +60432,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_channel_groups"
+			          "ID": "channels_have_channel_groups"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_channel_group_description": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60465,13 +60465,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_channel_group_descriptions"
+			          "ID": "channels_have_channel_group_descriptions"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_sort_order": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60498,13 +60498,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_sort_orders"
+			          "ID": "channels_have_sort_orders"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_is_digital": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60531,13 +60531,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_is_digitals"
+			          "ID": "channels_have_is_digitals"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_is_physical": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60564,13 +60564,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_is_physicals"
+			          "ID": "channels_have_is_physicals"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_is_third_party": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60597,13 +60597,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_is_third_parties"
+			          "ID": "channels_have_is_third_parties"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_is_B2B": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60630,13 +60630,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_is_B2Bs"
+			          "ID": "channels_have_is_B2Bs"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_is_assisted": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60663,13 +60663,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_is_assisted"
+			          "ID": "channels_have_is_assisted"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_is_owned_channel": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60696,13 +60696,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_is_owned_channels"
+			          "ID": "channels_have_is_owned_channels"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_is_2_4x_7": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60729,13 +60729,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_is_2_4x_7"
+			          "ID": "channels_have_is_2_4x_7"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_open_time": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60762,13 +60762,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_open_times"
+			          "ID": "channels_have_open_times"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_close_time": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60795,13 +60795,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_close_times"
+			          "ID": "channels_have_close_times"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_commission_rate": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60828,13 +60828,13 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_commission_rates"
+			          "ID": "channels_have_commission_rates"
 			        }
 			      ]
 			    },
 			    "sales_channel_has_typical_fulfillment_day": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesChannel"
+			        "ConceptualEntity": "Channel"
 			      },
 			      "State": "Generated",
 			      "Roles": {
@@ -60861,7 +60861,7 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_typical_fulfillment_days"
+			          "ID": "channels_have_typical_fulfillment_days"
 			        }
 			      ]
 			    },
@@ -62892,20 +62892,20 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return_has_sales_order_number": {
+			    "returns_has_sales_order_number": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
-			        "sales_return.sales_order_number": {
+			        "returns.sales_order_number": {
 			          "Target": {
-			            "Entity": "sales_return.sales_order_number"
+			            "Entity": "returns.sales_order_number"
 			          }
 			        }
 			      },
@@ -62913,32 +62913,32 @@ cultureInfo en-US
 			        {
 			          "Attribute": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Object": {
-			              "Role": "sales_return.sales_order_number"
+			              "Role": "returns.sales_order_number"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_returns_have_sales_order_numbers"
+			          "ID": "returnss_have_sales_order_numbers"
 			        }
 			      ]
 			    },
-			    "sales_return_has_sales_order_line_number": {
+			    "returns_has_sales_order_line_number": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
-			        "sales_return.sales_order_line_number": {
+			        "returns.sales_order_line_number": {
 			          "Target": {
-			            "Entity": "sales_return.sales_order_line_number"
+			            "Entity": "returns.sales_order_line_number"
 			          }
 			        }
 			      },
@@ -62946,32 +62946,32 @@ cultureInfo en-US
 			        {
 			          "Attribute": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Object": {
-			              "Role": "sales_return.sales_order_line_number"
+			              "Role": "returns.sales_order_line_number"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_returns_have_sales_order_line_numbers"
+			          "ID": "returnss_have_sales_order_line_numbers"
 			        }
 			      ]
 			    },
-			    "sales_return_has_return_date": {
+			    "returns_has_return_date": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
-			        "sales_return.return_date": {
+			        "returns.return_date": {
 			          "Target": {
-			            "Entity": "sales_return.return_date"
+			            "Entity": "returns.return_date"
 			          }
 			        }
 			      },
@@ -62979,32 +62979,32 @@ cultureInfo en-US
 			        {
 			          "Attribute": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Object": {
-			              "Role": "sales_return.return_date"
+			              "Role": "returns.return_date"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_returns_have_return_dates"
+			          "ID": "returnss_have_return_dates"
 			        }
 			      ]
 			    },
-			    "sales_return_has_return_quantity": {
+			    "returns_has_return_quantity": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
-			        "sales_return.return_quantity": {
+			        "returns.return_quantity": {
 			          "Target": {
-			            "Entity": "sales_return.return_quantity"
+			            "Entity": "returns.return_quantity"
 			          }
 			        }
 			      },
@@ -63012,32 +63012,32 @@ cultureInfo en-US
 			        {
 			          "Attribute": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Object": {
-			              "Role": "sales_return.return_quantity"
+			              "Role": "returns.return_quantity"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_returns_have_return_quantities"
+			          "ID": "returnss_have_return_quantities"
 			        }
 			      ]
 			    },
-			    "sales_return_has_return_sequence": {
+			    "returns_has_return_sequence": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
-			        "sales_return.return_sequence": {
+			        "returns.return_sequence": {
 			          "Target": {
-			            "Entity": "sales_return.return_sequence"
+			            "Entity": "returns.return_sequence"
 			          }
 			        }
 			      },
@@ -63045,32 +63045,32 @@ cultureInfo en-US
 			        {
 			          "Attribute": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Object": {
-			              "Role": "sales_return.return_sequence"
+			              "Role": "returns.return_sequence"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_returns_have_return_sequences"
+			          "ID": "returnss_have_return_sequences"
 			        }
 			      ]
 			    },
-			    "sales_return_has_return_event_key": {
+			    "returns_has_return_event_key": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
-			        "sales_return.return_event_key": {
+			        "returns.return_event_key": {
 			          "Target": {
-			            "Entity": "sales_return.return_event_key"
+			            "Entity": "returns.return_event_key"
 			          }
 			        }
 			      },
@@ -63078,15 +63078,15 @@ cultureInfo en-US
 			        {
 			          "Attribute": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Object": {
-			              "Role": "sales_return.return_event_key"
+			              "Role": "returns.return_event_key"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_returns_have_return_event_keys"
+			          "ID": "returnss_have_return_event_keys"
 			        }
 			      ]
 			    },
@@ -69023,7 +69023,7 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_have_sales_channels"
+			          "ID": "sales_have_channels"
 			        },
 			        {
 			          "Attribute": {
@@ -69036,7 +69036,7 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_channels_have_sales"
+			          "ID": "channels_have_sales"
 			        }
 			      ]
 			    },
@@ -69086,15 +69086,15 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "sales_return_has_return_reason": {
+			    "returns_has_return_reason": {
 			      "Binding": {
-			        "ConceptualEntity": "SalesReturn"
+			        "ConceptualEntity": "Returns"
 			      },
 			      "State": "Generated",
 			      "Roles": {
-			        "sales_return": {
+			        "returns": {
 			          "Target": {
-			            "Entity": "sales_return"
+			            "Entity": "returns"
 			          }
 			        },
 			        "return_reason": {
@@ -69107,7 +69107,7 @@ cultureInfo en-US
 			        {
 			          "Attribute": {
 			            "Subject": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            },
 			            "Object": {
 			              "Role": "return_reason"
@@ -69115,7 +69115,7 @@ cultureInfo en-US
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "sales_returns_have_return_reasons"
+			          "ID": "returnss_have_return_reasons"
 			        },
 			        {
 			          "Attribute": {
@@ -69123,12 +69123,12 @@ cultureInfo en-US
 			              "Role": "return_reason"
 			            },
 			            "Object": {
-			              "Role": "sales_return"
+			              "Role": "returns"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "return_reasons_have_sales_returns"
+			          "ID": "return_reasons_have_returnss"
 			        }
 			      ]
 			    },

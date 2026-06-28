@@ -129,7 +129,7 @@ def _compute_yearly_budget(
            aggregated to annual grain (no channel/month).
 
     Returns: budget at (Country, Category, BudgetYear, Scenario) grain with
-             BudgetGrowthPct, BudgetSalesAmount, BudgetSalesQuantity, BudgetMethod.
+             BudgetGrowthPct, BudgetAmount, BudgetQuantity, BudgetMethod.
     """
     a = actuals_annual.copy()
     if a.empty:
@@ -227,16 +227,16 @@ def _compute_yearly_budget(
 
     tiled["BudgetGrowthPct"] = tiled["BaseGrowth"].values + tiled_jitter + tiled_adj
     growth_mult = 1.0 + tiled["BudgetGrowthPct"].values
-    tiled["BudgetSalesAmount"] = tiled["SalesAmount"].values * growth_mult
-    tiled["BudgetSalesQuantity"] = tiled["SalesQuantity"].values * growth_mult
+    tiled["BudgetAmount"] = tiled["SalesAmount"].values * growth_mult
+    tiled["BudgetQuantity"] = tiled["SalesQuantity"].values * growth_mult
 
     out = tiled[["Country", "Category", "BudgetYear", "Scenario",
-                  "BudgetGrowthPct", "BudgetSalesAmount", "BudgetSalesQuantity",
+                  "BudgetGrowthPct", "BudgetAmount", "BudgetQuantity",
                   "_method"]].rename(columns={"_method": "BudgetMethod"})
     out["BudgetYear"] = out["BudgetYear"].astype(int)
     out["BudgetGrowthPct"] = out["BudgetGrowthPct"].round(6)
-    out["BudgetSalesAmount"] = out["BudgetSalesAmount"].round(2)
-    out["BudgetSalesQuantity"] = out["BudgetSalesQuantity"].round(2)
+    out["BudgetAmount"] = out["BudgetAmount"].round(2)
+    out["BudgetQuantity"] = out["BudgetQuantity"].round(2)
     return out
 
 
@@ -308,8 +308,8 @@ def _compute_monthly_budget(
     cat_yearly = yearly.groupby(
         ["Country", "Category", "BudgetYear", "Scenario"], as_index=False
     ).agg(
-        BudgetSalesAmount=("BudgetSalesAmount", "sum"),
-        BudgetSalesQuantity=("BudgetSalesQuantity", "sum"),
+        BudgetAmount=("BudgetAmount", "sum"),
+        BudgetQuantity=("BudgetQuantity", "sum"),
     )
 
     # ---- 2. Compute seasonal weights from actuals ----
@@ -353,10 +353,10 @@ def _compute_monthly_budget(
     budget_months["MonthShare"] = _shares.reshape(-1)
 
     budget_months["BudgetAmount"] = (
-        budget_months["BudgetSalesAmount"].values * budget_months["MonthShare"].values
+        budget_months["BudgetAmount"].values * budget_months["MonthShare"].values
     )
     budget_months["BudgetQuantity"] = (
-        budget_months["BudgetSalesQuantity"].values * budget_months["MonthShare"].values
+        budget_months["BudgetQuantity"].values * budget_months["MonthShare"].values
     )
 
     # ---- 4. Build BudgetMonthStart date via integer arithmetic ----

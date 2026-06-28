@@ -477,7 +477,7 @@ class TestInferTableFromFilename:
         assert _infer_table_from_filename("sales_chunk0001.csv") == "Sales"
 
     def test_sales_order_detail_chunk(self):
-        assert _infer_table_from_filename("sales_order_detail_chunk0002.csv") == "SalesOrderDetail"
+        assert _infer_table_from_filename("order_detail_chunk0002.csv") == "OrderDetail"
 
     def test_no_chunk_suffix(self):
         assert _infer_table_from_filename("customers.csv") == "Customers"
@@ -806,30 +806,30 @@ class TestCollectPhaseScripts:
 
 
 # ===================================================================
-# SalesOrderNumber INT->BIGINT DDL promotion (SCHEMA-1 DDL facet)
+# OrderNumber INT->BIGINT DDL promotion (SCHEMA-1 DDL facet)
 # ===================================================================
 
 class TestPromoteOrderNumber:
     def test_below_threshold_unchanged(self):
-        cols = [("SalesOrderNumber", INT(not_null=True)), ("X", INT(not_null=True))]
+        cols = [("OrderNumber", INT(not_null=True)), ("X", INT(not_null=True))]
         # No promotion at/below the threshold: content is returned as-is.
         assert promote_order_number(cols, _INT32_HALF) == cols
 
     def test_above_threshold_promotes_to_bigint(self):
-        cols = [("SalesOrderNumber", INT(not_null=True)), ("X", INT(not_null=True))]
+        cols = [("OrderNumber", INT(not_null=True)), ("X", INT(not_null=True))]
         out = dict(promote_order_number(cols, _INT32_HALF + 1))
-        assert out["SalesOrderNumber"].sql_type == BIGINT().sql_type
+        assert out["OrderNumber"].sql_type == BIGINT().sql_type
         assert out["X"].sql_type == INT(not_null=True).sql_type  # other columns untouched
 
     def test_preserves_nullability(self):
-        # Complaints' SalesOrderNumber is nullable — promotion must keep it nullable.
-        cols = [("SalesOrderNumber", INT(not_null=False))]
+        # Complaints' OrderNumber is nullable — promotion must keep it nullable.
+        cols = [("OrderNumber", INT(not_null=False))]
         out = dict(promote_order_number(cols, _INT32_HALF + 1))
-        assert out["SalesOrderNumber"].nullable is True
+        assert out["OrderNumber"].nullable is True
 
 
-class TestSalesOrderNumberDDLPromotion:
-    """End-to-end: the generated facts DDL widens SalesOrderNumber across every
+class TestOrderNumberDDLPromotion:
+    """End-to-end: the generated facts DDL widens OrderNumber across every
     fact table that carries it (Sales/Header/Detail/Return/Complaints) once the
     configured row count would overflow int32."""
 
@@ -845,11 +845,11 @@ class TestSalesOrderNumberDDLPromotion:
 
     def test_high_rows_all_bigint(self, tmp_path):
         sql = self._facts_sql(tmp_path, _INT32_HALF + 1)
-        assert re.search(r"SalesOrderNumber\W+BIGINT\b", sql)
-        # no SalesOrderNumber column left as plain INT
-        assert not re.search(r"SalesOrderNumber\W+INT\b", sql)
+        assert re.search(r"OrderNumber\W+BIGINT\b", sql)
+        # no OrderNumber column left as plain INT
+        assert not re.search(r"OrderNumber\W+INT\b", sql)
 
     def test_low_rows_stays_int(self, tmp_path):
         sql = self._facts_sql(tmp_path, 1000)
-        assert re.search(r"SalesOrderNumber\W+INT\b", sql)
-        assert not re.search(r"SalesOrderNumber\W+BIGINT\b", sql)
+        assert re.search(r"OrderNumber\W+INT\b", sql)
+        assert not re.search(r"OrderNumber\W+BIGINT\b", sql)

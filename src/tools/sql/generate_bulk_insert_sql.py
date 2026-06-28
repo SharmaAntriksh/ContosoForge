@@ -43,13 +43,11 @@ _CHUNK_SUFFIX_RE = re.compile(r"(?:_chunk\d+|_part\d+)$", flags=re.IGNORECASE)
 _FOLDER_TABLE_ALIASES: dict[str, str] = {
     # facts
     "sales": "Sales",
-    "sales_order_header": "SalesOrderHeader",
-    "sales_order_detail": "SalesOrderDetail",
+    "order_header": "OrderHeader",
+    "order_detail": "OrderDetail",
 
     # returns
-    "sales_return": "SalesReturn",
-    "salesreturn": "SalesReturn",
-    "returns": "SalesReturn",
+    "returns": "Returns",
 
     # budget (files live under facts/budget/ with individual filenames)
     "budget_yearly": "BudgetYearly",
@@ -72,7 +70,7 @@ def _infer_table_from_filename(csv_file: str) -> str:
     Infer PascalCase table name from a chunked snake_case filename.
     Examples:
       sales_chunk0001.csv              -> Sales
-      sales_order_detail_chunk0001.csv -> SalesOrderDetail
+      order_detail_chunk0001.csv -> OrderDetail
     """
     base = Path(csv_file).stem
     base = _CHUNK_SUFFIX_RE.sub("", base)
@@ -107,8 +105,8 @@ def _pick_target_table(csv_path: Path, *, allowed_tables: Optional[Set[str]]) ->
 def _allowed_fact_tables_from_cfg(cfg: Optional[Mapping]) -> Optional[Set[str]]:
     """
     Allowed fact tables for facts bulk insert.
-    - sales.sales_output drives Sales vs SalesOrderHeader/Detail
-    - returns flags (above) controls SalesReturn
+    - sales.sales_output drives Sales vs OrderHeader/Detail
+    - returns flags (above) controls Returns
     - budget.enabled controls BudgetYearly/BudgetMonthly
     - inventory.enabled controls InventorySnapshot
     - complaints.enabled controls Complaints
@@ -125,11 +123,11 @@ def _allowed_fact_tables_from_cfg(cfg: Optional[Mapping]) -> Optional[Set[str]]:
     if mode in {"sales", "both"}:
         allowed.add("Sales")
     if mode in {"sales_order", "both"}:
-        allowed.add("SalesOrderHeader")
-        allowed.add("SalesOrderDetail")
+        allowed.add("OrderHeader")
+        allowed.add("OrderDetail")
 
     if _returns_enabled_from_cfg(cfg):
-        allowed.add("SalesReturn")
+        allowed.add("Returns")
 
     if _budget_enabled_from_cfg(cfg):
         allowed.add("BudgetYearly")
@@ -270,7 +268,7 @@ def generate_dims_and_facts_bulk_insert_scripts(
 
     For SQL Server, all dims and the Budget*/Complaints fact tables need
     ``FORMAT='CSV'`` because their string columns may contain embedded
-    commas. Sales/SalesReturn stay on the legacy fast path. Postgres
+    commas. Sales/Returns stay on the legacy fast path. Postgres
     ignores the flag — ``COPY ... FORMAT csv`` is always CSV-aware.
     """
     load_output_folder = Path(load_output_folder)

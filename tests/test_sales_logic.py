@@ -816,7 +816,7 @@ def _make_budget_arrow_table(n: int = 100) -> pa.Table:
     return pa.table({
         "StoreKey": pa.array(rng.integers(0, 3, size=n, dtype=np.int32), type=pa.int32()),
         "ProductKey": pa.array(rng.integers(0, 5, size=n, dtype=np.int32), type=pa.int32()),
-        "SalesChannelKey": pa.array(rng.integers(1, 3, size=n, dtype=np.int32), type=pa.int32()),
+        "ChannelKey": pa.array(rng.integers(1, 3, size=n, dtype=np.int32), type=pa.int32()),
         "OrderDate": pa.array(
             np.array(["2023-03-15"] * n, dtype="datetime64[D]"), type=pa.date32()
         ),
@@ -1115,11 +1115,11 @@ class TestReturnsConfig:
 
 
 def _make_detail_table(n: int = 50) -> pa.Table:
-    """Create a minimal SalesOrderDetail Arrow table for returns testing."""
+    """Create a minimal OrderDetail Arrow table for returns testing."""
     rng = _rng()
     return pa.table({
-        "SalesOrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32), type=pa.int32()),
-        "SalesOrderLineNumber": pa.array(np.ones(n, dtype=np.int32), type=pa.int32()),
+        "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32), type=pa.int32()),
+        "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32), type=pa.int32()),
         "DeliveryDate": pa.array(
             np.array(["2023-06-15"] * n, dtype="datetime64[D]"), type=pa.date32()
         ),
@@ -1129,7 +1129,7 @@ def _make_detail_table(n: int = 50) -> pa.Table:
     })
 
 
-class TestBuildSalesReturns:
+class TestBuildReturns:
     def test_disabled_returns_empty(self):
         detail = _make_detail_table()
         cfg = ReturnsConfig(enabled=False)
@@ -1148,8 +1148,8 @@ class TestBuildSalesReturns:
         rng = _rng()
         so = np.arange(start, start + n, dtype=np.int64)
         return pa.table({
-            "SalesOrderNumber": pa.array(so, type=pa.int64()),
-            "SalesOrderLineNumber": pa.array(np.ones(n, dtype=np.int32), type=pa.int32()),
+            "OrderNumber": pa.array(so, type=pa.int64()),
+            "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32), type=pa.int32()),
             "DeliveryDate": pa.array(
                 np.array(["2023-06-15"] * n, dtype="datetime64[D]"), type=pa.date32()
             ),
@@ -1159,13 +1159,13 @@ class TestBuildSalesReturns:
         })
 
     def test_int64_detail_preserves_dtype_and_value(self):
-        """SCHEMA-1: returns mirror int64 SalesOrderNumber without truncation."""
+        """SCHEMA-1: returns mirror int64 OrderNumber without truncation."""
         start = 2_147_483_647 + 1000  # beyond int32 range
         detail = self._int64_detail_table(50, start)
         cfg = ReturnsConfig(enabled=True, return_rate=1.0, min_lag_days=1, max_lag_days=30)
         result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
-        assert result.schema.field("SalesOrderNumber").type == pa.int64()
-        returned = set(result.column("SalesOrderNumber").to_pylist())
+        assert result.schema.field("OrderNumber").type == pa.int64()
+        returned = set(result.column("OrderNumber").to_pylist())
         assert returned and returned.issubset(set(range(start, start + 50)))
         assert min(returned) > 2_147_483_647  # not wrapped to int32
 
@@ -1176,7 +1176,7 @@ class TestBuildSalesReturns:
             detail, chunk_seed=42, cfg=ReturnsConfig(enabled=False),
         )
         assert result.num_rows == 0
-        assert result.schema.field("SalesOrderNumber").type == pa.int64()
+        assert result.schema.field("OrderNumber").type == pa.int64()
 
     def test_full_rate_returns_rows(self):
         detail = _make_detail_table(100)
@@ -1217,8 +1217,8 @@ class TestBuildSalesReturns:
 
     def test_empty_detail_returns_empty(self):
         detail = pa.table({
-            "SalesOrderNumber": pa.array([], type=pa.int32()),
-            "SalesOrderLineNumber": pa.array([], type=pa.int32()),
+            "OrderNumber": pa.array([], type=pa.int32()),
+            "OrderLineNumber": pa.array([], type=pa.int32()),
             "DeliveryDate": pa.array([], type=pa.date32()),
             "Quantity": pa.array([], type=pa.int32()),
             "NetPrice": pa.array([], type=pa.float64()),
@@ -1241,7 +1241,7 @@ class TestBuildSalesReturns:
 
     def test_missing_column_raises(self):
         detail = pa.table({
-            "SalesOrderNumber": pa.array([1], type=pa.int32()),
+            "OrderNumber": pa.array([1], type=pa.int32()),
             # Missing other required columns
         })
         cfg = ReturnsConfig(enabled=True, return_rate=1.0)
@@ -1297,8 +1297,8 @@ class TestBuildWorkerSchemas:
             skip_order_cols_requested=False,
             returns_enabled=False,
         )
-        assert "SalesOrderNumber" in bundle.sales_schema_gen.names
-        assert "SalesOrderLineNumber" in bundle.sales_schema_gen.names
+        assert "OrderNumber" in bundle.sales_schema_gen.names
+        assert "OrderLineNumber" in bundle.sales_schema_gen.names
 
     def test_parquet_skip_order_cols(self):
         bundle = build_worker_schemas(
@@ -1307,7 +1307,7 @@ class TestBuildWorkerSchemas:
             skip_order_cols_requested=True,
             returns_enabled=False,
         )
-        assert "SalesOrderNumber" not in bundle.sales_schema_gen.names
+        assert "OrderNumber" not in bundle.sales_schema_gen.names
 
     def test_delta_format_has_year_month(self):
         bundle = build_worker_schemas(
@@ -1326,7 +1326,7 @@ class TestBuildWorkerSchemas:
             skip_order_cols_requested=False,
             returns_enabled=True,
         )
-        assert "SalesReturn" in bundle.schema_by_table
+        assert "Returns" in bundle.schema_by_table
 
     def test_date_cols_present(self):
         bundle = build_worker_schemas(
@@ -1358,19 +1358,19 @@ class TestBuildWorkerSchemas:
         assert "TimeKey" in bundle.sales_schema_out.names
 
     def test_order_number_int32_by_default(self):
-        """SCHEMA-1: small runs keep SalesOrderNumber as int32."""
+        """SCHEMA-1: small runs keep OrderNumber as int32."""
         bundle = build_worker_schemas(
             file_format="parquet",
             skip_order_cols=False,
             skip_order_cols_requested=False,
             returns_enabled=True,
         )
-        for tbl in ("SalesOrderDetail", "SalesOrderHeader", "SalesReturn"):
-            assert bundle.schema_by_table[tbl].field("SalesOrderNumber").type == pa.int32()
-        assert bundle.sales_schema_gen.field("SalesOrderNumber").type == pa.int32()
+        for tbl in ("OrderDetail", "OrderHeader", "Returns"):
+            assert bundle.schema_by_table[tbl].field("OrderNumber").type == pa.int32()
+        assert bundle.sales_schema_gen.field("OrderNumber").type == pa.int32()
 
     def test_order_id_int64_promotes_all_tables(self):
-        """SCHEMA-1: order_id_int64=True promotes SalesOrderNumber everywhere."""
+        """SCHEMA-1: order_id_int64=True promotes OrderNumber everywhere."""
         bundle = build_worker_schemas(
             file_format="parquet",
             skip_order_cols=False,
@@ -1378,9 +1378,9 @@ class TestBuildWorkerSchemas:
             returns_enabled=True,
             order_id_int64=True,
         )
-        for tbl in ("SalesOrderDetail", "SalesOrderHeader", "SalesReturn"):
-            assert bundle.schema_by_table[tbl].field("SalesOrderNumber").type == pa.int64()
-        assert bundle.sales_schema_gen.field("SalesOrderNumber").type == pa.int64()
+        for tbl in ("OrderDetail", "OrderHeader", "Returns"):
+            assert bundle.schema_by_table[tbl].field("OrderNumber").type == pa.int64()
+        assert bundle.sales_schema_gen.field("OrderNumber").type == pa.int64()
 
 
 # ===================================================================
@@ -1447,7 +1447,7 @@ class TestComputeBudget:
                             "Category": category,
                             "Year": year,
                             "Month": month,
-                            "SalesChannelKey": 1,
+                            "ChannelKey": 1,
                             "SalesAmount": 1000.0 + year * 10 + month,
                             "SalesQuantity": 100 + month,
                         })
@@ -1475,7 +1475,7 @@ class TestComputeBudget:
         yearly, monthly = compute_budget(actuals, bcfg)
         # Medium scenario with growth should be positive
         medium = yearly[yearly["Scenario"] == "Medium"]
-        assert (medium["BudgetSalesAmount"] > 0).all()
+        assert (medium["BudgetAmount"] > 0).all()
 
     def test_monthly_rolls_up_to_yearly_sparse_category(self):
         """BUDGET-1: a category with actuals in only a few months must still have
@@ -1485,18 +1485,18 @@ class TestComputeBudget:
             for country in ["US", "UK"]:
                 for month in range(1, 13):  # Electronics: full year
                     rows.append({"Country": country, "Category": "Electronics",
-                                 "Year": year, "Month": month, "SalesChannelKey": 1,
+                                 "Year": year, "Month": month, "ChannelKey": 1,
                                  "SalesAmount": 1000.0 + month, "SalesQuantity": 100 + month})
                 for month in [1, 2, 3]:      # Clothing: sparse (3 months)
                     rows.append({"Country": country, "Category": "Clothing",
-                                 "Year": year, "Month": month, "SalesChannelKey": 1,
+                                 "Year": year, "Month": month, "ChannelKey": 1,
                                  "SalesAmount": 500.0, "SalesQuantity": 50})
         yearly, monthly = compute_budget(pd.DataFrame(rows), BudgetConfig(enabled=True))
 
         keys = ["Country", "Category", "BudgetYear", "Scenario"]
         m_sum = monthly.groupby(keys)["BudgetAmount"].sum().reset_index()
-        merged = m_sum.merge(yearly[keys + ["BudgetSalesAmount"]], on=keys)
-        ratio = merged["BudgetAmount"] / merged["BudgetSalesAmount"]
+        merged = m_sum.merge(yearly[keys + ["BudgetAmount"]], on=keys, suffixes=("_monthly", "_yearly"))
+        ratio = merged["BudgetAmount_monthly"] / merged["BudgetAmount_yearly"]
         # Under the bug, sparse Clothing overshoots ~1.75x; allow only cents rounding.
         assert ratio.between(0.99, 1.01).all(), merged.loc[~ratio.between(0.99, 1.01)]
 

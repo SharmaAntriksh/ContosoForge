@@ -12,7 +12,7 @@ BEGIN
         RETURN;
 
     DECLARE @has_sales  BIT = CASE WHEN OBJECT_ID('dbo.Sales',            'U') IS NOT NULL THEN 1 ELSE 0 END;
-    DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.SalesOrderHeader', 'U') IS NOT NULL THEN 1 ELSE 0 END;
+    DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.OrderHeader', 'U') IS NOT NULL THEN 1 ELSE 0 END;
 
     CREATE TABLE #R (
         Category    VARCHAR(50)  NOT NULL,
@@ -77,11 +77,11 @@ BEGIN
     DECLARE @mgr_sp INT;
     SELECT @mgr_sp = COUNT(*) FROM dbo.Employees
     WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000
-      AND SalesPersonFlag = 1;
+      AND IsSalesperson = 1;
     INSERT INTO #R VALUES ('Employees', 'No managers flagged as salespeople',
-        'Store Manager keys (30M-40M range) must not have SalesPersonFlag=1',
+        'Store Manager keys (30M-40M range) must not have IsSalesperson=1',
         CASE WHEN @mgr_sp = 0 THEN 'PASS' ELSE 'FAIL' END,
-        CAST(@mgr_sp AS VARCHAR) + ' manager(s) with SalesPersonFlag=1');
+        CAST(@mgr_sp AS VARCHAR) + ' manager(s) with IsSalesperson=1');
 
     -- ########################################################################
     -- ESA BRIDGE TABLE
@@ -183,7 +183,7 @@ BEGIN
     -- Every store-level employee has an assignment
     DECLARE @no_assign INT;
     SELECT @no_assign = COUNT(*) FROM dbo.Employees e
-    WHERE e.SalesPersonFlag = 1
+    WHERE e.IsSalesperson = 1
       AND NOT EXISTS (
         SELECT 1 FROM dbo.EmployeeStoreAssignments esa WHERE esa.EmployeeKey = e.EmployeeKey
       );
@@ -325,7 +325,7 @@ BEGIN
         SELECT @mgr_sales = COUNT(DISTINCT EmployeeKey) FROM dbo.Sales
         WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000;
     ELSE
-        SELECT @mgr_sales = COUNT(DISTINCT EmployeeKey) FROM dbo.SalesOrderHeader
+        SELECT @mgr_sales = COUNT(DISTINCT EmployeeKey) FROM dbo.OrderHeader
         WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000;
     INSERT INTO #R VALUES ('Sales', 'No managers in sales',
         'Store Manager keys (30M-40M range) should not appear as EmployeeKey in sales',
@@ -341,8 +341,8 @@ BEGIN
     END
     ELSE
     BEGIN
-        SELECT @unassigned  = COUNT(*) FROM dbo.SalesOrderHeader WHERE EmployeeKey <= 0;
-        SELECT @total_sales = COUNT(*) FROM dbo.SalesOrderHeader;
+        SELECT @unassigned  = COUNT(*) FROM dbo.OrderHeader WHERE EmployeeKey <= 0;
+        SELECT @total_sales = COUNT(*) FROM dbo.OrderHeader;
     END
     INSERT INTO #R VALUES ('Sales', 'No unassigned salesperson keys',
         'EmployeeKey should be > 0 (not -1 or 0)',
@@ -357,7 +357,7 @@ BEGIN
         WHERE f.EmployeeKey > 0 AND e.EmployeeKey IS NULL;
     ELSE
         SELECT @bad_sp = COUNT(DISTINCT f.EmployeeKey)
-        FROM dbo.SalesOrderHeader f LEFT JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
+        FROM dbo.OrderHeader f LEFT JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
         WHERE f.EmployeeKey > 0 AND e.EmployeeKey IS NULL;
     INSERT INTO #R VALUES ('Sales', 'All salesperson keys exist in Employees',
         'EmployeeKey in sales references a valid Employees row',
@@ -377,7 +377,7 @@ BEGIN
         WHERE f.EmployeeKey > 0 AND esa.EmployeeKey IS NULL;
     ELSE
         SELECT @orphaned = COUNT(DISTINCT CAST(f.EmployeeKey AS VARCHAR) + '-' + CAST(f.StoreKey AS VARCHAR))
-        FROM dbo.SalesOrderHeader f
+        FROM dbo.OrderHeader f
         LEFT JOIN dbo.EmployeeStoreAssignments esa
           ON  esa.EmployeeKey = f.EmployeeKey
          AND esa.StoreKey     = f.StoreKey
@@ -400,7 +400,7 @@ BEGIN
             WHERE s.RenovationStartDate IS NOT NULL AND s.RenovationEndDate IS NOT NULL
               AND f.OrderDate >= s.RenovationStartDate AND f.OrderDate < s.RenovationEndDate;
         ELSE
-            SELECT @reno_sales = COUNT(*) FROM dbo.SalesOrderHeader f
+            SELECT @reno_sales = COUNT(*) FROM dbo.OrderHeader f
             JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
             WHERE s.RenovationStartDate IS NOT NULL AND s.RenovationEndDate IS NOT NULL
               AND f.OrderDate >= s.RenovationStartDate AND f.OrderDate < s.RenovationEndDate;
@@ -419,7 +419,7 @@ BEGIN
             JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
             WHERE s.ClosingDate IS NOT NULL AND f.OrderDate >= s.ClosingDate;
         ELSE
-            SELECT @post_close_sales = COUNT(*) FROM dbo.SalesOrderHeader f
+            SELECT @post_close_sales = COUNT(*) FROM dbo.OrderHeader f
             JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
             WHERE s.ClosingDate IS NOT NULL AND f.OrderDate >= s.ClosingDate;
         INSERT INTO #R VALUES ('Sales', 'No sales after store closure',
@@ -439,7 +439,7 @@ BEGIN
         ) le ON le.EmployeeKey = f.EmployeeKey AND le.StoreKey = f.StoreKey
         WHERE f.OrderDate > le.LastEnd;
     ELSE
-        SELECT @leaked = COUNT(*) FROM dbo.SalesOrderHeader f
+        SELECT @leaked = COUNT(*) FROM dbo.OrderHeader f
         JOIN (
             SELECT EmployeeKey, StoreKey, MAX(EndDate) AS LastEnd
             FROM dbo.EmployeeStoreAssignments

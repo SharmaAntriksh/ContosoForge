@@ -1,23 +1,23 @@
-table SalesOrderDetail
+table OrderDetail
 	lineageTag: 72237aef-7edb-4861-ab7a-68fcd65161ea
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 69d80e65-99c7-4ad3-bc29-5f988106b0bc
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		changedProperty = IsHidden
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesOrderLineNumber
+	column OrderLineNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 817e2e59-9fac-4b3e-b9b8-2102970037fc
 		summarizeBy: sum
-		sourceColumn: SalesOrderLineNumber
+		sourceColumn: OrderLineNumber
 
 		changedProperty = IsHidden
 
@@ -133,12 +133,12 @@ table SalesOrderDetail
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesOrderDetail = m
+	partition OrderDetail = m
 		mode: import
 		queryGroup: Fact\Sales
 		source =
 				let
-				    Source = Folder.Files ( ContosoFolder & "\facts\sales_order_detail" ),
+				    Source = Folder.Files ( ContosoFolder & "\facts\order_detail" ),
 				    FilterHidden = Table.SelectRows ( Source, each [Attributes]?[Hidden]? <> true ),
 				    InvokeCustomFunction = Table.AddColumn (
 				        FilterHidden,
@@ -155,8 +155,8 @@ table SalesOrderDetail
 				    CombineTables = Table.TransformColumnTypes (
 				        ExpandTable,
 				        {
-				            { "SalesOrderNumber", Int64.Type },
-				            { "SalesOrderLineNumber", Int64.Type },
+				            { "OrderNumber", Int64.Type },
+				            { "OrderLineNumber", Int64.Type },
 				            { "ProductKey", Int64.Type },
 				            { "DueDate", type date },
 				            { "DeliveryDate", type date },

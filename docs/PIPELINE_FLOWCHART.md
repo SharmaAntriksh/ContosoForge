@@ -192,7 +192,7 @@ sales_runner.py :: run_sales_pipeline()
   |
   |-- Check returns eligibility
   |     returns.enabled AND sales_output='sales' AND skip_order_cols?
-  |     --> warn + disable returns (need SalesOrderNumber to link)
+  |     --> warn + disable returns (need OrderNumber to link)
   |
   |-- Load active products
   |     products.parquet --> filter by active_ratio

@@ -117,8 +117,8 @@ class TestQualityReport:
         assert isinstance(report_path, Path)
 
 
-class TestSalesOrderIntegrity:
-    """QR-1: detect CHUNK-1 — duplicate SalesOrderNumber in the header and
+class TestOrderIntegrity:
+    """QR-1: detect CHUNK-1 — duplicate OrderNumber in the header and
     broken returns/complaints → header links."""
 
     @pytest.fixture
@@ -130,8 +130,8 @@ class TestSalesOrderIntegrity:
     @staticmethod
     def _header(facts, so_numbers, dtype=np.int64):
         pd.DataFrame({
-            "SalesOrderNumber": np.array(so_numbers, dtype=dtype),
-        }).to_parquet(facts / "sales_order_header.parquet", index=False)
+            "OrderNumber": np.array(so_numbers, dtype=dtype),
+        }).to_parquet(facts / "order_header.parquet", index=False)
 
     @staticmethod
     def _find(report, name):
@@ -139,13 +139,13 @@ class TestSalesOrderIntegrity:
 
     def test_duplicate_order_number_in_header_is_flagged(self, dims_facts):
         dims, facts = dims_facts
-        # SalesOrderNumber 1002 duplicated — the CHUNK-1 signature.
+        # OrderNumber 1002 duplicated — the CHUNK-1 signature.
         self._header(facts, [1001, 1002, 1002, 1003])
 
         report = QualityReport()
         _check_nulls_and_duplicates(report, dims, facts, _TableCache())
 
-        dup = self._find(report, "Duplicate PK: sales_order_header.SalesOrderNumber")
+        dup = self._find(report, "Duplicate PK: order_header.OrderNumber")
         assert dup is not None and dup.passed is False
         assert "1 duplicate" in dup.message
 
@@ -156,7 +156,7 @@ class TestSalesOrderIntegrity:
         report = QualityReport()
         _check_nulls_and_duplicates(report, dims, facts, _TableCache())
 
-        dup = self._find(report, "Duplicate PK: sales_order_header.SalesOrderNumber")
+        dup = self._find(report, "Duplicate PK: order_header.OrderNumber")
         assert dup is not None and dup.passed is True
 
     def test_returns_orphan_order_number_is_flagged(self, dims_facts):
@@ -164,16 +164,16 @@ class TestSalesOrderIntegrity:
         self._header(facts, [1001, 1002, 1003])
         # 9999 has no matching header row.
         pd.DataFrame({
-            "SalesOrderNumber": np.array([1001, 9999], dtype=np.int64),
+            "OrderNumber": np.array([1001, 9999], dtype=np.int64),
             "ReturnReasonKey": np.array([1, 2], dtype=np.int64),
-        }).to_parquet(facts / "sales_return.parquet", index=False)
+        }).to_parquet(facts / "returns.parquet", index=False)
 
         report = QualityReport()
         _check_referential_integrity(report, dims, facts, _TableCache())
 
         fk = self._find(
             report,
-            "FK: sales_return.SalesOrderNumber → sales_order_header.SalesOrderNumber",
+            "FK: returns.OrderNumber → order_header.OrderNumber",
         )
         assert fk is not None and fk.passed is False
         assert "9999" in fk.details
@@ -181,9 +181,9 @@ class TestSalesOrderIntegrity:
     def test_complaints_null_order_number_is_ignored(self, dims_facts):
         dims, facts = dims_facts
         self._header(facts, [1001, 1002, 1003])
-        # Unlinked complaints carry null SalesOrderNumber — must not count as orphans.
+        # Unlinked complaints carry null OrderNumber — must not count as orphans.
         pd.DataFrame({
-            "SalesOrderNumber": pd.array([1002, None, 1003], dtype="Int64"),
+            "OrderNumber": pd.array([1002, None, 1003], dtype="Int64"),
         }).to_parquet(facts / "complaints.parquet", index=False)
 
         report = QualityReport()
@@ -191,6 +191,6 @@ class TestSalesOrderIntegrity:
 
         fk = self._find(
             report,
-            "FK: complaints.SalesOrderNumber → sales_order_header.SalesOrderNumber",
+            "FK: complaints.OrderNumber → order_header.OrderNumber",
         )
         assert fk is not None and fk.passed is True

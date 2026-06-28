@@ -669,7 +669,7 @@ def _merge_fact_csv_chunks(
     """Re-chunk CSV files for a sales fact table to respect chunk_size.
 
     Output files keep the existing chunk_prefix naming convention
-    (e.g. ``sales_chunk0000.csv``, ``sales_return_chunk0000.csv``).
+    (e.g. ``sales_chunk0000.csv``, ``returns_chunk0000.csv``).
 
     Concatenation is done at the **byte** level (raw block copy with inline
     newline counting) rather than the old per-row Python loop, which decoded and
@@ -1588,7 +1588,7 @@ def _build_correlation_lookups(
         for cid in range(_n_countries)
     ]
 
-    # 2) Store type -> valid SalesChannelKeys
+    # 2) Store type -> valid ChannelKeys
     store_channel_keys_list = [None] * (_max_sk + 1)
     channel_prob_by_store_list = [None] * (_max_sk + 1)
     if store_type_map is not None:
@@ -1640,12 +1640,12 @@ def _build_correlation_lookups(
 
     # 5) Channel fulfillment days
     channel_fulfillment_days = DEFAULT_CHANNEL_FULFILLMENT_DAYS.copy()
-    _sc_path = parquet_folder_p / "sales_channels.parquet"
+    _sc_path = parquet_folder_p / "channels.parquet"
     if _sc_path.exists():
         try:
             _sc_df = pd.read_parquet(str(_sc_path))
-            if "TypicalFulfillmentDays" in _sc_df.columns and "SalesChannelKey" in _sc_df.columns:
-                _sc_keys = _sc_df["SalesChannelKey"].to_numpy(dtype=np.int32)
+            if "TypicalFulfillmentDays" in _sc_df.columns and "ChannelKey" in _sc_df.columns:
+                _sc_keys = _sc_df["ChannelKey"].to_numpy(dtype=np.int32)
                 _sc_days = _sc_df["TypicalFulfillmentDays"]
                 _sc_valid = (_sc_keys >= 0) & (_sc_keys < len(channel_fulfillment_days)) & _sc_days.notna()
                 channel_fulfillment_days[_sc_keys[_sc_valid]] = _sc_days.to_numpy(dtype=np.int32)[_sc_valid]
@@ -2224,7 +2224,7 @@ def generate_sales_fact(
     # Optional auto chunk sizing
     # ------------------------------------------------------------
     total_rows = _int_or(total_rows, 0)
-    # NOTE: the SalesOrderNumber int32→int64 decision is made *after* day-ID
+    # NOTE: the OrderNumber int32→int64 decision is made *after* day-ID
     # sizing below — the ID space is ~8x total_rows, not total_rows, so it can't
     # be decided from total_rows alone here. See `_order_id_int64`.
     if total_rows <= 0:
@@ -2292,7 +2292,7 @@ def generate_sales_fact(
 
     # Day-based order ID ranges: each calendar day gets a disjoint ID band,
     # and within each day each chunk gets its own non-overlapping slot.
-    # This guarantees SalesOrderNumber increases with OrderDate.
+    # This guarantees OrderNumber increases with OrderDate.
     _dp = np.asarray(date_pool)
     _n_days = int(_dp.size) if _dp.size else 1
     _safety = 8.0
@@ -2300,7 +2300,7 @@ def generate_sales_fact(
     _per_chunk_alloc = max(_per_chunk_alloc, 1)
     _day_stride = _per_chunk_alloc * total_chunks
 
-    # SalesOrderNumber dtype decision. Day IDs reach up to (day_span+1)*day_stride
+    # OrderNumber dtype decision. Day IDs reach up to (day_span+1)*day_stride
     # (≈ 8x total_rows, since per_chunk_alloc carries an 8x safety factor). That
     # crosses the int32 ceiling near ~268M rows — far below total_rows itself — so
     # the promotion must be sized to the real ID space, not total_rows. Promote to
@@ -2315,7 +2315,7 @@ def generate_sales_fact(
     _order_id_int64 = _max_order_id > _INT32_MAX // 2
     if _order_id_int64 and not skip_order_cols:
         warn(
-            f"SalesOrderNumber worst-case value ~{_max_order_id:,} exceeds the int32 "
+            f"OrderNumber worst-case value ~{_max_order_id:,} exceeds the int32 "
             "safety margin; emitting int64 for order-number columns."
         )
 
@@ -2377,7 +2377,7 @@ def generate_sales_fact(
 
     info(f"Spawning {n_workers} worker processes...")
 
-    # SalesOrderNumber RunId:
+    # OrderNumber RunId:
     # - If configured: sales.order_id_run_id (0..999)
     # - Else derive a stable 0..999 id from output folder + seed (unique per run folder)
     order_id_run_id_raw = getattr(sales_cfg, "order_id_run_id", None)

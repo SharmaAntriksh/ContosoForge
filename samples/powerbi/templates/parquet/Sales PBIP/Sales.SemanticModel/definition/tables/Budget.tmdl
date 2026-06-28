@@ -44,21 +44,21 @@ table Budget
 
 		annotation PBI_FormatHint = {"isGeneralNumber":true}
 
-	column BudgetSalesAmount
+	column BudgetAmount
 		dataType: double
 		lineageTag: 102902de-5597-439f-8c2c-1be834625f5e
 		summarizeBy: sum
-		sourceColumn: BudgetSalesAmount
+		sourceColumn: BudgetAmount
 
 		annotation SummarizationSetBy = Automatic
 
 		annotation PBI_FormatHint = {"isGeneralNumber":true}
 
-	column BudgetSalesQuantity
+	column BudgetQuantity
 		dataType: double
 		lineageTag: b7bad7de-beaa-48dd-8b25-8e6fd5dcd12d
 		summarizeBy: sum
-		sourceColumn: BudgetSalesQuantity
+		sourceColumn: BudgetQuantity
 
 		annotation SummarizationSetBy = Automatic
 

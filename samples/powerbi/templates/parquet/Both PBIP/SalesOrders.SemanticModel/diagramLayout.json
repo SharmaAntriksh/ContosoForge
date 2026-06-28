@@ -163,7 +163,7 @@
             "x": 3709.9300595367226,
             "y": 392.7900678358078
           },
-          "nodeIndex": "SalesChannel",
+          "nodeIndex": "Channel",
           "nodeLineageTag": "1e916f6e-f23b-4d8b-9ebd-41b929a8d13a",
           "size": {
             "height": 300,
@@ -371,7 +371,7 @@
             "x": 2055.9300595367226,
             "y": 356.7900678358078
           },
-          "nodeIndex": "SalesReturn",
+          "nodeIndex": "Returns",
           "nodeLineageTag": "d8f35106-f551-4dcd-b8cb-422debfa82c6",
           "size": {
             "height": 272,
@@ -436,7 +436,7 @@
             "x": 8836.0896800439914,
             "y": 342.7900678358078
           },
-          "nodeIndex": "SalesOrderDetail",
+          "nodeIndex": "OrderDetail",
           "nodeLineageTag": "b5d9ca22-fe9a-4d5c-a566-8dde89571287",
           "size": {
             "height": 300,
@@ -449,7 +449,7 @@
             "x": 8552.0896800439914,
             "y": 342.7900678358078
           },
-          "nodeIndex": "SalesOrderHeader",
+          "nodeIndex": "OrderHeader",
           "nodeLineageTag": "5eef46cf-46bc-42a2-bd57-f3576ed2f418",
           "size": {
             "height": 300,
@@ -629,7 +629,7 @@
             "x": 651.25099797254609,
             "y": 343.30260879129651
           },
-          "nodeIndex": "SalesOrderDetail",
+          "nodeIndex": "OrderDetail",
           "nodeLineageTag": "b5d9ca22-fe9a-4d5c-a566-8dde89571287",
           "size": {
             "height": 300,
@@ -642,7 +642,7 @@
             "x": 393.34303202782809,
             "y": 0
           },
-          "nodeIndex": "SalesOrderHeader",
+          "nodeIndex": "OrderHeader",
           "nodeLineageTag": "5eef46cf-46bc-42a2-bd57-f3576ed2f418",
           "size": {
             "height": 300,
@@ -670,7 +670,7 @@
             "x": 115.33333206176758,
             "y": 123
           },
-          "nodeIndex": "SalesReturn",
+          "nodeIndex": "Returns",
           "nodeLineageTag": "d8f35106-f551-4dcd-b8cb-422debfa82c6",
           "size": {
             "height": 272,
@@ -789,7 +789,7 @@
             "x": 1128.2907855577928,
             "y": 124.14062899865377
           },
-          "nodeIndex": "SalesOrderHeader",
+          "nodeIndex": "OrderHeader",
           "nodeLineageTag": "5eef46cf-46bc-42a2-bd57-f3576ed2f418",
           "size": {
             "height": 300,
@@ -802,7 +802,7 @@
             "x": 761.24072857625924,
             "y": 550.27064651983585
           },
-          "nodeIndex": "SalesOrderDetail",
+          "nodeIndex": "OrderDetail",
           "nodeLineageTag": "b5d9ca22-fe9a-4d5c-a566-8dde89571287",
           "size": {
             "height": 300,
@@ -909,7 +909,7 @@
             "x": 1097.1647730195875,
             "y": 570.69204751158929
           },
-          "nodeIndex": "SalesOrderHeader",
+          "nodeIndex": "OrderHeader",
           "nodeLineageTag": "5eef46cf-46bc-42a2-bd57-f3576ed2f418",
           "size": {
             "height": 300,
@@ -922,7 +922,7 @@
             "x": 1471.5674668194288,
             "y": 670.9289045839497
           },
-          "nodeIndex": "SalesOrderDetail",
+          "nodeIndex": "OrderDetail",
           "nodeLineageTag": "b5d9ca22-fe9a-4d5c-a566-8dde89571287",
           "size": {
             "height": 300,
@@ -1123,7 +1123,7 @@
             "x": 349.3521862719972,
             "y": 320.74200406448375
           },
-          "nodeIndex": "SalesOrderHeader",
+          "nodeIndex": "OrderHeader",
           "nodeLineageTag": "5eef46cf-46bc-42a2-bd57-f3576ed2f418",
           "size": {
             "height": 296,
@@ -1137,7 +1137,7 @@
             "x": 716.59314990911719,
             "y": 399.45588440647066
           },
-          "nodeIndex": "SalesOrderDetail",
+          "nodeIndex": "OrderDetail",
           "nodeLineageTag": "b5d9ca22-fe9a-4d5c-a566-8dde89571287",
           "size": {
             "height": 128,
@@ -1205,7 +1205,7 @@
             "x": 571.715553124315,
             "y": 679.77626342453254
           },
-          "nodeIndex": "SalesOrderHeader",
+          "nodeIndex": "OrderHeader",
           "nodeLineageTag": "5eef46cf-46bc-42a2-bd57-f3576ed2f418",
           "size": {
             "height": 300,
@@ -1283,7 +1283,7 @@
             "x": 890.89598513184,
             "y": 535.46035827228991
           },
-          "nodeIndex": "SalesOrderDetail",
+          "nodeIndex": "OrderDetail",
           "nodeLineageTag": "b5d9ca22-fe9a-4d5c-a566-8dde89571287",
           "size": {
             "height": 300,

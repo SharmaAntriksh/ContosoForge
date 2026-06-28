@@ -54,15 +54,15 @@ relationship 7eb0162a-3cbb-427e-855f-c7b298947c9a
 	toColumn: Store.StoreKey
 
 relationship 04153036-3544-45a2-951b-5d0ed546b84a
-	fromColumn: Sales.SalesChannelKey
-	toColumn: SalesChannel.SalesChannelKey
+	fromColumn: Sales.ChannelKey
+	toColumn: Channel.ChannelKey
 
 relationship a349b7f5-3fcc-4a33-adc2-efdfc4929610
 	fromColumn: EmployeeStoreAssignment.EmployeeKey
 	toColumn: Employee.EmployeeKey
 
 relationship fce5d5c1-4090-45b6-85aa-e640bb9dee47
-	fromColumn: SalesReturn.ReturnReasonKey
+	fromColumn: Returns.ReturnReasonKey
 	toColumn: ReturnReason.ReturnReasonKey
 
 relationship f4511e52-90b3-4f7d-8368-fd3660f411f7
@@ -94,7 +94,7 @@ relationship 40a5e2ce-3998-4186-88ce-af80245b1dd8
 	toColumn: ProductCategory.Category
 
 relationship eafc9532-e509-7631-67cc-26cd9b233e75
-	fromColumn: SalesReturn.ReturnDate
+	fromColumn: Returns.ReturnDate
 	toColumn: Dates.Date
 
 relationship cc74a95f-0adc-cfeb-7f54-75e4c54f4e8e

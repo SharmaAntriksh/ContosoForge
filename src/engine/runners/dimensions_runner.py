@@ -138,7 +138,7 @@ DIM_SPECS: List[DimensionSpec] = [
     ),
 
     # 1.5) Lookups (trimmed)
-    DimensionSpec(name="sales_channels", cfg_key="sales_channels", run_fn=run_sales_channels, outputs_all=("sales_channels.parquet",)),
+    DimensionSpec(name="sales_channels", cfg_key="sales_channels", run_fn=run_sales_channels, outputs_all=("channels.parquet",)),
     DimensionSpec(name="loyalty_tiers", cfg_key="loyalty_tiers", run_fn=run_loyalty_tiers, outputs_all=("loyalty_tiers.parquet",)),
     DimensionSpec(name="customer_acquisition_channels", cfg_key="customer_acquisition_channels", run_fn=run_customer_acquisition_channels, outputs_all=("customer_acquisition_channels.parquet",)),
 

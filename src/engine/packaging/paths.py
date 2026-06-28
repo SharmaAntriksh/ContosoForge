@@ -12,9 +12,9 @@ from src.facts.sales.output_paths import (
 # Canonical folder names for scratch + packaged outputs
 _TABLE_DIR_MAP = {
     TABLE_SALES: "sales",
-    TABLE_SALES_ORDER_DETAIL: "sales_order_detail",
-    TABLE_SALES_ORDER_HEADER: "sales_order_header",
-    TABLE_SALES_RETURN: "sales_return",
+    TABLE_SALES_ORDER_DETAIL: "order_detail",
+    TABLE_SALES_ORDER_HEADER: "order_header",
+    TABLE_SALES_RETURN: "returns",
 }
 
 

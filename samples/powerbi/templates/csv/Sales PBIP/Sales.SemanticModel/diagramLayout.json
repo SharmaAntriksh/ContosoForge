@@ -176,7 +176,7 @@
             "x": 3709.9300595367226,
             "y": 392.7900678358078
           },
-          "nodeIndex": "SalesChannel",
+          "nodeIndex": "Channel",
           "nodeLineageTag": "1e916f6e-f23b-4d8b-9ebd-41b929a8d13a",
           "size": {
             "height": 300,
@@ -384,7 +384,7 @@
             "x": 2055.9300595367226,
             "y": 356.7900678358078
           },
-          "nodeIndex": "SalesReturn",
+          "nodeIndex": "Returns",
           "nodeLineageTag": "d8f35106-f551-4dcd-b8cb-422debfa82c6",
           "size": {
             "height": 272,
@@ -644,7 +644,7 @@
             "x": 115.33333206176758,
             "y": 123
           },
-          "nodeIndex": "SalesReturn",
+          "nodeIndex": "Returns",
           "nodeLineageTag": "d8f35106-f551-4dcd-b8cb-422debfa82c6",
           "size": {
             "height": 272,

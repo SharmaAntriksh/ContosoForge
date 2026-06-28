@@ -26,8 +26,8 @@ def find_delta_table_dir(fact_out: Path, sales_cfg: dict, table: str) -> Optiona
     Known layout (your current runs):
       data/fact_out/sales/
         _delta_log                      (Sales)
-        sales_order_detail/_delta_log   (SalesOrderDetail)
-        sales_order_header/_delta_log   (SalesOrderHeader)
+        order_detail/_delta_log   (OrderDetail)
+        order_header/_delta_log   (OrderHeader)
 
     Also probes legacy:
       data/fact_out/delta/<table_subdir>/_delta_log
@@ -62,9 +62,9 @@ def find_delta_table_dir(fact_out: Path, sales_cfg: dict, table: str) -> Optiona
             candidates.append(root)
 
         candidates += [
-            root / snake,          # sales_order_detail
-            root / table,          # SalesOrderDetail
-            root / table.lower(),  # salesorderdetail
+            root / snake,          # order_detail
+            root / table,          # OrderDetail
+            root / table.lower(),  # orderdetail
         ]
 
     # De-dup candidates

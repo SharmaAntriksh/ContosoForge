@@ -1,21 +1,21 @@
-table SalesOrderDetail
+table OrderDetail
 	lineageTag: b5d9ca22-fe9a-4d5c-a566-8dde89571287
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 8d17d2e6-e643-4510-b1ad-677d9217a193
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesOrderLineNumber
+	column OrderLineNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 16700204-3a2e-42a9-a8a7-6d20ba692366
 		summarizeBy: sum
-		sourceColumn: SalesOrderLineNumber
+		sourceColumn: OrderLineNumber
 
 		annotation SummarizationSetBy = Automatic
 
@@ -111,12 +111,12 @@ table SalesOrderDetail
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesOrderDetail = m
+	partition OrderDetail = m
 		mode: import
 		queryGroup: Fact\Sales
 		source =
 				let
-				    Source = FxReadParquetFile ( "facts\sales_order_detail" )
+				    Source = FxReadParquetFile ( "facts\order_detail" )
 				in
 				    Source
 

@@ -279,12 +279,12 @@ table Employee
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesPersonFlag
+	column IsSalesperson
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
 		lineageTag: 0586e3c7-e1f3-48f1-b322-9c2ba4c4ad07
 		summarizeBy: none
-		sourceColumn: SalesPersonFlag
+		sourceColumn: IsSalesperson
 
 		annotation SummarizationSetBy = Automatic
 

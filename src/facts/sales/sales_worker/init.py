@@ -616,7 +616,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         compression = str(worker_cfg.get("compression", "snappy"))
 
         # ------------------------------------------------------------
-        # CRITICAL: SalesOrderNumber uniqueness depends on a CONSTANT
+        # CRITICAL: OrderNumber uniqueness depends on a CONSTANT
         # per-run stride for chunk order-id ranges (NOT per-task batch size).
         # Prefer 'order_id_stride_orders'; fall back to 'chunk_size'.
         # ------------------------------------------------------------
@@ -628,7 +628,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         if chunk_size <= 0:
             raise RuntimeError(
                 "Missing/invalid order-id stride. Set worker_cfg.order_id_stride_orders (preferred) "
-                "or worker_cfg.chunk_size to a positive int. This value partitions SalesOrderNumber "
+                "or worker_cfg.chunk_size to a positive int. This value partitions OrderNumber "
                 "space across chunks and must be constant across the run."
             )
 
@@ -680,7 +680,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
 
         parquet_dict_exclude = worker_cfg.get("parquet_dict_exclude")
 
-        # NEW: configurable cap for SalesOrderLineNumber per SalesOrderNumber
+        # NEW: configurable cap for OrderLineNumber per OrderNumber
         max_lines_per_order = int_or(worker_cfg.get("max_lines_per_order"), 5)
         if max_lines_per_order < 1:
             raise RuntimeError(f"max_lines_per_order must be >= 1, got {max_lines_per_order}")
@@ -1094,7 +1094,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "file_format": file_format,
             "out_folder": out_folder,
 
-            # CRITICAL: constant per-run stride used to partition SalesOrderNumber ranges
+            # CRITICAL: constant per-run stride used to partition OrderNumber ranges
             "chunk_size": int(max(1, chunk_size)),
             "order_id_stride_orders": int(max(1, chunk_size)),
             "month_stride": month_stride,

@@ -41,7 +41,7 @@ queryGroup Fact\SecondaryFacts
 
 annotation __PBI_TimeIntelligenceEnabled = 0
 
-annotation PBI_QueryOrder = ["ContosoFolder","FxReadParquetFile","Customer","Dates","Store","Promotion","Products","ProductSubcategory","ProductCategory","Geography","Currency","Employee","EmployeeStoreAssignment","ReturnReason","SalesChannel","Time","PlanSubscription","Plan","ExchangeRate","ExchangeRateMonthly","Sales","SalesReturn","Budget","BudgetMonthly","Inventory","Wishlist","Complaints","MeasureTable","CustomerProfile","OrganizationProfile","LoyaltyTiers","Warehouse","Supplier","AcquisitionChannel","ProductProfile"]
+annotation PBI_QueryOrder = ["ContosoFolder","FxReadParquetFile","Customer","Dates","Store","Promotion","Products","ProductSubcategory","ProductCategory","Geography","Currency","Employee","EmployeeStoreAssignment","ReturnReason","Channel","Time","PlanSubscription","Plan","ExchangeRate","ExchangeRateMonthly","Sales","Returns","Budget","BudgetMonthly","Inventory","Wishlist","Complaints","MeasureTable","CustomerProfile","OrganizationProfile","LoyaltyTiers","Warehouse","Supplier","AcquisitionChannel","ProductProfile"]
 
 annotation PBI_ProTooling = ["TMDLView_Desktop","DevMode"]
 
@@ -57,14 +57,14 @@ ref table Currency
 ref table Employee
 ref table EmployeeStoreAssignment
 ref table ReturnReason
-ref table SalesChannel
+ref table Channel
 ref table Time
 ref table PlanSubscription
 ref table Plan
 ref table ExchangeRate
 ref table ExchangeRateMonthly
 ref table Sales
-ref table SalesReturn
+ref table Returns
 ref table Budget
 ref table BudgetMonthly
 ref table Inventory

@@ -22,7 +22,7 @@
     dropped — those columns become BOOLEAN in Postgres (already restricted
     to true/false). Non-flag CHECKs (range, enum, length) are kept.
 
-  • The Sales/SalesReturn/SalesOrderHeader type-compatibility EXISTS blocks
+  • The Sales/Returns/OrderHeader type-compatibility EXISTS blocks
     in the SQL Server file are dropped — the Postgres importer always runs
     against a fresh DB built by the same generator, so reference types
     always match.
@@ -297,15 +297,15 @@ BEGIN
     END IF;
 END $$;
 
--- SalesChannels PK
+-- Channels PK
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesChannels"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesChannels' AND column_name='SalesChannelKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_SalesChannels')
+    IF to_regclass('"public"."Channels"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Channels' AND column_name='ChannelKey')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Channels')
     THEN
-        ALTER TABLE "public"."SalesChannels"
-        ADD CONSTRAINT "PK_SalesChannels" PRIMARY KEY ("SalesChannelKey");
+        ALTER TABLE "public"."Channels"
+        ADD CONSTRAINT "PK_Channels" PRIMARY KEY ("ChannelKey");
     END IF;
 END $$;
 

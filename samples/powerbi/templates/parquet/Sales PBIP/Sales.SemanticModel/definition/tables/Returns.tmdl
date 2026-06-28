@@ -1,21 +1,21 @@
-table SalesReturn
+table Returns
 	lineageTag: d8f35106-f551-4dcd-b8cb-422debfa82c6
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 9765951b-8f6c-47e0-8fd8-f0504a627df3
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesOrderLineNumber
+	column OrderLineNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 63a28ddd-6e03-49e0-a23d-64143209a8f0
 		summarizeBy: sum
-		sourceColumn: SalesOrderLineNumber
+		sourceColumn: OrderLineNumber
 
 		annotation SummarizationSetBy = Automatic
 
@@ -79,12 +79,12 @@ table SalesReturn
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesReturn = m
+	partition Returns = m
 		mode: import
 		queryGroup: Fact\SecondaryFacts
 		source =
 				let
-				    Source      = FxReadParquetFile ( "facts\sales_return" )
+				    Source      = FxReadParquetFile ( "facts\returns" )
 				in
 				    Source
 

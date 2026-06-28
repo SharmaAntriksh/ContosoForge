@@ -143,11 +143,11 @@ def _load_sales_channels(State: Any) -> Optional[Tuple[np.ndarray, np.ndarray, n
     if folder is None:
         return None
 
-    pth = folder / "sales_channels.parquet"
+    pth = folder / "channels.parquet"
     if not pth.exists():
         return None
 
-    read_cols = ["SalesChannelKey", "ChannelGroup"]
+    read_cols = ["ChannelKey", "ChannelGroup"]
     # Read OpenTime/CloseTime if available
     schema = pq.read_schema(pth)
     col_names = set(schema.names)
@@ -156,7 +156,7 @@ def _load_sales_channels(State: Any) -> Optional[Tuple[np.ndarray, np.ndarray, n
         read_cols += ["OpenTime", "CloseTime"]
 
     tab = pq.read_table(pth, columns=read_cols)
-    keys = np.asarray(tab["SalesChannelKey"].to_numpy(), dtype=np.int32)
+    keys = np.asarray(tab["ChannelKey"].to_numpy(), dtype=np.int32)
     grp = np.asarray(tab["ChannelGroup"].to_numpy(), dtype=object)
     open_times = np.asarray(tab["OpenTime"].to_numpy(), dtype=object) if has_times else None
     close_times = np.asarray(tab["CloseTime"].to_numpy(), dtype=object) if has_times else None
@@ -242,7 +242,7 @@ def build_extra_columns(ctx: Dict[str, Any]) -> Dict[str, Any]:
 
     cache = _load_sales_channels(State)
 
-    # Pre-compute order-level unique mapping once (reused by SalesChannelKey + TimeKey)
+    # Pre-compute order-level unique mapping once (reused by ChannelKey + TimeKey)
     _oid_first_idx = _oid_inv = None
     if order_ids_int is not None:
         oid = np.asarray(order_ids_int, dtype=np.int32)
@@ -251,18 +251,18 @@ def build_extra_columns(ctx: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     # ----------------------------
-    # SalesChannelKey
+    # ChannelKey
     # ----------------------------
-    # If chunk_builder already produced SalesChannelKey (via store-channel
+    # If chunk_builder already produced ChannelKey (via store-channel
     # correlation), skip generation here — just read it from cols.
     sales_channel = None
     channel_hour_lut = None
-    _prebuilt_ch = ctx["cols"].get("SalesChannelKey")
+    _prebuilt_ch = ctx["cols"].get("ChannelKey")
     if _prebuilt_ch is not None:
         # Already produced by chunk_builder's store-channel correlation
         sales_channel = np.asarray(_prebuilt_ch, dtype=np.int32)
         channel_hour_lut = cache[2] if cache is not None else None
-    elif "SalesChannelKey" in schema_types:
+    elif "ChannelKey" in schema_types:
         if cache is None:
             # last-resort fallback: match core channel keys from defaults
             keys = SALES_CHANNEL_CORE_KEYS
@@ -277,16 +277,16 @@ def build_extra_columns(ctx: Dict[str, Any]) -> Dict[str, Any]:
         else:
             sales_channel = rng.choice(keys, size=n, p=p).astype(np.int32, copy=False)
 
-        out["SalesChannelKey"] = sales_channel
+        out["ChannelKey"] = sales_channel
     else:
         channel_hour_lut = cache[2] if cache is not None else None
 
     # ----------------------------
-    # TimeKey depends on SalesChannel operating hours
+    # TimeKey depends on Channel operating hours
     # ----------------------------
     if "TimeKey" in schema_types:
         if sales_channel is None:
-            sc_base = ctx["cols"].get("SalesChannelKey")
+            sc_base = ctx["cols"].get("ChannelKey")
             sales_channel = None if sc_base is None else np.asarray(sc_base, dtype=np.int32)
 
         if sales_channel is None or channel_hour_lut is None:

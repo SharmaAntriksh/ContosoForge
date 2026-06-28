@@ -43,7 +43,7 @@ Controls the sales fact table: output format, structure, and performance tuning.
 |-----|-------------|---------|
 | `sales.file_format` | Output format for all fact tables. `"csv"` = chunked CSVs + auto-generated SQL scripts. `"parquet"` = merged single parquet file. `"deltaparquet"` = Delta Lake with ACID transactions. | `"csv"` |
 | `sales.sales_output` | Table structure for sales output. `"sales"` = flat denormalized table. `"sales_order"` = normalized header + detail tables. `"both"` = generates all three tables. | `"sales"` |
-| `sales.skip_order_cols` | When `true`, omits `SalesOrderNumber` and `SalesOrderLineNumber` columns. Reduces file size but disables returns generation (returns need order IDs to link back). | `false` |
+| `sales.skip_order_cols` | When `true`, omits `OrderNumber` and `OrderLineNumber` columns. Reduces file size but disables returns generation (returns need order IDs to link back). | `false` |
 | `sales.max_lines_per_order` | Maximum line items per sales order. Orders are randomly sized 1..N. Higher values create more multi-item baskets. | `8` |
 
 ### Merge & partitioning
@@ -80,7 +80,7 @@ Sales return fact table. Generates return events linked to original sales orders
 
 | Key | Description | Example |
 |-----|-------------|---------|
-| `returns.enabled` | Master toggle. When `false`, no returns are generated. Also auto-disabled if `skip_order_cols=true` (returns need `SalesOrderNumber` to link back). | `true` |
+| `returns.enabled` | Master toggle. When `false`, no returns are generated. Also auto-disabled if `skip_order_cols=true` (returns need `OrderNumber` to link back). | `true` |
 | `returns.return_rate` | Fraction of sales rows that generate a return event. 0.08 = 8% of sales are returned. | `0.08` |
 | `returns.min_days_after_sale` | Minimum days between sale date and return date. | `1` |
 | `returns.max_days_after_sale` | Maximum days between sale date and return date. | `60` |

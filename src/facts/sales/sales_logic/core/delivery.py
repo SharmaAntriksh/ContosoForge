@@ -120,7 +120,7 @@ def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
 
     # ------------------------------------------------------------
     # Due dates: channel-aware fulfillment + jitter
-    # CORRELATION #3: SalesChannelKey → DeliveryDate
+    # CORRELATION #3: ChannelKey → DeliveryDate
     # Physical channels (Store, Kiosk) → 0 days base (immediate)
     # Digital channels → 2-5 days base
     # B2B → 5-10 days base

@@ -9,7 +9,7 @@
 
   Scope
   ─────
-  • Fact tables (Sales, SalesReturn, SalesOrderHeader, SalesOrderDetail,
+  • Fact tables (Sales, Returns, OrderHeader, OrderDetail,
     InventorySnapshot) — every FK source column that isn't already the
     leading column of a PK / UQ.
   • Dimension tables — FK columns to other dims (cheap because dim
@@ -249,10 +249,10 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='SalesChannelKey')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='ChannelKey')
     THEN
-        CREATE INDEX IF NOT EXISTS "IX_Sales_SalesChannelKey"
-            ON "public"."Sales" ("SalesChannelKey");
+        CREATE INDEX IF NOT EXISTS "IX_Sales_ChannelKey"
+            ON "public"."Sales" ("ChannelKey");
     END IF;
 END $$;
 
@@ -268,97 +268,97 @@ END $$;
 
 -----------------------------------------------------------------------
 -- SALESRETURN FACT FK COLUMNS
--- (SalesOrderNumber + SalesOrderLineNumber composite is already
---  indexed via IX_SalesReturn_NaturalKey from the constraints script.)
+-- (OrderNumber + OrderLineNumber composite is already
+--  indexed via IX_Returns_NaturalKey from the constraints script.)
 -----------------------------------------------------------------------
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='ReturnDate')
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnDate')
     THEN
-        CREATE INDEX IF NOT EXISTS "IX_SalesReturn_ReturnDate"
-            ON "public"."SalesReturn" ("ReturnDate");
+        CREATE INDEX IF NOT EXISTS "IX_Returns_ReturnDate"
+            ON "public"."Returns" ("ReturnDate");
     END IF;
 END $$;
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='ReturnReasonKey')
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnReasonKey')
     THEN
-        CREATE INDEX IF NOT EXISTS "IX_SalesReturn_ReturnReasonKey"
-            ON "public"."SalesReturn" ("ReturnReasonKey");
+        CREATE INDEX IF NOT EXISTS "IX_Returns_ReturnReasonKey"
+            ON "public"."Returns" ("ReturnReasonKey");
     END IF;
 END $$;
 
 -----------------------------------------------------------------------
 -- SALESORDERHEADER FK COLUMNS
--- (SalesOrderNumber has UQ_SalesOrderHeader_SalesOrderNumber.)
+-- (OrderNumber has UQ_OrderHeader_OrderNumber.)
 -----------------------------------------------------------------------
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesOrderHeader"') IS NOT NULL THEN
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderHeader_CustomerKey"
-            ON "public"."SalesOrderHeader" ("CustomerKey");
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderHeader_StoreKey"
-            ON "public"."SalesOrderHeader" ("StoreKey");
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderHeader_OrderDate"
-            ON "public"."SalesOrderHeader" ("OrderDate");
+    IF to_regclass('"public"."OrderHeader"') IS NOT NULL THEN
+        CREATE INDEX IF NOT EXISTS "IX_OrderHeader_CustomerKey"
+            ON "public"."OrderHeader" ("CustomerKey");
+        CREATE INDEX IF NOT EXISTS "IX_OrderHeader_StoreKey"
+            ON "public"."OrderHeader" ("StoreKey");
+        CREATE INDEX IF NOT EXISTS "IX_OrderHeader_OrderDate"
+            ON "public"."OrderHeader" ("OrderDate");
     END IF;
 END $$;
 
--- Conditional SalesOrderHeader FK columns
+-- Conditional OrderHeader FK columns
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesOrderHeader"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesOrderHeader' AND column_name='EmployeeKey')
+    IF to_regclass('"public"."OrderHeader"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderHeader' AND column_name='EmployeeKey')
     THEN
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderHeader_EmployeeKey"
-            ON "public"."SalesOrderHeader" ("EmployeeKey");
-    END IF;
-END $$;
-
-DO $$
-BEGIN
-    IF to_regclass('"public"."SalesOrderHeader"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesOrderHeader' AND column_name='TimeKey')
-    THEN
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderHeader_TimeKey"
-            ON "public"."SalesOrderHeader" ("TimeKey");
+        CREATE INDEX IF NOT EXISTS "IX_OrderHeader_EmployeeKey"
+            ON "public"."OrderHeader" ("EmployeeKey");
     END IF;
 END $$;
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesOrderHeader"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesOrderHeader' AND column_name='SalesChannelKey')
+    IF to_regclass('"public"."OrderHeader"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderHeader' AND column_name='TimeKey')
     THEN
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderHeader_SalesChannelKey"
-            ON "public"."SalesOrderHeader" ("SalesChannelKey");
+        CREATE INDEX IF NOT EXISTS "IX_OrderHeader_TimeKey"
+            ON "public"."OrderHeader" ("TimeKey");
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF to_regclass('"public"."OrderHeader"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderHeader' AND column_name='ChannelKey')
+    THEN
+        CREATE INDEX IF NOT EXISTS "IX_OrderHeader_ChannelKey"
+            ON "public"."OrderHeader" ("ChannelKey");
     END IF;
 END $$;
 
 -----------------------------------------------------------------------
 -- SALESORDERDETAIL FK COLUMNS
--- (SalesOrderNumber leads UQ_SalesOrderDetail_OrderLine, so it's
+-- (OrderNumber leads UQ_OrderDetail_OrderLine, so it's
 --  already indexed for joins on that column alone.)
 -----------------------------------------------------------------------
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesOrderDetail"') IS NOT NULL THEN
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderDetail_ProductKey"
-            ON "public"."SalesOrderDetail" ("ProductKey");
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderDetail_PromotionKey"
-            ON "public"."SalesOrderDetail" ("PromotionKey");
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderDetail_CurrencyKey"
-            ON "public"."SalesOrderDetail" ("CurrencyKey");
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderDetail_DueDate"
-            ON "public"."SalesOrderDetail" ("DueDate");
-        CREATE INDEX IF NOT EXISTS "IX_SalesOrderDetail_DeliveryDate"
-            ON "public"."SalesOrderDetail" ("DeliveryDate");
+    IF to_regclass('"public"."OrderDetail"') IS NOT NULL THEN
+        CREATE INDEX IF NOT EXISTS "IX_OrderDetail_ProductKey"
+            ON "public"."OrderDetail" ("ProductKey");
+        CREATE INDEX IF NOT EXISTS "IX_OrderDetail_PromotionKey"
+            ON "public"."OrderDetail" ("PromotionKey");
+        CREATE INDEX IF NOT EXISTS "IX_OrderDetail_CurrencyKey"
+            ON "public"."OrderDetail" ("CurrencyKey");
+        CREATE INDEX IF NOT EXISTS "IX_OrderDetail_DueDate"
+            ON "public"."OrderDetail" ("DueDate");
+        CREATE INDEX IF NOT EXISTS "IX_OrderDetail_DeliveryDate"
+            ON "public"."OrderDetail" ("DeliveryDate");
     END IF;
 END $$;
 

@@ -111,7 +111,7 @@ def build_worker_schemas(
         pa.field("EmployeeKey", pa.int32()),
         pa.field("PromotionKey", pa.int32()),
         pa.field("CurrencyKey", pa.int32()),
-        pa.field("SalesChannelKey", pa.int32()),
+        pa.field("ChannelKey", pa.int32()),
         pa.field("TimeKey", pa.int32()),   # injected later; OUTPUT schema expects it
         pa.field("OrderDate", pa.date32()),
         pa.field("DueDate", pa.date32()),
@@ -125,13 +125,13 @@ def build_worker_schemas(
         pa.field("IsOrderDelayed", pa.bool_()),
     ]
 
-    # Promote SalesOrderNumber to int64 when the day-based ID space would exceed
+    # Promote OrderNumber to int64 when the day-based ID space would exceed
     # int32. `order_id_int64` (computed from the real ~8x-total_rows ID ceiling in
     # sales.py) is the single authoritative signal.
     order_num_type = pa.int64() if order_id_int64 else pa.int32()
     order_fields = [
-        pa.field("SalesOrderNumber", order_num_type),
-        pa.field("SalesOrderLineNumber", pa.int32()),
+        pa.field("OrderNumber", order_num_type),
+        pa.field("OrderLineNumber", pa.int32()),
     ]
     if partition_cols:
         delta_fields = [_ALL_DELTA_FIELDS[c] for c in partition_cols if c in _ALL_DELTA_FIELDS]
@@ -166,14 +166,14 @@ def build_worker_schemas(
         schema_with_order_delta = schema_with_order_delta_out
 
     # ---------------------------------------------------------------------
-    # SalesOrderDetail / SalesOrderHeader schemas (OUTPUT only)
+    # OrderDetail / OrderHeader schemas (OUTPUT only)
     # Agreement:
     #   - StoreKey and EmployeeKey are ORDER-level (header)
     #   - Detail remains line-level for product/pricing/shipping facts
     # ---------------------------------------------------------------------
     detail_fields = [
-        pa.field("SalesOrderNumber", order_num_type),
-        pa.field("SalesOrderLineNumber", pa.int32()),
+        pa.field("OrderNumber", order_num_type),
+        pa.field("OrderLineNumber", pa.int32()),
         pa.field("ProductKey", pa.int32()),
         pa.field("DueDate", pa.date32()),
         pa.field("DeliveryDate", pa.date32()),
@@ -187,13 +187,13 @@ def build_worker_schemas(
     detail_schema = pa.schema(detail_fields + delta_fields) if is_delta else pa.schema(detail_fields)
 
     header_fields = [
-        pa.field("SalesOrderNumber", order_num_type),
+        pa.field("OrderNumber", order_num_type),
         pa.field("CustomerKey", pa.int32()),
         pa.field("StoreKey", pa.int32()),
         pa.field("EmployeeKey", pa.int32()),
         pa.field("PromotionKey", pa.int32()),
         pa.field("CurrencyKey", pa.int32()),
-        pa.field("SalesChannelKey", pa.int32()),
+        pa.field("ChannelKey", pa.int32()),
         pa.field("OrderDate", pa.date32()),
         pa.field("TimeKey", pa.int32()),
         pa.field("IsOrderDelayed", pa.bool_()),
@@ -211,7 +211,7 @@ def build_worker_schemas(
     # returns_builder.py (single source of truth for column names & types).
     # ---------------------------------------------------------------------
     if returns_enabled:
-        # SalesOrderNumber dtype mirrors the sales schema. _returns_schema_for is
+        # OrderNumber dtype mirrors the sales schema. _returns_schema_for is
         # the single source for that field swap (shared with returns_builder).
         base_return_fields = list(_returns_schema_for(order_num_type))
         return_schema = pa.schema(base_return_fields + delta_fields) if is_delta else pa.schema(base_return_fields)
@@ -242,7 +242,7 @@ def build_worker_schemas(
     # ---------------------------------------------------------------------
     # Parquet dictionary encoding policy
     # ---------------------------------------------------------------------
-    pdx = set(parquet_dict_exclude) if parquet_dict_exclude else {"SalesOrderNumber", "CustomerKey"}
+    pdx = set(parquet_dict_exclude) if parquet_dict_exclude else {"OrderNumber", "CustomerKey"}
     parquet_dict_cols_by_table = {t: schema_dict_cols(s, pdx) for t, s in schema_by_table.items()}
     parquet_dict_cols = parquet_dict_cols_by_table[TABLE_SALES]
 

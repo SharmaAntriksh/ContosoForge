@@ -5,12 +5,12 @@
 --
 -- Supports both sales_output modes:
 --   sales        -> single Sales table
---   sales_order  -> SalesOrderHeader + SalesOrderDetail tables
+--   sales_order  -> OrderHeader + OrderDetail tables
 -- ============================================================================
 
 -- Detect which sales table exists
 DECLARE @has_sales  BIT = CASE WHEN OBJECT_ID('dbo.Sales') IS NOT NULL THEN 1 ELSE 0 END;
-DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.SalesOrderHeader') IS NOT NULL THEN 1 ELSE 0 END;
+DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.OrderHeader') IS NOT NULL THEN 1 ELSE 0 END;
 
 
 -- ============================================================================
@@ -23,7 +23,7 @@ BEGIN
     SELECT
         d.[Year],
         d.[Month],
-        COUNT(f.SalesOrderNumber)                                       AS SalesLines
+        COUNT(f.OrderNumber)                                       AS SalesLines
     FROM Dates d
     LEFT JOIN Sales f ON f.TimeKey = d.DateKey
     WHERE d.Date BETWEEN (SELECT MIN(OrderDate) FROM Sales)
@@ -37,11 +37,11 @@ BEGIN
     SELECT
         d.[Year],
         d.[Month],
-        COUNT(h.SalesOrderNumber)                                       AS SalesLines
+        COUNT(h.OrderNumber)                                       AS SalesLines
     FROM Dates d
-    LEFT JOIN SalesOrderHeader h ON h.TimeKey = d.DateKey
-    WHERE d.Date BETWEEN (SELECT MIN(OrderDate) FROM SalesOrderHeader)
-                     AND (SELECT MAX(OrderDate) FROM SalesOrderHeader)
+    LEFT JOIN OrderHeader h ON h.TimeKey = d.DateKey
+    WHERE d.Date BETWEEN (SELECT MIN(OrderDate) FROM OrderHeader)
+                     AND (SELECT MAX(OrderDate) FROM OrderHeader)
     GROUP BY d.[Year], d.[Month]
     ORDER BY d.[Year], d.[Month];
     -- EXPECTED: every month has sales > 0; no gaps
@@ -70,11 +70,11 @@ BEGIN
         d.[Year],
         d.[Month]
     FROM Dates d
-    WHERE d.Date BETWEEN (SELECT MIN(OrderDate) FROM SalesOrderHeader)
-                     AND (SELECT MAX(OrderDate) FROM SalesOrderHeader)
+    WHERE d.Date BETWEEN (SELECT MIN(OrderDate) FROM OrderHeader)
+                     AND (SELECT MAX(OrderDate) FROM OrderHeader)
       AND d.[Day] = 1
       AND NOT EXISTS (
-          SELECT 1 FROM SalesOrderHeader h
+          SELECT 1 FROM OrderHeader h
           WHERE YEAR(h.OrderDate) = d.[Year]
             AND MONTH(h.OrderDate) = d.[Month]
       );
@@ -105,8 +105,8 @@ BEGIN
         MAX(h.OrderDate) AS LatestSale,
         MIN(d.DueDate)   AS EarliestDue,
         MAX(d.DueDate)   AS LatestDue
-    FROM SalesOrderHeader h
-    JOIN SalesOrderDetail d ON d.SalesOrderNumber = h.SalesOrderNumber;
+    FROM OrderHeader h
+    JOIN OrderDetail d ON d.OrderNumber = h.OrderNumber;
     -- EXPECTED: EarliestSale >= config start date, LatestSale <= config end date
     --           DueDate may extend slightly past end date (fulfillment lag)
 END
@@ -162,7 +162,7 @@ END
 ELSE IF @has_header = 1
 BEGIN
     SELECT DISTINCT h.OrderDate
-    FROM SalesOrderHeader h
+    FROM OrderHeader h
     LEFT JOIN ExchangeRates er ON er.Date = h.OrderDate
     WHERE er.Date IS NULL;
     -- EXPECTED: zero rows (every sales day has FX coverage)
@@ -198,7 +198,7 @@ END
 ELSE IF @has_header = 1
 BEGIN
     SELECT COUNT(*) AS OrphanedDates
-    FROM SalesOrderHeader h
+    FROM OrderHeader h
     LEFT JOIN Dates d ON d.DateKey = h.TimeKey
     WHERE d.DateKey IS NULL;
     -- EXPECTED: zero
@@ -362,10 +362,10 @@ BEGIN
         SELECT d.[Year], d.[Month]
         FROM Dates d
         WHERE d.[Day] = 1
-          AND d.Date BETWEEN (SELECT MIN(OrderDate) FROM SalesOrderHeader)
-                         AND (SELECT MAX(OrderDate) FROM SalesOrderHeader)
+          AND d.Date BETWEEN (SELECT MIN(OrderDate) FROM OrderHeader)
+                         AND (SELECT MAX(OrderDate) FROM OrderHeader)
           AND NOT EXISTS (
-              SELECT 1 FROM SalesOrderHeader h
+              SELECT 1 FROM OrderHeader h
               WHERE YEAR(h.OrderDate) = d.[Year]
                 AND MONTH(h.OrderDate) = d.[Month]
           )
@@ -385,7 +385,7 @@ BEGIN
         'ExchangeRates must have rates for every day with sales; FAIL = sales date has no FX rate available',
         CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END
     FROM (
-        SELECT DISTINCT h.OrderDate FROM SalesOrderHeader h
+        SELECT DISTINCT h.OrderDate FROM OrderHeader h
         LEFT JOIN ExchangeRates er ON er.Date = h.OrderDate
         WHERE er.Date IS NULL
     ) x

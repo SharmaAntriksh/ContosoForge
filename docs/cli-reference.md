@@ -24,7 +24,7 @@ python main.py [OPTIONS]
 | `--workers N` | Parallel worker count (default: auto-detect from CPU count) |
 | `--chunk-size N` | Rows per processing chunk (default 1,000,000) |
 | `--row-group-size N` | Parquet row group size |
-| `--skip-order-cols` | Omit `SalesOrderNumber` / `LineNumber` columns |
+| `--skip-order-cols` | Omit `OrderNumber` / `OrderLineNumber` columns |
 | `--only dimensions\|sales` | Run only one pipeline stage |
 | `--regen-dimensions [names]` | Force regeneration of specific dimensions (or `all`) |
 | `--refresh-fx-master` | Top up FX rates via Yahoo Finance and exit (no pipeline run) |
@@ -60,7 +60,7 @@ python main.py --format parquet --row-group-size 500000
 ```
 
 ### `--skip-order-cols`
-Omit `SalesOrderNumber` and `LineNumber` columns from the sales fact. Saves space when those columns aren't needed. Note: returns are auto-disabled when this flag is on with `sales_output='sales'`, because returns need `SalesOrderNumber` to link back.
+Omit `OrderNumber` and `OrderLineNumber` columns from the sales fact. Saves space when those columns aren't needed. Note: returns are auto-disabled when this flag is on with `sales_output='sales'`, because returns need `OrderNumber` to link back.
 
 ---
 

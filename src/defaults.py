@@ -197,12 +197,11 @@ STORE_EU_COUNTRY_CODES = [33, 34, 39, 49, 31, 32, 41, 46, 47, 45]
 #  EMPLOYEE_DEFAULTS
 # =================================================================
 
-# Gender distribution for employees: {other, female, male}
-# Thresholds: u < other → "O"; u < other + female → "F"; else → "M"
+# Gender distribution for employees (persons): Male / Female only.
+# Threshold: u < female gives "Female", else "Male".
 EMPLOYEE_GENDER_PROBS: Dict[str, float] = {
-    "other": 0.02,
-    "female": 0.49,
-    "male": 0.49,
+    "female": 0.5,
+    "male": 0.5,
 }
 if abs(sum(EMPLOYEE_GENDER_PROBS.values()) - 1.0) > 1e-9:
     raise ValidationError(
@@ -283,10 +282,11 @@ CUSTOMER_INCOME_MIN = 20_000
 CUSTOMER_INCOME_MAX = 600_000
 CUSTOMER_MAX_CHILDREN = 5  # exclusive upper bound for rng.integers
 
-# Output encoding for the Gender column. Generation uses the readable internal
-# labels (Male/Female for persons, Org for organizations) so name pools and
-# household spouse-matching keep working; the final dimension emits single-char
-# codes (O = Organization). Applied at the generator's output boundary.
+# Maps the readable Gender label to the single-char GenderCode. Generation uses
+# the readable internal labels (Male/Female for persons, Org for organizations)
+# so name pools and household spouse-matching keep working; the final dimension
+# keeps Gender readable AND emits a parallel GenderCode column (O = Organization).
+# Applied at the generator's output boundary.
 CUSTOMER_GENDER_CODE_MAP = {"Male": "M", "Female": "F", "Org": "O"}
 
 # Per-channel marketing consent. A shared latent receptiveness (BASE) gates all
@@ -780,7 +780,7 @@ def _validate_probability_arrays() -> None:
 #  SALES CHANNEL DEFAULTS
 # =================================================================
 # Core channel keys (1-5) match lookups.py defaults.
-# Used as fallback when sales_channels.parquet is not available.
+# Used as fallback when channels.parquet is not available.
 SALES_CHANNEL_CORE_KEYS = np.array([1, 2, 3, 4, 5], dtype=np.int32)
 SALES_CHANNEL_CORE_KEYS.flags.writeable = False
 
@@ -811,7 +811,7 @@ STORE_TYPE_CHANNEL_MAP = {
 DEFAULT_CHANNEL_MAP = (np.array([1, 2, 3, 5], dtype=np.int16),
                        np.array([0.40, 0.30, 0.15, 0.15], dtype=np.float64))
 
-# Default channel fulfillment days (overridden at runtime from sales_channels.parquet)
+# Default channel fulfillment days (overridden at runtime from channels.parquet)
 DEFAULT_CHANNEL_FULFILLMENT_DAYS = np.array(
     [0, 0, 3, 5, 7, 2, 3, 3, 5, 7, 0], dtype=np.int32,
 )  # [Unknown, Store, Online, Marketplace, B2B, CallCenter, Web, MobileApp, SocialCommerce, PartnerReseller, Kiosk]

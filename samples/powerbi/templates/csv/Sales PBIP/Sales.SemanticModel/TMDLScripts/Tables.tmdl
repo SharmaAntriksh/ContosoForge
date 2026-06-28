@@ -5,7 +5,7 @@ createOrReplace
 
 		measure '# Customers' =
 				
-				DISTINCTCOUNT ( SalesOrderHeader[CustomerKey] )
+				DISTINCTCOUNT ( OrderHeader[CustomerKey] )
 			formatString: #,0
 			displayFolder: 01 - Base Measures
 			lineageTag: 6ec8f0ae-723d-46cd-b46d-b9c1cedc3068
@@ -15,8 +15,8 @@ createOrReplace
 		measure 'Cost Amount' = ```
 				
 				SUMX ( 
-				    SalesOrderDetail, 
-				    SalesOrderDetail[Quantity] * SalesOrderDetail[UnitCost]
+				    OrderDetail, 
+				    OrderDetail[Quantity] * OrderDetail[UnitCost]
 				)
 				```
 			formatString: \$#,0.###############;(\$#,0.###############);\$#,0.###############
@@ -41,8 +41,8 @@ createOrReplace
 		measure 'Sales Amount' = ```
 				
 				SUMX ( 
-				    SalesOrderDetail, 
-				    SalesOrderDetail[Quantity] * SalesOrderDetail[NetPrice]
+				    OrderDetail, 
+				    OrderDetail[Quantity] * OrderDetail[NetPrice]
 				)
 				```
 			formatString: #,0
@@ -56,8 +56,8 @@ createOrReplace
 		measure 'Sales Amount (SOD)' = ```
 				
 				SUMX ( 
-				    SalesOrderDetail, 
-				    SalesOrderDetail[Quantity] * SalesOrderDetail[NetPrice]
+				    OrderDetail, 
+				    OrderDetail[Quantity] * OrderDetail[NetPrice]
 				)
 				```
 			formatString: #,0
@@ -70,7 +70,7 @@ createOrReplace
 
 		measure Transactions =
 				
-				COUNTROWS ( SalesOrderDetail )
+				COUNTROWS ( OrderDetail )
 			formatString: #,0
 			displayFolder: 01 - Base Measures
 			lineageTag: f941d2a9-2c52-4441-ba75-afa6c2f91413
@@ -94,8 +94,8 @@ createOrReplace
 				                CALCULATE ( MAX ( EmployeeStoreAssignment[EndDate] ) )
 				            )
 				        ),
-				        SalesOrderHeader[StoreKey],
-				        SalesOrderHeader[SalesPersonEmployeeKey],
+				        OrderHeader[StoreKey],
+				        OrderHeader[SalesPersonEmployeeKey],
 				        Dates[Date]
 				    )
 				)
@@ -1556,12 +1556,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesPersonFlag
+		column IsSalesperson
 			dataType: int64
 			formatString: 0
 			lineageTag: f1818d93-79b1-4311-9124-1a94cc8ea803
 			summarizeBy: sum
-			sourceColumn: SalesPersonFlag
+			sourceColumn: IsSalesperson
 
 			annotation SummarizationSetBy = Automatic
 
@@ -1620,7 +1620,7 @@ createOrReplace
 					            { "StartDate", type date },
 					            { "EndDate", type date },
 					            { "Status", type text },
-					            { "SalesPersonFlag", Int64.Type },
+					            { "IsSalesperson", Int64.Type },
 					            { "IsSalesPerson", Int64.Type },
 					            { "DepartmentName", type text }
 					        }
@@ -2574,21 +2574,21 @@ createOrReplace
 	table Sales
 		lineageTag: 98d27fd9-d067-4f71-8701-62e4cf08a2f5
 
-		column SalesOrderNumber
+		column OrderNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: 65df8146-1199-43ff-a8b3-0709583ed02a
 			summarizeBy: sum
-			sourceColumn: SalesOrderNumber
+			sourceColumn: OrderNumber
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesOrderLineNumber
+		column OrderLineNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: e69c2d84-eba5-46ff-ac4e-23ee9db30392
 			summarizeBy: sum
-			sourceColumn: SalesOrderLineNumber
+			sourceColumn: OrderLineNumber
 
 			annotation SummarizationSetBy = Automatic
 
@@ -2646,12 +2646,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesChannelKey
+		column ChannelKey
 			dataType: int64
 			formatString: 0
 			lineageTag: 799a98da-8823-4ae7-a0b2-5a65e8c2257f
 			summarizeBy: count
-			sourceColumn: SalesChannelKey
+			sourceColumn: ChannelKey
 
 			annotation SummarizationSetBy = Automatic
 
@@ -2787,8 +2787,8 @@ createOrReplace
 					        Table.ColumnNames ( Transform_Sales_File ( Sample_File_Sales ) )
 					    ),
 					    DataTypes = {
-					        { "SalesOrderNumber", Int64.Type },
-					        { "SalesOrderLineNumber", Int64.Type },
+					        { "OrderNumber", Int64.Type },
+					        { "OrderLineNumber", Int64.Type },
 					        { "CustomerKey", Int64.Type },
 					        { "ProductKey", Int64.Type },
 					        { "StoreKey", Int64.Type },
@@ -2805,13 +2805,13 @@ createOrReplace
 					        { "DeliveryStatus", type text },
 					        { "IsOrderDelayed", Int64.Type },
 					        { "SalesPersonEmployeeKey", Int64.Type },
-					        { "SalesChannelKey", Int64.Type },
+					        { "ChannelKey", Int64.Type },
 					        { "TimeKey", Int64.Type }
 					    },
 					    CheckNamesForTypes =
 					        if List.ContainsAny (
 					            Table.ColumnNames ( CombineTables ),
-					            { "SalesOrderNumber", "SalesOrderLineNumber" }
+					            { "OrderNumber", "OrderLineNumber" }
 					        )
 					        then
 					            DataTypes
@@ -2825,23 +2825,23 @@ createOrReplace
 
 		annotation PBI_ResultType = Table
 
-	table SalesChannel
+	table Channel
 		lineageTag: 58913eb8-bce8-4850-8386-331ac43caa89
 
-		column SalesChannelKey
+		column ChannelKey
 			dataType: int64
 			formatString: 0
 			lineageTag: 48ab08aa-e611-42ad-8dc9-3a58ca6fafaa
 			summarizeBy: count
-			sourceColumn: SalesChannelKey
+			sourceColumn: ChannelKey
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesChannel
+		column Channel
 			dataType: string
 			lineageTag: 274acb0b-4880-4bc2-8d1e-384c8e60d625
 			summarizeBy: none
-			sourceColumn: SalesChannel
+			sourceColumn: Channel
 
 			annotation SummarizationSetBy = Automatic
 
@@ -2853,11 +2853,11 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesChannelCode
+		column ChannelCode
 			dataType: string
 			lineageTag: 34a51e52-ca53-496f-a450-6b522e8a41c4
 			summarizeBy: none
-			sourceColumn: SalesChannelCode
+			sourceColumn: ChannelCode
 
 			annotation SummarizationSetBy = Automatic
 
@@ -2959,19 +2959,19 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		partition SalesChannel = m
+		partition Channel = m
 			mode: import
 			queryGroup: Dimensions
 			source =
 					let
-					    Source = FxReadCSVFile ( "dimensions", "sales_channels" ),
+					    Source = FxReadCSVFile ( "dimensions", "channels" ),
 					    ChangedType = Table.TransformColumnTypes (
 					        Source,
 					        {
-					            { "SalesChannelKey", Int64.Type },
-					            { "SalesChannel", type text },
+					            { "ChannelKey", Int64.Type },
+					            { "Channel", type text },
 					            { "ChannelGroup", type text },
-					            { "SalesChannelCode", type text },
+					            { "ChannelCode", type text },
 					            { "SortOrder", Int64.Type },
 					            { "IsDigital", Int64.Type },
 					            { "IsPhysical", Int64.Type },
@@ -2992,29 +2992,29 @@ createOrReplace
 
 		annotation PBI_ResultType = Table
 
-	table SalesOrderDetail
+	table OrderDetail
 		isHidden
 		lineageTag: 72237aef-7edb-4861-ab7a-68fcd65161ea
 
-		column SalesOrderNumber
+		column OrderNumber
 			dataType: int64
 			isHidden
 			formatString: 0
 			lineageTag: 69d80e65-99c7-4ad3-bc29-5f988106b0bc
 			summarizeBy: sum
-			sourceColumn: SalesOrderNumber
+			sourceColumn: OrderNumber
 
 			changedProperty = IsHidden
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesOrderLineNumber
+		column OrderLineNumber
 			dataType: int64
 			isHidden
 			formatString: 0
 			lineageTag: 817e2e59-9fac-4b3e-b9b8-2102970037fc
 			summarizeBy: sum
-			sourceColumn: SalesOrderLineNumber
+			sourceColumn: OrderLineNumber
 
 			changedProperty = IsHidden
 
@@ -3139,12 +3139,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		partition SalesOrderDetail = m
+		partition OrderDetail = m
 			mode: import
 			queryGroup: Fact
 			source =
 					let
-					    Source = Folder.Files ( ContosoFolder & "\facts\sales_order_detail" ),
+					    Source = Folder.Files ( ContosoFolder & "\facts\order_detail" ),
 					    FilterHidden = Table.SelectRows ( Source, each [Attributes]?[Hidden]? <> true ),
 					    InvokeCustomFunction = Table.AddColumn (
 					        FilterHidden,
@@ -3161,8 +3161,8 @@ createOrReplace
 					    CombineTables = Table.TransformColumnTypes (
 					        ExpandTable,
 					        {
-					            { "SalesOrderNumber", Int64.Type },
-					            { "SalesOrderLineNumber", Int64.Type },
+					            { "OrderNumber", Int64.Type },
+					            { "OrderLineNumber", Int64.Type },
 					            { "ProductKey", Int64.Type },
 					            { "DueDate", type date },
 					            { "DeliveryDate", type date },
@@ -3183,17 +3183,17 @@ createOrReplace
 
 		annotation PBI_ResultType = Table
 
-	table SalesOrderHeader
+	table OrderHeader
 		isHidden
 		lineageTag: a6858967-9b2f-4631-b1db-1fc3279814ea
 
-		column SalesOrderNumber
+		column OrderNumber
 			dataType: int64
 			isHidden
 			formatString: 0
 			lineageTag: f54cd52d-191e-41c3-9c06-c3c4c0b2941a
 			summarizeBy: sum
-			sourceColumn: SalesOrderNumber
+			sourceColumn: OrderNumber
 
 			changedProperty = IsHidden
 
@@ -3273,12 +3273,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesChannelKey
+		column ChannelKey
 			dataType: int64
 			formatString: 0
 			lineageTag: 1e5cec2c-633d-40c2-8b4e-c787cc16de2a
 			summarizeBy: count
-			sourceColumn: SalesChannelKey
+			sourceColumn: ChannelKey
 
 			annotation SummarizationSetBy = Automatic
 
@@ -3291,12 +3291,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		partition SalesOrderHeader = m
+		partition OrderHeader = m
 			mode: import
 			queryGroup: Fact
 			source =
 					let
-					    Source = Folder.Files ( ContosoFolder & "\facts\sales_order_header" ),
+					    Source = Folder.Files ( ContosoFolder & "\facts\order_header" ),
 					    FilterHidden = Table.SelectRows ( Source, each [Attributes]?[Hidden]? <> true ),
 					    InvokeCustomFunction = Table.AddColumn (
 					        FilterHidden,
@@ -3313,11 +3313,11 @@ createOrReplace
 					    ChangedType = Table.TransformColumnTypes (
 					        ExpandTable,
 					        {
-					            { "SalesOrderNumber", Int64.Type },
+					            { "OrderNumber", Int64.Type },
 					            { "CustomerKey", Int64.Type },
 					            { "StoreKey", Int64.Type },
 					            { "SalesPersonEmployeeKey", Int64.Type },
-					            { "SalesChannelKey", Int64.Type },
+					            { "ChannelKey", Int64.Type },
 					            { "OrderDate", type date },
 					            { "TimeKey", Int64.Type },
 					            { "IsOrderDelayed", Int64.Type },
@@ -3334,24 +3334,24 @@ createOrReplace
 
 		annotation PBI_ResultType = Table
 
-	table SalesReturns
+	table Returns
 		lineageTag: e5942e12-813c-4803-97fb-879b388a5987
 
-		column SalesOrderNumber
+		column OrderNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: 6f44264e-b30f-45fd-bc01-cb9ec8c8f392
 			summarizeBy: sum
-			sourceColumn: SalesOrderNumber
+			sourceColumn: OrderNumber
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesOrderLineNumber
+		column OrderLineNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: 00d34491-6def-4c63-8e04-3d7a1e728452
 			summarizeBy: sum
-			sourceColumn: SalesOrderLineNumber
+			sourceColumn: OrderLineNumber
 
 			annotation SummarizationSetBy = Automatic
 
@@ -3404,30 +3404,30 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		partition SalesReturns = m
+		partition Returns = m
 			mode: import
 			queryGroup: Fact
 			source =
 					let
-					    Source = Folder.Files ( ContosoFolder & "\facts\sales_return" ),
+					    Source = Folder.Files ( ContosoFolder & "\facts\returns" ),
 					    RemoveCols = Table.SelectColumns ( Source, { "Content" } ),
 					    RemoveHidden = Table.SelectRows ( RemoveCols, each [Attributes]?[Hidden]? <> true ),
 					    InvokeCustom = Table.AddColumn (
 					        RemoveHidden,
 					        "Transform File",
-					        each Transform_SalesReturns_File ( [Content] )
+					        each Transform_Returns_File ( [Content] )
 					    ),
 					    RemoveOtherCol = Table.SelectColumns ( InvokeCustom, { "Transform File" } ),
 					    CombineTables = Table.ExpandTableColumn (
 					        RemoveOtherCol,
 					        "Transform File",
-					        Table.ColumnNames ( Transform_SalesReturns_File ( Sample_File_SalesReturns ) )
+					        Table.ColumnNames ( Transform_Returns_File ( Sample_File_Returns ) )
 					    ),
 					    ChangeType = Table.TransformColumnTypes (
 					        CombineTables,
 					        {
-					            { "SalesOrderNumber", Int64.Type },
-					            { "SalesOrderLineNumber", Int64.Type },
+					            { "OrderNumber", Int64.Type },
+					            { "OrderLineNumber", Int64.Type },
 					            { "ReturnDate", type date },
 					            { "ReturnReasonKey", Int64.Type },
 					            { "ReturnQuantity", Int64.Type },

@@ -231,12 +231,12 @@ table Employee
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesPersonFlag
+	column IsSalesperson
 		dataType: int64
 		formatString: 0
 		lineageTag: f1818d93-79b1-4311-9124-1a94cc8ea803
 		summarizeBy: sum
-		sourceColumn: SalesPersonFlag
+		sourceColumn: IsSalesperson
 
 		annotation SummarizationSetBy = Automatic
 
@@ -298,7 +298,7 @@ table Employee
 		source =
 				let
 				    Source = FxReadCSVFile ( "dimensions", "employees" ),
-				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"EmployeeKey", Int64.Type}, {"ParentEmployeeKey", Int64.Type}, {"EmployeeName", type text}, {"Title", type text}, {"OrgLevel", Int64.Type}, {"OrgUnitType", type text}, {"RegionId", Int64.Type}, {"DistrictId", Int64.Type}, {"StoreKey", Int64.Type}, {"GeographyKey", Int64.Type}, {"HireDate", type date}, {"TerminationDate", type date}, {"TerminationReason", type text}, {"IsActive", Int64.Type}, {"EmploymentType", type text}, {"FTE", type number}, {"Gender", type text}, {"FirstName", type text}, {"LastName", type text}, {"MiddleName", type text}, {"BirthDate", type date}, {"MaritalStatus", type text}, {"EmailAddress", type text}, {"Phone", Int64.Type}, {"EmergencyContactName", type text}, {"EmergencyContactPhone", Int64.Type}, {"SalariedFlag", Int64.Type}, {"PayFrequency", Int64.Type}, {"BaseRate", type number}, {"VacationHours", Int64.Type}, {"Status", type text}, {"SalesPersonFlag", Int64.Type}, {"DepartmentName", type text}})
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"EmployeeKey", Int64.Type}, {"ParentEmployeeKey", Int64.Type}, {"EmployeeName", type text}, {"Title", type text}, {"OrgLevel", Int64.Type}, {"OrgUnitType", type text}, {"RegionId", Int64.Type}, {"DistrictId", Int64.Type}, {"StoreKey", Int64.Type}, {"GeographyKey", Int64.Type}, {"HireDate", type date}, {"TerminationDate", type date}, {"TerminationReason", type text}, {"IsActive", Int64.Type}, {"EmploymentType", type text}, {"FTE", type number}, {"Gender", type text}, {"FirstName", type text}, {"LastName", type text}, {"MiddleName", type text}, {"BirthDate", type date}, {"MaritalStatus", type text}, {"EmailAddress", type text}, {"Phone", Int64.Type}, {"EmergencyContactName", type text}, {"EmergencyContactPhone", Int64.Type}, {"SalariedFlag", Int64.Type}, {"PayFrequency", Int64.Type}, {"BaseRate", type number}, {"VacationHours", Int64.Type}, {"Status", type text}, {"IsSalesperson", Int64.Type}, {"DepartmentName", type text}})
 				in
 				    #"Changed Type"
 

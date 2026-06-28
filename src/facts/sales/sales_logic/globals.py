@@ -269,7 +269,7 @@ class State(metaclass=_SealableMeta):
     country_to_store_keys = None     # list[np.ndarray]: country_id -> store keys
 
     # Store type -> channel constraint
-    store_channel_keys = None        # list[np.ndarray]: StoreKey -> valid SalesChannelKey[]
+    store_channel_keys = None        # list[np.ndarray]: StoreKey -> valid ChannelKey[]
     channel_prob_by_store = None     # list[np.ndarray]: StoreKey -> probability[] (aligned with store_channel_keys)
 
     # Product channel eligibility (aligned with product_np rows)
@@ -279,7 +279,7 @@ class State(metaclass=_SealableMeta):
     promo_channel_group = None       # int8: per promo — 0=any, 1=physical, 2=digital
 
     # Channel-aware delivery
-    channel_fulfillment_days = None  # dense int32: SalesChannelKey -> typical fulfillment days
+    channel_fulfillment_days = None  # dense int32: ChannelKey -> typical fulfillment days
 
     # --------------------------------------------------------------
     # Budget streaming aggregation (worker-side lookups)
@@ -321,13 +321,13 @@ class State(metaclass=_SealableMeta):
     row_group_size = None
     compression = None
 
-    # Forward-compat aliases for SalesOrderNumber generation
+    # Forward-compat aliases for OrderNumber generation
     order_id_stride_orders = None      # usually == chunk_size
 
-    # Day-based order ID ranges (ensures SalesOrderNumber ~ OrderDate)
+    # Day-based order ID ranges (ensures OrderNumber ~ OrderDate)
     month_stride = None                # total ID space per day (num_chunks * per_chunk_alloc)
     per_chunk_alloc = None             # ID slots each chunk owns within a day
-    order_id_int64 = False             # emit SalesOrderNumber as int64 (large runs)
+    order_id_int64 = False             # emit OrderNumber as int64 (large runs)
 
     # used by task.py when deciding to drop order cols in Sales output
     skip_order_cols_requested = None

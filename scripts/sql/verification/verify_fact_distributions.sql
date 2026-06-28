@@ -5,12 +5,12 @@
 --
 -- Supports both sales_output modes:
 --   sales        -> single Sales table
---   sales_order  -> SalesOrderHeader + SalesOrderDetail tables
+--   sales_order  -> OrderHeader + OrderDetail tables
 -- ============================================================================
 
 -- Detect which sales table exists
 DECLARE @has_sales  BIT = CASE WHEN OBJECT_ID('dbo.Sales') IS NOT NULL THEN 1 ELSE 0 END;
-DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.SalesOrderHeader') IS NOT NULL THEN 1 ELSE 0 END;
+DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.OrderHeader') IS NOT NULL THEN 1 ELSE 0 END;
 
 
 -- ============================================================================
@@ -24,7 +24,7 @@ BEGIN
         YEAR(OrderDate)                                                 AS SalesYear,
         MONTH(OrderDate)                                                AS SalesMonth,
         COUNT(*)                                                        AS LineItems,
-        COUNT(DISTINCT SalesOrderNumber)                                AS Orders,
+        COUNT(DISTINCT OrderNumber)                                AS Orders,
         CAST(SUM(NetPrice) AS DECIMAL(18,2))                            AS Revenue,
         CAST(AVG(NetPrice) AS DECIMAL(10,2))                            AS AvgLinePrice
     FROM Sales
@@ -39,11 +39,11 @@ BEGIN
         YEAR(h.OrderDate)                                               AS SalesYear,
         MONTH(h.OrderDate)                                              AS SalesMonth,
         COUNT(*)                                                        AS LineItems,
-        COUNT(DISTINCT h.SalesOrderNumber)                              AS Orders,
+        COUNT(DISTINCT h.OrderNumber)                              AS Orders,
         CAST(SUM(d.NetPrice) AS DECIMAL(18,2))                          AS Revenue,
         CAST(AVG(d.NetPrice) AS DECIMAL(10,2))                          AS AvgLinePrice
-    FROM SalesOrderHeader h
-    JOIN SalesOrderDetail d ON d.SalesOrderNumber = h.SalesOrderNumber
+    FROM OrderHeader h
+    JOIN OrderDetail d ON d.OrderNumber = h.OrderNumber
     GROUP BY YEAR(h.OrderDate), MONTH(h.OrderDate)
     ORDER BY SalesYear, SalesMonth;
     -- EXPECTED: variation across months; Q4 typically higher (holiday season)
@@ -55,7 +55,7 @@ BEGIN
     SELECT
         YEAR(OrderDate)                                                 AS SalesYear,
         COUNT(*)                                                        AS LineItems,
-        COUNT(DISTINCT SalesOrderNumber)                                AS Orders,
+        COUNT(DISTINCT OrderNumber)                                AS Orders,
         CAST(SUM(NetPrice) AS DECIMAL(18,2))                            AS Revenue
     FROM Sales
     GROUP BY YEAR(OrderDate)
@@ -67,10 +67,10 @@ BEGIN
     SELECT
         YEAR(h.OrderDate)                                               AS SalesYear,
         COUNT(*)                                                        AS LineItems,
-        COUNT(DISTINCT h.SalesOrderNumber)                              AS Orders,
+        COUNT(DISTINCT h.OrderNumber)                              AS Orders,
         CAST(SUM(d.NetPrice) AS DECIMAL(18,2))                          AS Revenue
-    FROM SalesOrderHeader h
-    JOIN SalesOrderDetail d ON d.SalesOrderNumber = h.SalesOrderNumber
+    FROM OrderHeader h
+    JOIN OrderDetail d ON d.OrderNumber = h.OrderNumber
     GROUP BY YEAR(h.OrderDate)
     ORDER BY SalesYear;
     -- EXPECTED: generally increasing trend (macro demand curve)
@@ -104,11 +104,11 @@ BEGIN
         COUNT(*)                                                        AS LineItems,
         CAST(SUM(d.NetPrice) AS DECIMAL(18,2))                          AS Revenue,
         CAST(SUM(d.NetPrice) * 100.0 / (
-            SELECT SUM(d2.NetPrice) FROM SalesOrderHeader h2
-            JOIN SalesOrderDetail d2 ON d2.SalesOrderNumber = h2.SalesOrderNumber
+            SELECT SUM(d2.NetPrice) FROM OrderHeader h2
+            JOIN OrderDetail d2 ON d2.OrderNumber = h2.OrderNumber
         ) AS DECIMAL(5,2)) AS PctOfTotal
-    FROM SalesOrderHeader h
-    JOIN SalesOrderDetail d ON d.SalesOrderNumber = h.SalesOrderNumber
+    FROM OrderHeader h
+    JOIN OrderDetail d ON d.OrderNumber = h.OrderNumber
     JOIN Customers c ON c.CustomerKey = h.CustomerKey
     GROUP BY c.CustomerKey, c.CustomerName
     ORDER BY Revenue DESC;
@@ -136,9 +136,9 @@ BEGIN
         p.ProductName,
         SUM(d.Quantity)                                                 AS UnitsSold,
         CAST(SUM(d.Quantity) * 100.0 / (
-            SELECT SUM(d2.Quantity) FROM SalesOrderDetail d2
+            SELECT SUM(d2.Quantity) FROM OrderDetail d2
         ) AS DECIMAL(5,2)) AS PctOfUnits
-    FROM SalesOrderDetail d
+    FROM OrderDetail d
     JOIN Products p ON p.ProductKey = d.ProductKey
     GROUP BY p.ProductKey, p.ProductName
     ORDER BY UnitsSold DESC;
@@ -168,11 +168,11 @@ BEGIN
         s.StoreType,
         COUNT(*)                                                        AS LineItems,
         CAST(SUM(d.NetPrice) * 100.0 / (
-            SELECT SUM(d2.NetPrice) FROM SalesOrderHeader h2
-            JOIN SalesOrderDetail d2 ON d2.SalesOrderNumber = h2.SalesOrderNumber
+            SELECT SUM(d2.NetPrice) FROM OrderHeader h2
+            JOIN OrderDetail d2 ON d2.OrderNumber = h2.OrderNumber
         ) AS DECIMAL(5,2)) AS PctOfTotal
-    FROM SalesOrderHeader h
-    JOIN SalesOrderDetail d ON d.SalesOrderNumber = h.SalesOrderNumber
+    FROM OrderHeader h
+    JOIN OrderDetail d ON d.OrderNumber = h.OrderNumber
     JOIN Stores s ON s.StoreKey = h.StoreKey
     GROUP BY s.StoreKey, s.StoreName, s.StoreType
     ORDER BY PctOfTotal DESC;
@@ -219,7 +219,7 @@ BEGIN
             WHEN UnitPrice < 1000  THEN '$500-1000'
             ELSE '$1000+'
         END AS PriceBand
-        FROM SalesOrderDetail
+        FROM OrderDetail
     ) x
     GROUP BY PriceBand
     ORDER BY PriceBand;
@@ -245,7 +245,7 @@ BEGIN
         COUNT(*)                                                        AS LineItems,
         CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS DECIMAL(5,1)) AS PctOfTotal,
         CAST(AVG(CASE WHEN DiscountAmount > 0 THEN DiscountAmount END) AS DECIMAL(10,2)) AS AvgDiscount
-    FROM SalesOrderDetail
+    FROM OrderDetail
     GROUP BY CASE WHEN DiscountAmount > 0 THEN 'Discounted' ELSE 'Full Price' END;
     -- EXPECTED: majority full price; discounted portion driven by promotion count
 END
@@ -261,7 +261,7 @@ END
 ELSE IF @has_header = 1
 BEGIN
     SELECT COUNT(*) AS ExceedCount
-    FROM SalesOrderDetail
+    FROM OrderDetail
     WHERE NetPrice > UnitPrice;
     -- EXPECTED: zero (selling price cannot exceed sticker price)
 END
@@ -279,9 +279,9 @@ BEGIN
         COUNT(*)                                                        AS OrderCount,
         CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS DECIMAL(5,1)) AS PctOfOrders
     FROM (
-        SELECT SalesOrderNumber, COUNT(*) AS LinesPerOrder
+        SELECT OrderNumber, COUNT(*) AS LinesPerOrder
         FROM Sales
-        GROUP BY SalesOrderNumber
+        GROUP BY OrderNumber
     ) x
     GROUP BY LinesPerOrder
     ORDER BY LinesPerOrder;
@@ -294,9 +294,9 @@ BEGIN
         COUNT(*)                                                        AS OrderCount,
         CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS DECIMAL(5,1)) AS PctOfOrders
     FROM (
-        SELECT SalesOrderNumber, COUNT(*) AS LinesPerOrder
-        FROM SalesOrderDetail
-        GROUP BY SalesOrderNumber
+        SELECT OrderNumber, COUNT(*) AS LinesPerOrder
+        FROM OrderDetail
+        GROUP BY OrderNumber
     ) x
     GROUP BY LinesPerOrder
     ORDER BY LinesPerOrder;
@@ -336,7 +336,7 @@ BEGIN
         END AS QuantityBand,
         COUNT(*)                                                        AS LineItems,
         CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS DECIMAL(5,1)) AS Pct
-    FROM SalesOrderDetail
+    FROM OrderDetail
     GROUP BY CASE
         WHEN Quantity = 1 THEN '1'
         WHEN Quantity BETWEEN 2 AND 3 THEN '2-3'
@@ -370,7 +370,7 @@ BEGIN
         DeliveryStatus,
         COUNT(*)                                                        AS LineItems,
         CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS DECIMAL(5,1)) AS Pct
-    FROM SalesOrderDetail
+    FROM OrderDetail
     GROUP BY DeliveryStatus
     ORDER BY LineItems DESC;
     -- EXPECTED: mostly "Delivered", small % "Pending"/"In Transit"/"Cancelled"
@@ -389,13 +389,13 @@ BEGIN
 END
 ELSE IF @has_header = 1
 BEGIN
-    -- IsOrderDelayed is on SalesOrderHeader
+    -- IsOrderDelayed is on OrderHeader
     SELECT
         COUNT(*)                                                        AS TotalOrders,
         SUM(CAST(IsOrderDelayed AS INT))                                AS DelayedOrders,
         CAST(SUM(CAST(IsOrderDelayed AS INT)) * 100.0
              / NULLIF(COUNT(*), 0) AS DECIMAL(5,1))                    AS PctDelayed
-    FROM SalesOrderHeader;
+    FROM OrderHeader;
     -- EXPECTED: delayed orders < 20%
 END
 
@@ -408,23 +408,23 @@ END
 IF @has_sales = 1
 BEGIN
     SELECT
-        (SELECT COUNT(DISTINCT SalesOrderNumber) FROM Sales)             AS TotalOrders,
-        COUNT(DISTINCT SalesOrderNumber)                                 AS ReturnedOrders,
-        CAST(COUNT(DISTINCT SalesOrderNumber) * 100.0
-             / NULLIF((SELECT COUNT(DISTINCT SalesOrderNumber) FROM Sales), 0)
+        (SELECT COUNT(DISTINCT OrderNumber) FROM Sales)             AS TotalOrders,
+        COUNT(DISTINCT OrderNumber)                                 AS ReturnedOrders,
+        CAST(COUNT(DISTINCT OrderNumber) * 100.0
+             / NULLIF((SELECT COUNT(DISTINCT OrderNumber) FROM Sales), 0)
              AS DECIMAL(5,2))                                           AS ReturnRatePct
-    FROM SalesReturn;
+    FROM [Returns];
     -- EXPECTED: ~3% (governed by returns.return_rate)
 END
 ELSE IF @has_header = 1
 BEGIN
     SELECT
-        (SELECT COUNT(DISTINCT SalesOrderNumber) FROM SalesOrderHeader)  AS TotalOrders,
-        COUNT(DISTINCT SalesOrderNumber)                                 AS ReturnedOrders,
-        CAST(COUNT(DISTINCT SalesOrderNumber) * 100.0
-             / NULLIF((SELECT COUNT(DISTINCT SalesOrderNumber) FROM SalesOrderHeader), 0)
+        (SELECT COUNT(DISTINCT OrderNumber) FROM OrderHeader)  AS TotalOrders,
+        COUNT(DISTINCT OrderNumber)                                 AS ReturnedOrders,
+        CAST(COUNT(DISTINCT OrderNumber) * 100.0
+             / NULLIF((SELECT COUNT(DISTINCT OrderNumber) FROM OrderHeader), 0)
              AS DECIMAL(5,2))                                           AS ReturnRatePct
-    FROM SalesReturn;
+    FROM [Returns];
     -- EXPECTED: ~3% (governed by returns.return_rate)
 END
 
@@ -443,9 +443,9 @@ BEGIN
             WHEN DATEDIFF(DAY, s.OrderDate, r.ReturnDate) BETWEEN 31 AND 60 THEN '31-60 days'
             ELSE '60+ days'
         END AS DaysBand
-        FROM SalesReturn r
-        JOIN Sales s ON s.SalesOrderNumber = r.SalesOrderNumber
-                    AND s.SalesOrderLineNumber = r.SalesOrderLineNumber
+        FROM [Returns] r
+        JOIN Sales s ON s.OrderNumber = r.OrderNumber
+                    AND s.OrderLineNumber = r.OrderLineNumber
     ) x
     GROUP BY DaysBand
     ORDER BY DaysBand;
@@ -465,8 +465,8 @@ BEGIN
             WHEN DATEDIFF(DAY, h.OrderDate, r.ReturnDate) BETWEEN 31 AND 60 THEN '31-60 days'
             ELSE '60+ days'
         END AS DaysBand
-        FROM SalesReturn r
-        JOIN SalesOrderHeader h ON h.SalesOrderNumber = r.SalesOrderNumber
+        FROM [Returns] r
+        JOIN OrderHeader h ON h.OrderNumber = r.OrderNumber
     ) x
     GROUP BY DaysBand
     ORDER BY DaysBand;
@@ -478,7 +478,7 @@ SELECT
     rr.ReturnReason,
     COUNT(*)                                                        AS Returns,
     CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS DECIMAL(5,1)) AS Pct
-FROM SalesReturn r
+FROM [Returns] r
 JOIN ReturnReason rr ON rr.ReturnReasonKey = r.ReturnReasonKey
 GROUP BY rr.ReturnReason
 ORDER BY Returns DESC;
@@ -535,9 +535,9 @@ BEGIN
         'Return rate should match config (~3%); FAIL = returns are missing or over-generated',
         CASE WHEN x.RetRate BETWEEN 1.0 AND 5.0 THEN 'PASS' ELSE 'FAIL' END
     FROM (
-        SELECT COUNT(DISTINCT r.SalesOrderNumber) * 100.0
-               / NULLIF((SELECT COUNT(DISTINCT SalesOrderNumber) FROM Sales), 0) AS RetRate
-        FROM SalesReturn r
+        SELECT COUNT(DISTINCT r.OrderNumber) * 100.0
+               / NULLIF((SELECT COUNT(DISTINCT OrderNumber) FROM Sales), 0) AS RetRate
+        FROM [Returns] r
     ) x;
 END
 ELSE IF @has_header = 1
@@ -550,7 +550,7 @@ BEGIN
         SELECT STDEV(MonthlySales) / NULLIF(AVG(MonthlySales), 0) AS CoV
         FROM (
             SELECT YEAR(OrderDate) * 100 + MONTH(OrderDate) AS YM, COUNT(*) AS MonthlySales
-            FROM SalesOrderHeader GROUP BY YEAR(OrderDate), MONTH(OrderDate)
+            FROM OrderHeader GROUP BY YEAR(OrderDate), MONTH(OrderDate)
         ) m
     ) x
 
@@ -561,11 +561,11 @@ BEGIN
         CASE WHEN MAX(CustPct) < 5.0 THEN 'PASS' ELSE 'FAIL' END
     FROM (
         SELECT SUM(d.NetPrice) * 100.0 / (
-            SELECT SUM(d2.NetPrice) FROM SalesOrderHeader h2
-            JOIN SalesOrderDetail d2 ON d2.SalesOrderNumber = h2.SalesOrderNumber
+            SELECT SUM(d2.NetPrice) FROM OrderHeader h2
+            JOIN OrderDetail d2 ON d2.OrderNumber = h2.OrderNumber
         ) AS CustPct
-        FROM SalesOrderHeader h
-        JOIN SalesOrderDetail d ON d.SalesOrderNumber = h.SalesOrderNumber
+        FROM OrderHeader h
+        JOIN OrderDetail d ON d.OrderNumber = h.OrderNumber
         GROUP BY h.CustomerKey
     ) x
 
@@ -576,7 +576,7 @@ BEGIN
         CASE WHEN x.Mode1Pct > 30 THEN 'PASS' ELSE 'FAIL' END
     FROM (
         SELECT SUM(CASE WHEN Quantity = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS Mode1Pct
-        FROM SalesOrderDetail
+        FROM OrderDetail
     ) x
 
     UNION ALL
@@ -584,7 +584,7 @@ BEGIN
     SELECT 'Sales: NetPrice <= UnitPrice',
         'NetPrice must not exceed UnitPrice (selling price cannot exceed sticker price); FAIL = net exceeds list',
         CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END
-    FROM SalesOrderDetail WHERE NetPrice > UnitPrice
+    FROM OrderDetail WHERE NetPrice > UnitPrice
 
     UNION ALL
 
@@ -592,8 +592,8 @@ BEGIN
         'Return rate should match config (~3%); FAIL = returns are missing or over-generated',
         CASE WHEN x.RetRate BETWEEN 1.0 AND 5.0 THEN 'PASS' ELSE 'FAIL' END
     FROM (
-        SELECT COUNT(DISTINCT r.SalesOrderNumber) * 100.0
-               / NULLIF((SELECT COUNT(DISTINCT SalesOrderNumber) FROM SalesOrderHeader), 0) AS RetRate
-        FROM SalesReturn r
+        SELECT COUNT(DISTINCT r.OrderNumber) * 100.0
+               / NULLIF((SELECT COUNT(DISTINCT OrderNumber) FROM OrderHeader), 0) AS RetRate
+        FROM [Returns] r
     ) x;
 END

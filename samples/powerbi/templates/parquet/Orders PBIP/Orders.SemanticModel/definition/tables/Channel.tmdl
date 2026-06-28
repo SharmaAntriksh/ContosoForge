@@ -1,34 +1,34 @@
-table SalesChannel
-	lineageTag: 58345d4a-ca8f-4681-a02c-ddf07824b262
+table Channel
+	lineageTag: 754b0e32-65c9-4018-a902-5287bfbbe2f4
 
-	column SalesChannelKey
+	column ChannelKey
 		dataType: int64
 		formatString: 0
-		lineageTag: 7fa10691-46f2-4382-badb-a7f8ba6d81e2
+		lineageTag: 42a9a2e6-3717-4ed9-b312-93d1eb34fc6f
 		summarizeBy: count
-		sourceColumn: SalesChannelKey
+		sourceColumn: ChannelKey
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannel
+	column Channel
 		dataType: string
-		lineageTag: 09c6eb7e-015f-4741-ab4a-87d0f3303f56
+		lineageTag: b9d3527d-7f36-4167-b1e1-fdb8c8e9aff4
 		summarizeBy: none
-		sourceColumn: SalesChannel
+		sourceColumn: Channel
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelDescription
+	column ChannelDescription
 		dataType: string
-		lineageTag: 9ec33bc8-a141-4fcd-82c6-3877146ced6c
+		lineageTag: 5bedb25a-6ab6-4686-b8d8-bd6c4606a4b7
 		summarizeBy: none
-		sourceColumn: SalesChannelDescription
+		sourceColumn: ChannelDescription
 
 		annotation SummarizationSetBy = Automatic
 
 	column ChannelGroup
 		dataType: string
-		lineageTag: d3f6b063-8e5d-4d69-b7f9-0aa1368abc42
+		lineageTag: 86067ba1-49f4-4c55-98df-301be60b1379
 		summarizeBy: none
 		sourceColumn: ChannelGroup
 
@@ -36,24 +36,24 @@ table SalesChannel
 
 	column ChannelGroupDescription
 		dataType: string
-		lineageTag: 3b79f79d-dd1d-4b5c-8444-67e948a04e0b
+		lineageTag: 2de32445-b849-4c0b-a5d2-05aee14bf90d
 		summarizeBy: none
 		sourceColumn: ChannelGroupDescription
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelCode
+	column ChannelCode
 		dataType: string
-		lineageTag: 7779561a-d3d1-4bde-a5ea-bfa1c56d23f6
+		lineageTag: 39b67101-3e67-4769-bc3b-dcaf26cb3050
 		summarizeBy: none
-		sourceColumn: SalesChannelCode
+		sourceColumn: ChannelCode
 
 		annotation SummarizationSetBy = Automatic
 
 	column SortOrder
 		dataType: int64
 		formatString: 0
-		lineageTag: c38a78ee-e00c-4f5b-a6e3-afcd7f9997b3
+		lineageTag: eb887182-d2de-46c0-a9da-835b8268720e
 		summarizeBy: sum
 		sourceColumn: SortOrder
 
@@ -62,7 +62,7 @@ table SalesChannel
 	column IsDigital
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
-		lineageTag: 48fb3608-cbcb-49c6-a429-1e7348b1f146
+		lineageTag: 19c9353c-8346-4a50-a7f1-52865a65677f
 		summarizeBy: none
 		sourceColumn: IsDigital
 
@@ -71,7 +71,7 @@ table SalesChannel
 	column IsPhysical
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
-		lineageTag: efe98a8f-647f-4342-b390-d58551f76470
+		lineageTag: d9c11d2a-a7a4-41ac-830e-ad4e36cf1023
 		summarizeBy: none
 		sourceColumn: IsPhysical
 
@@ -80,7 +80,7 @@ table SalesChannel
 	column IsThirdParty
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
-		lineageTag: 19c195f8-cca0-418a-a870-5c5244cf6d4d
+		lineageTag: 445a33b3-6091-4bba-a1c3-0bc8ec58088b
 		summarizeBy: none
 		sourceColumn: IsThirdParty
 
@@ -89,7 +89,7 @@ table SalesChannel
 	column IsB2B
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
-		lineageTag: a81534bb-f960-4075-80a7-2b252936f279
+		lineageTag: 10a7e3a4-0c24-47f8-8e21-95919d5bb315
 		summarizeBy: none
 		sourceColumn: IsB2B
 
@@ -98,7 +98,7 @@ table SalesChannel
 	column IsAssisted
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
-		lineageTag: b54fcc26-7ea4-425e-8018-af1cb9924992
+		lineageTag: 275be710-51ac-4942-9172-bbefe17b668a
 		summarizeBy: none
 		sourceColumn: IsAssisted
 
@@ -107,7 +107,7 @@ table SalesChannel
 	column IsOwnedChannel
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
-		lineageTag: 43a16a1a-45dd-4815-bdbe-0f1405b0b23c
+		lineageTag: b905b109-0c89-4934-a72f-123d5a026bc5
 		summarizeBy: none
 		sourceColumn: IsOwnedChannel
 
@@ -116,7 +116,7 @@ table SalesChannel
 	column Is24x7
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
-		lineageTag: 36c67edb-5f85-4a02-bd10-6420273b0966
+		lineageTag: 574f7c84-0e6a-4ec9-b638-899f7d00eaf5
 		summarizeBy: none
 		sourceColumn: Is24x7
 
@@ -124,7 +124,7 @@ table SalesChannel
 
 	column OpenTime
 		dataType: string
-		lineageTag: 797f21fa-722f-4153-8988-ad0fbc45dd69
+		lineageTag: 5cc8c465-31c8-4c9c-9432-069dd3e9a7cf
 		summarizeBy: none
 		sourceColumn: OpenTime
 
@@ -132,7 +132,7 @@ table SalesChannel
 
 	column CloseTime
 		dataType: string
-		lineageTag: d7302ce4-4a5d-45c0-8797-70d2f90be576
+		lineageTag: 3e76bba1-9bb8-4de7-b915-38474858e30d
 		summarizeBy: none
 		sourceColumn: CloseTime
 
@@ -140,7 +140,7 @@ table SalesChannel
 
 	column CommissionRate
 		dataType: double
-		lineageTag: 967dff71-12dd-48c1-a019-67310deb335c
+		lineageTag: 0c570de0-0089-4296-b03c-2a75c1fad7d0
 		summarizeBy: sum
 		sourceColumn: CommissionRate
 
@@ -151,23 +151,22 @@ table SalesChannel
 	column TypicalFulfillmentDays
 		dataType: int64
 		formatString: 0
-		lineageTag: 7002e91f-eb71-46f7-a446-32a9ef750207
+		lineageTag: fbc97fa2-98b5-4a0a-a3c0-32b4c15c1277
 		summarizeBy: sum
 		sourceColumn: TypicalFulfillmentDays
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesChannel = m
+	partition Channel = m
 		mode: import
 		queryGroup: Dimensions
 		source =
 				let
-				    Source     = FxReadParquetFile ( "dimensions\sales_channels" ),
-				    ChangeType = Table.TransformColumnTypes ( Source, { { "SalesChannelKey", Int64.Type } } )
+				    Source     = FxReadParquetFile ( "dimensions\channels" )
 				in
-				    ChangeType
-
-	annotation PBI_NavigationStepName = Navigation
+				    Source
 
 	annotation PBI_ResultType = Table
+
+	annotation PBI_NavigationStepName = Navigation
 

@@ -19,8 +19,8 @@ def _rng():
 def _make_detail(n: int = 100) -> pa.Table:
     rng = _rng()
     return pa.table({
-        "SalesOrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
-        "SalesOrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
+        "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
+        "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
         "DeliveryDate": pa.array(
             np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32(),
         ),
@@ -72,8 +72,8 @@ class TestMultiEventReturns:
         )
         result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
 
-        so = result.column("SalesOrderNumber").to_numpy()
-        line = result.column("SalesOrderLineNumber").to_numpy()
+        so = result.column("OrderNumber").to_numpy()
+        line = result.column("OrderLineNumber").to_numpy()
         ret_qty = result.column("ReturnQuantity").to_numpy()
         orig_qty = detail.column("Quantity").to_numpy()
 
@@ -94,8 +94,8 @@ class TestMultiEventReturns:
         )
         result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
 
-        so = result.column("SalesOrderNumber").to_numpy()
-        line = result.column("SalesOrderLineNumber").to_numpy()
+        so = result.column("OrderNumber").to_numpy()
+        line = result.column("OrderLineNumber").to_numpy()
         seq = result.column("ReturnSequence").to_numpy()
 
         # Every group should start at 1
@@ -116,7 +116,7 @@ class TestMultiEventReturns:
         )
         result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
 
-        so = result.column("SalesOrderNumber").to_numpy()
+        so = result.column("OrderNumber").to_numpy()
         dates = result.column("ReturnDate").to_numpy(zero_copy_only=False)
         seq = result.column("ReturnSequence").to_numpy()
 
@@ -153,7 +153,7 @@ class TestMultiEventReturns:
             split_min_gap=1, split_max_gap=2,
         )
         result = build_sales_returns_from_detail(detail, chunk_seed=7, cfg=cfg)
-        so = result.column("SalesOrderNumber").to_numpy()
+        so = result.column("OrderNumber").to_numpy()
         dates = result.column("ReturnDate").to_numpy(zero_copy_only=False)
         seq = result.column("ReturnSequence").to_numpy()
 
@@ -219,8 +219,8 @@ class TestCategoryAwareSampling:
     def _make_all_ontime(self, n: int = 200) -> pa.Table:
         rng = _rng()
         return pa.table({
-            "SalesOrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
-            "SalesOrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
+            "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
+            "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
             "DeliveryDate": pa.array(
                 np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32(),
             ),
@@ -232,8 +232,8 @@ class TestCategoryAwareSampling:
     def _make_all_delayed(self, n: int = 200) -> pa.Table:
         rng = _rng()
         return pa.table({
-            "SalesOrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
-            "SalesOrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
+            "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
+            "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
             "DeliveryDate": pa.array(
                 np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32(),
             ),
@@ -283,8 +283,8 @@ class TestEdgeCases:
         """All orders have Quantity=1 — cannot be split."""
         import pyarrow as pa
         return pa.table({
-            "SalesOrderNumber": np.arange(1, n + 1, dtype=np.int32),
-            "SalesOrderLineNumber": np.ones(n, dtype=np.int32),
+            "OrderNumber": np.arange(1, n + 1, dtype=np.int32),
+            "OrderLineNumber": np.ones(n, dtype=np.int32),
             "DeliveryDate": np.array(["2024-03-15"] * n, dtype="datetime64[D]"),
             "Quantity": np.ones(n, dtype=np.int32),
             "NetPrice": np.full(n, 25.0),

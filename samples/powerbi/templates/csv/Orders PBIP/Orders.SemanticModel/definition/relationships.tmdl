@@ -5,7 +5,7 @@ relationship 1942c651-02bd-465c-9da5-66b9ae660e90
 	toColumn: Products.ProductKey
 
 relationship 2ca39336-43c9-4d72-a68e-e5c70db8bcae
-	fromColumn: SalesOrderDetail.ProductKey
+	fromColumn: OrderDetail.ProductKey
 	toColumn: Products.ProductKey
 
 relationship 3b4f1ea9-6274-4f44-bdc1-9781e76b6a9b
@@ -58,7 +58,7 @@ relationship 96343533-82d8-41db-87f5-cda233246821
 	toColumn: Store.StoreKey
 
 relationship f96ce07e-88ea-4d76-b86d-78c72d33e414
-	fromColumn: SalesOrderHeader.StoreKey
+	fromColumn: OrderHeader.StoreKey
 	toColumn: Store.StoreKey
 
 relationship 6fe99a4c-0392-4f96-90d6-3568138980fb
@@ -66,11 +66,11 @@ relationship 6fe99a4c-0392-4f96-90d6-3568138980fb
 	toColumn: Warehouse.WarehouseKey
 
 relationship 93651748-b5a4-4091-ad97-09c46f045837
-	fromColumn: SalesOrderHeader.PromotionKey
+	fromColumn: OrderHeader.PromotionKey
 	toColumn: Promotion.PromotionKey
 
 relationship fa0a3628-d326-4f62-a988-1ed6373b1ae7
-	fromColumn: SalesOrderHeader.CurrencyKey
+	fromColumn: OrderHeader.CurrencyKey
 	toColumn: Currency.CurrencyKey
 
 relationship 36ddbc15-3886-4a27-8a79-705a2065405a
@@ -78,31 +78,31 @@ relationship 36ddbc15-3886-4a27-8a79-705a2065405a
 	toColumn: Employee.EmployeeKey
 
 relationship a9584517-d053-42d2-965d-024be09823a1
-	fromColumn: SalesOrderHeader.EmployeeKey
+	fromColumn: OrderHeader.EmployeeKey
 	toColumn: Employee.EmployeeKey
 
 relationship 7b8fb692-822f-4e90-9fa4-25f7b6ef9ef4
-	fromColumn: SalesReturn.ReturnReasonKey
+	fromColumn: Returns.ReturnReasonKey
 	toColumn: ReturnReason.ReturnReasonKey
 
 relationship a478271d-d2f0-4802-85fd-9687f88dcd05
-	fromColumn: SalesOrderHeader.SalesChannelKey
-	toColumn: SalesChannel.SalesChannelKey
+	fromColumn: OrderHeader.ChannelKey
+	toColumn: Channel.ChannelKey
 
 relationship e8987ec9-5a25-4485-a1bb-c810b2e37a4b
-	fromColumn: SalesOrderHeader.TimeKey
+	fromColumn: OrderHeader.TimeKey
 	toColumn: Time.TimeKey
 
 relationship 8e2d5f0d-755f-4102-af1d-e29ff0d108d2
-	fromColumn: SalesOrderDetail.SalesOrderNumber
-	toColumn: SalesOrderHeader.SalesOrderNumber
+	fromColumn: OrderDetail.OrderNumber
+	toColumn: OrderHeader.OrderNumber
 
 relationship 7ceb0ba6-ad52-ad79-72de-373802bdb068
-	fromColumn: SalesOrderHeader.OrderDate
+	fromColumn: OrderHeader.OrderDate
 	toColumn: Dates.Date
 
 relationship fa5a85f7-fe1a-f9d1-42ab-b8fb8c1c04f2
-	fromColumn: SalesReturn.ReturnDate
+	fromColumn: Returns.ReturnDate
 	toColumn: Dates.Date
 
 relationship b21c0451-c4d1-f6c6-439a-b256b55f3e43
@@ -146,7 +146,7 @@ relationship 11b80c16-9ab3-d621-509e-b52a4ba06190
 	toColumn: CustomerProfile.CustomerKey
 
 relationship 5bb6bbb1-3342-f463-937c-690a6e718707
-	fromColumn: SalesOrderHeader.CustomerKey
+	fromColumn: OrderHeader.CustomerKey
 	toColumn: Customer.CustomerKey
 
 relationship c6ff77d9-c8ac-c9cd-a971-1e6a9b37417c

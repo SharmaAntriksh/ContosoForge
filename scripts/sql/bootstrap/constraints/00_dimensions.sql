@@ -14,7 +14,7 @@
     This avoids silent re-creation if an index is renamed out-of-band.
 
   • COL_LENGTH guards are applied uniformly to tables whose schema may vary
-    depending on config (Stores, Promotions, Employees, SalesChannels, Time,
+    depending on config (Stores, Promotions, Employees, Channels, Time,
     ReturnReason).  Core tables with guaranteed schemas omit the guard for
     clarity.
 
@@ -377,18 +377,18 @@ BEGIN
     ADD CONSTRAINT PK_Suppliers PRIMARY KEY NONCLUSTERED ([SupplierKey]);
 END;
 
--- SalesChannels (schema may vary)
-IF OBJECT_ID(N'dbo.SalesChannels', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesChannels', N'SalesChannelKey') IS NOT NULL
+-- Channels (schema may vary)
+IF OBJECT_ID(N'dbo.Channels', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Channels', N'ChannelKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.key_constraints
-    WHERE name = N'PK_SalesChannels'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesChannels')
+    WHERE name = N'PK_Channels'
+      AND parent_object_id = OBJECT_ID(N'dbo.Channels')
 )
 BEGIN
-    ALTER TABLE dbo.SalesChannels
-    ADD CONSTRAINT PK_SalesChannels PRIMARY KEY NONCLUSTERED ([SalesChannelKey]);
+    ALTER TABLE dbo.Channels
+    ADD CONSTRAINT PK_Channels PRIMARY KEY NONCLUSTERED ([ChannelKey]);
 END;
 
 -- Time (schema may vary)
@@ -475,9 +475,9 @@ BEGIN
 END;
 GO
 
--- SalesChannels(SalesChannelKey)
-IF OBJECT_ID(N'dbo.SalesChannels', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesChannels', N'SalesChannelKey') IS NOT NULL
+-- Channels(ChannelKey)
+IF OBJECT_ID(N'dbo.Channels', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Channels', N'ChannelKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.indexes i
@@ -485,16 +485,16 @@ AND NOT EXISTS (
       ON i.object_id = ic.object_id AND i.index_id = ic.index_id
     JOIN sys.columns c
       ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-    WHERE i.object_id = OBJECT_ID(N'dbo.SalesChannels')
+    WHERE i.object_id = OBJECT_ID(N'dbo.Channels')
       AND i.is_unique = 1
       AND ic.is_included_column = 0
     GROUP BY i.index_id
     HAVING COUNT(*) = 1
-       AND MAX(CASE WHEN c.name = N'SalesChannelKey' AND ic.key_ordinal = 1 THEN 1 ELSE 0 END) = 1
+       AND MAX(CASE WHEN c.name = N'ChannelKey' AND ic.key_ordinal = 1 THEN 1 ELSE 0 END) = 1
 )
 BEGIN
-    CREATE UNIQUE INDEX [UX_SalesChannels_SalesChannelKey]
-    ON dbo.SalesChannels([SalesChannelKey]);
+    CREATE UNIQUE INDEX [UX_Channels_ChannelKey]
+    ON dbo.Channels([ChannelKey]);
 END;
 GO
 

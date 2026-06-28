@@ -1,12 +1,12 @@
-table SalesOrderHeader
+table OrderHeader
 	lineageTag: a6858967-9b2f-4631-b1db-1fc3279814ea
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: f54cd52d-191e-41c3-9c06-c3c4c0b2941a
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		changedProperty = IsHidden
 
@@ -80,12 +80,12 @@ table SalesOrderHeader
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelKey
+	column ChannelKey
 		dataType: int64
 		formatString: 0
 		lineageTag: 1e5cec2c-633d-40c2-8b4e-c787cc16de2a
 		summarizeBy: count
-		sourceColumn: SalesChannelKey
+		sourceColumn: ChannelKey
 
 		changedProperty = IsHidden
 
@@ -113,12 +113,12 @@ table SalesOrderHeader
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesOrderHeader = m
+	partition OrderHeader = m
 		mode: import
 		queryGroup: Fact\Sales
 		source =
 				let
-				    Source = Folder.Files ( ContosoFolder & "\facts\sales_order_header" ),
+				    Source = Folder.Files ( ContosoFolder & "\facts\order_header" ),
 				    FilterHidden = Table.SelectRows ( Source, each [Attributes]?[Hidden]? <> true ),
 				    InvokeCustomFunction = Table.AddColumn (
 				        FilterHidden,
@@ -135,11 +135,11 @@ table SalesOrderHeader
 				    ChangedType = Table.TransformColumnTypes (
 				        ExpandTable,
 				        {
-				            { "SalesOrderNumber", Int64.Type },
+				            { "OrderNumber", Int64.Type },
 				            { "CustomerKey", Int64.Type },
 				            { "StoreKey", Int64.Type },
 				            { "EmployeeKey", Int64.Type },
-				            { "SalesChannelKey", Int64.Type },
+				            { "ChannelKey", Int64.Type },
 				            { "OrderDate", type date },
 				            { "TimeKey", Int64.Type },
 				            { "IsOrderDelayed", Int64.Type },

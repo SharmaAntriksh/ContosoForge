@@ -1,28 +1,28 @@
-table SalesChannel
+table Channel
 	lineageTag: 754b0e32-65c9-4018-a902-5287bfbbe2f4
 
-	column SalesChannelKey
+	column ChannelKey
 		dataType: int64
 		formatString: 0
 		lineageTag: 42a9a2e6-3717-4ed9-b312-93d1eb34fc6f
 		summarizeBy: count
-		sourceColumn: SalesChannelKey
+		sourceColumn: ChannelKey
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannel
+	column Channel
 		dataType: string
 		lineageTag: b9d3527d-7f36-4167-b1e1-fdb8c8e9aff4
 		summarizeBy: none
-		sourceColumn: SalesChannel
+		sourceColumn: Channel
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelDescription
+	column ChannelDescription
 		dataType: string
 		lineageTag: 5bedb25a-6ab6-4686-b8d8-bd6c4606a4b7
 		summarizeBy: none
-		sourceColumn: SalesChannelDescription
+		sourceColumn: ChannelDescription
 
 		annotation SummarizationSetBy = Automatic
 
@@ -42,11 +42,11 @@ table SalesChannel
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelCode
+	column ChannelCode
 		dataType: string
 		lineageTag: 39b67101-3e67-4769-bc3b-dcaf26cb3050
 		summarizeBy: none
-		sourceColumn: SalesChannelCode
+		sourceColumn: ChannelCode
 
 		annotation SummarizationSetBy = Automatic
 
@@ -157,12 +157,12 @@ table SalesChannel
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesChannel = m
+	partition Channel = m
 		mode: import
 		queryGroup: Dimensions
 		source =
 				let
-				    Source     = FxReadParquetFile ( "dimensions\sales_channels" )
+				    Source     = FxReadParquetFile ( "dimensions\channels" )
 				in
 				    Source
 

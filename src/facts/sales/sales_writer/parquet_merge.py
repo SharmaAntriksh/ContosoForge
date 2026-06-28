@@ -467,7 +467,7 @@ def merge_parquet_files(
     write_statistics : bool
         Whether to write column statistics in the Parquet footer.
     table_name : str | None
-        Logical table name (e.g. ``"SalesOrderDetail"``).  When set,
+        Logical table name (e.g. ``"OrderDetail"``).  When set,
         expected-column enforcement and pricing validation are applied.
     schema_strategy : str
         ``"union"`` (default) merges all chunk schemas; ``"first"`` uses
@@ -528,12 +528,12 @@ def merge_parquet_files(
 # ---------------------------------------------------------------------------
 
 # Sort keys per table type — OrderDate + StoreKey for Sales/Header,
-# SalesOrderNumber for Detail, ReturnDate for Returns.
+# OrderNumber for Detail, ReturnDate for Returns.
 _SORT_KEYS_BY_TABLE: dict[str, list[tuple[str, str]]] = {
     "Sales": [("OrderDate", "ascending"), ("StoreKey", "ascending")],
-    "SalesOrderHeader": [("OrderDate", "ascending"), ("StoreKey", "ascending")],
-    "SalesOrderDetail": [("SalesOrderNumber", "ascending"), ("SalesOrderLineNumber", "ascending")],
-    "SalesReturn": [("ReturnDate", "ascending"), ("SalesOrderNumber", "ascending")],
+    "OrderHeader": [("OrderDate", "ascending"), ("StoreKey", "ascending")],
+    "OrderDetail": [("OrderNumber", "ascending"), ("OrderLineNumber", "ascending")],
+    "Returns": [("ReturnDate", "ascending"), ("OrderNumber", "ascending")],
 }
 
 

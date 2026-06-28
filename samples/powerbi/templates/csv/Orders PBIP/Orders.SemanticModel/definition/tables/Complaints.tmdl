@@ -19,12 +19,12 @@ table Complaints
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: c23e5a94-b4ef-4572-b574-933b80e343aa
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		annotation SummarizationSetBy = Automatic
 
@@ -135,7 +135,7 @@ table Complaints
 				        "Transform File",
 				        Table.ColumnNames ( Transform_Complaints_File ( Sample_File_Complaints ) )
 				    ),
-				    ChangedType = Table.TransformColumnTypes(CombineTables,{{"ComplaintKey", Int64.Type}, {"CustomerKey", Int64.Type}, {"SalesOrderNumber", Int64.Type}, {"LineNumber", Int64.Type}, {"ComplaintDate", type date}, {"ResolutionDate", type date}, {"ComplaintType", type text}, {"ComplaintDetail", type text}, {"Severity", type text}, {"Channel", type text}, {"Status", type text}, {"ResolutionType", type text}, {"ResponseDays", Int64.Type}})
+				    ChangedType = Table.TransformColumnTypes(CombineTables,{{"ComplaintKey", Int64.Type}, {"CustomerKey", Int64.Type}, {"OrderNumber", Int64.Type}, {"LineNumber", Int64.Type}, {"ComplaintDate", type date}, {"ResolutionDate", type date}, {"ComplaintType", type text}, {"ComplaintDetail", type text}, {"Severity", type text}, {"Channel", type text}, {"Status", type text}, {"ResolutionType", type text}, {"ResponseDays", Int64.Type}})
 				in 
 				    ChangedType
 				```

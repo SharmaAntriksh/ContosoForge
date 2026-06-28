@@ -1,6 +1,6 @@
 /*
-  10_sales.sql – Fact table constraints: Sales + SalesReturn
-  Aligned to src/utils/static_schemas.py (_SALES_SCHEMA, FACT_SCHEMAS["SalesReturn"])
+  10_sales.sql – Fact table constraints: Sales + Returns
+  Aligned to src/utils/static_schemas.py (_SALES_SCHEMA, FACT_SCHEMAS["Returns"])
 
   Included when sales_output mode is 'sales' or 'both' (see sql_scripts.py).
   For the normalised order-split model, see 20/21/22_sales_order_*.sql.
@@ -11,11 +11,11 @@
     columnstore index applied by create_drop_cci.sql.
 
   • COL_LENGTH guards are applied to fact columns that reference
-    config-optional dimensions (SalesChannels, Time, Employees) so the FK
+    config-optional dimensions (Channels, Time, Employees) so the FK
     is silently skipped when the column is absent.
 
-  • The Sales PK and SalesReturn natural-key index are also guarded by
-    COL_LENGTH on SalesOrderNumber / SalesOrderLineNumber so they are
+  • The Sales PK and Returns natural-key index are also guarded by
+    COL_LENGTH on OrderNumber / OrderLineNumber so they are
     silently skipped when skip_order_cols is true.
 
   • The Employees FK uses a full type-compatibility check (system_type_id,
@@ -24,8 +24,8 @@
     Employees.EmployeeKey is INT.  This matches the pattern in
     20_sales_order_header.sql.
 
-  • SalesReturn is linked back to Sales via the composite natural key
-    (SalesOrderNumber, SalesOrderLineNumber).  In 'sales_order' mode
+  • Returns is linked back to Sales via the composite natural key
+    (OrderNumber, OrderLineNumber).  In 'sales_order' mode
     this relationship is handled by 22_sales_order_relations.sql instead.
 
   • Each logical section is separated by GO so a failure in one batch
@@ -40,8 +40,8 @@ SET XACT_ABORT ON;
 -----------------------------------------------------------------------
 
 IF OBJECT_ID(N'dbo.Sales', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.Sales', N'SalesOrderNumber') IS NOT NULL
-AND COL_LENGTH(N'dbo.Sales', N'SalesOrderLineNumber') IS NOT NULL
+AND COL_LENGTH(N'dbo.Sales', N'OrderNumber') IS NOT NULL
+AND COL_LENGTH(N'dbo.Sales', N'OrderLineNumber') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.key_constraints
@@ -51,7 +51,7 @@ AND NOT EXISTS (
 BEGIN
     ALTER TABLE dbo.Sales
     ADD CONSTRAINT PK_Sales
-        PRIMARY KEY NONCLUSTERED ([SalesOrderNumber], [SalesOrderLineNumber]);
+        PRIMARY KEY NONCLUSTERED ([OrderNumber], [OrderLineNumber]);
 END;
 GO
 
@@ -184,23 +184,23 @@ BEGIN
     ALTER TABLE dbo.Sales CHECK CONSTRAINT FK_Sales_Currency;
 END;
 
--- Sales -> SalesChannels (config-optional dimension)
+-- Sales -> Channels (config-optional dimension)
 IF OBJECT_ID(N'dbo.Sales', N'U') IS NOT NULL
-AND OBJECT_ID(N'dbo.SalesChannels', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.Sales', N'SalesChannelKey') IS NOT NULL
+AND OBJECT_ID(N'dbo.Channels', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Sales', N'ChannelKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_Sales_SalesChannels'
+    WHERE name = N'FK_Sales_Channels'
       AND parent_object_id = OBJECT_ID(N'dbo.Sales')
 )
 BEGIN
     ALTER TABLE dbo.Sales WITH CHECK
-    ADD CONSTRAINT FK_Sales_SalesChannels
-        FOREIGN KEY ([SalesChannelKey])
-        REFERENCES dbo.SalesChannels ([SalesChannelKey]);
+    ADD CONSTRAINT FK_Sales_Channels
+        FOREIGN KEY ([ChannelKey])
+        REFERENCES dbo.Channels ([ChannelKey]);
 
-    ALTER TABLE dbo.Sales CHECK CONSTRAINT FK_Sales_SalesChannels;
+    ALTER TABLE dbo.Sales CHECK CONSTRAINT FK_Sales_Channels;
 END;
 
 -- Sales -> Time (config-optional dimension)
@@ -284,7 +284,7 @@ SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
 -- IsOrderDelayed is a bit/flag represented as INT in the fact schema (0/1).
--- Mirrors CK_SalesOrderHeader_IsOrderDelayed_01 in 20_sales_order_header.sql.
+-- Mirrors CK_OrderHeader_IsOrderDelayed_01 in 20_sales_order_header.sql.
 IF OBJECT_ID(N'dbo.Sales', N'U') IS NOT NULL
 AND COL_LENGTH(N'dbo.Sales', N'IsOrderDelayed') IS NOT NULL
 AND NOT EXISTS (
@@ -307,32 +307,32 @@ SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
 -- PK: ReturnEventKey (surrogate; only when column exists)
-IF OBJECT_ID(N'dbo.SalesReturn', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesReturn', N'ReturnEventKey') IS NOT NULL
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'ReturnEventKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.key_constraints
-    WHERE name = N'PK_SalesReturn'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesReturn')
+    WHERE name = N'PK_Returns'
+      AND parent_object_id = OBJECT_ID(N'dbo.Returns')
 )
 BEGIN
-    ALTER TABLE dbo.SalesReturn
-    ADD CONSTRAINT PK_SalesReturn PRIMARY KEY NONCLUSTERED ([ReturnEventKey]);
+    ALTER TABLE dbo.Returns
+    ADD CONSTRAINT PK_Returns PRIMARY KEY NONCLUSTERED ([ReturnEventKey]);
 END;
 
 -- Natural-key access path (non-unique; supports joins back to Sales)
-IF OBJECT_ID(N'dbo.SalesReturn', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesReturn', N'SalesOrderNumber') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesReturn', N'SalesOrderLineNumber') IS NOT NULL
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'OrderNumber') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'OrderLineNumber') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.indexes
-    WHERE name = N'IX_SalesReturn_NaturalKey'
-      AND object_id = OBJECT_ID(N'dbo.SalesReturn')
+    WHERE name = N'IX_Returns_NaturalKey'
+      AND object_id = OBJECT_ID(N'dbo.Returns')
 )
 BEGIN
-    CREATE INDEX IX_SalesReturn_NaturalKey
-    ON dbo.SalesReturn ([SalesOrderNumber], [SalesOrderLineNumber], [ReturnSequence]);
+    CREATE INDEX IX_Returns_NaturalKey
+    ON dbo.Returns ([OrderNumber], [OrderLineNumber], [ReturnSequence]);
 END;
 GO
 
@@ -342,55 +342,55 @@ GO
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
--- SalesReturn -> Sales (natural key; flat-model equivalent of
--- 22_sales_order_relations.sql FK_SalesReturn_SalesOrderDetail)
-IF OBJECT_ID(N'dbo.SalesReturn', N'U') IS NOT NULL
+-- Returns -> Sales (natural key; flat-model equivalent of
+-- 22_sales_order_relations.sql FK_Returns_OrderDetail)
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
 AND OBJECT_ID(N'dbo.Sales', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesReturn', N'SalesOrderNumber') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesReturn', N'SalesOrderLineNumber') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'OrderNumber') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'OrderLineNumber') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesReturn_Sales'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesReturn')
+    WHERE name = N'FK_Returns_Sales'
+      AND parent_object_id = OBJECT_ID(N'dbo.Returns')
 )
 BEGIN
-    ALTER TABLE dbo.SalesReturn WITH CHECK
-    ADD CONSTRAINT FK_SalesReturn_Sales
-        FOREIGN KEY ([SalesOrderNumber], [SalesOrderLineNumber])
-        REFERENCES dbo.Sales ([SalesOrderNumber], [SalesOrderLineNumber]);
+    ALTER TABLE dbo.Returns WITH CHECK
+    ADD CONSTRAINT FK_Returns_Sales
+        FOREIGN KEY ([OrderNumber], [OrderLineNumber])
+        REFERENCES dbo.Sales ([OrderNumber], [OrderLineNumber]);
 
-    ALTER TABLE dbo.SalesReturn CHECK CONSTRAINT FK_SalesReturn_Sales;
+    ALTER TABLE dbo.Returns CHECK CONSTRAINT FK_Returns_Sales;
 END;
 
--- SalesReturn -> Dates (ReturnDate)
-IF OBJECT_ID(N'dbo.SalesReturn', N'U') IS NOT NULL
+-- Returns -> Dates (ReturnDate)
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
 AND OBJECT_ID(N'dbo.Dates', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesReturn', N'ReturnDate') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'ReturnDate') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesReturn_Dates_ReturnDate'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesReturn')
+    WHERE name = N'FK_Returns_Dates_ReturnDate'
+      AND parent_object_id = OBJECT_ID(N'dbo.Returns')
 )
 BEGIN
-    ALTER TABLE dbo.SalesReturn WITH CHECK
-    ADD CONSTRAINT FK_SalesReturn_Dates_ReturnDate
+    ALTER TABLE dbo.Returns WITH CHECK
+    ADD CONSTRAINT FK_Returns_Dates_ReturnDate
         FOREIGN KEY ([ReturnDate])
         REFERENCES dbo.Dates ([Date]);
 
-    ALTER TABLE dbo.SalesReturn CHECK CONSTRAINT FK_SalesReturn_Dates_ReturnDate;
+    ALTER TABLE dbo.Returns CHECK CONSTRAINT FK_Returns_Dates_ReturnDate;
 END;
 
--- SalesReturn -> ReturnReason (type-compatibility guard for INT/BIGINT mismatch)
-IF OBJECT_ID(N'dbo.SalesReturn', N'U') IS NOT NULL
+-- Returns -> ReturnReason (type-compatibility guard for INT/BIGINT mismatch)
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
 AND OBJECT_ID(N'dbo.ReturnReason', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesReturn', N'ReturnReasonKey') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'ReturnReasonKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesReturn_ReturnReason'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesReturn')
+    WHERE name = N'FK_Returns_ReturnReason'
+      AND parent_object_id = OBJECT_ID(N'dbo.Returns')
 )
 AND EXISTS (
     SELECT 1
@@ -398,7 +398,7 @@ AND EXISTS (
     JOIN sys.columns rc
       ON rc.object_id = OBJECT_ID(N'dbo.ReturnReason')
      AND rc.name = N'ReturnReasonKey'
-    WHERE pc.object_id = OBJECT_ID(N'dbo.SalesReturn')
+    WHERE pc.object_id = OBJECT_ID(N'dbo.Returns')
       AND pc.name = N'ReturnReasonKey'
       AND pc.system_type_id = rc.system_type_id
       AND pc.user_type_id  = rc.user_type_id
@@ -407,11 +407,11 @@ AND EXISTS (
       AND pc.scale         = rc.scale
 )
 BEGIN
-    ALTER TABLE dbo.SalesReturn WITH CHECK
-    ADD CONSTRAINT FK_SalesReturn_ReturnReason
+    ALTER TABLE dbo.Returns WITH CHECK
+    ADD CONSTRAINT FK_Returns_ReturnReason
         FOREIGN KEY ([ReturnReasonKey])
         REFERENCES dbo.ReturnReason ([ReturnReasonKey]);
 
-    ALTER TABLE dbo.SalesReturn CHECK CONSTRAINT FK_SalesReturn_ReturnReason;
+    ALTER TABLE dbo.Returns CHECK CONSTRAINT FK_Returns_ReturnReason;
 END;
 GO

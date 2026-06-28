@@ -23,7 +23,7 @@ def build_budget_lookups(parquet_dims: Path) -> dict:
         budget_product_to_cat:    int64[max_product_key+1] -> category_id
         budget_country_labels:    str[num_countries]
         budget_category_labels:   str[num_categories]
-        budget_channel_keys:      int16[] (distinct SalesChannelKey values)
+        budget_channel_keys:      int16[] (distinct ChannelKey values)
     """
     # ---- Store -> Geography -> Country ----
     _store_cols = ["StoreKey", "GeographyKey"]
@@ -100,10 +100,10 @@ def build_budget_lookups(parquet_dims: Path) -> dict:
             country_to_currency[cid] = _gi
 
     # ---- Sales channels ----
-    sc_path = parquet_dims / "sales_channels.parquet"
+    sc_path = parquet_dims / "channels.parquet"
     if sc_path.exists():
         sc = pd.read_parquet(sc_path)
-        channel_keys = sc["SalesChannelKey"].to_numpy(dtype=np.int32)
+        channel_keys = sc["ChannelKey"].to_numpy(dtype=np.int32)
         is_digital = sc.get("IsDigital", pd.Series(dtype="int8")).to_numpy()
         is_physical = sc.get("IsPhysical", pd.Series(dtype="int8")).to_numpy()
     else:

@@ -5,17 +5,17 @@
 -- Run after loading generated data into SQL Server.
 -- Supports both sales_output modes:
 --   sales        -> single Sales table
---   sales_order  -> SalesOrderHeader + SalesOrderDetail tables
+--   sales_order  -> OrderHeader + OrderDetail tables
 -- ============================================================================
 SET NOCOUNT ON;
 
 DECLARE @has_sales  BIT = CASE WHEN OBJECT_ID('dbo.Sales', 'U') IS NOT NULL THEN 1 ELSE 0 END;
-DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.SalesOrderHeader', 'U') IS NOT NULL THEN 1 ELSE 0 END;
-DECLARE @sales_tbl  SYSNAME = CASE WHEN OBJECT_ID('dbo.Sales', 'U') IS NOT NULL THEN 'Sales' ELSE 'SalesOrderHeader' END;
+DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.OrderHeader', 'U') IS NOT NULL THEN 1 ELSE 0 END;
+DECLARE @sales_tbl  SYSNAME = CASE WHEN OBJECT_ID('dbo.Sales', 'U') IS NOT NULL THEN 'Sales' ELSE 'OrderHeader' END;
 
 IF @has_sales = 0 AND @has_header = 0
 BEGIN
-    PRINT 'No Sales or SalesOrderHeader table found — skipping.';
+    PRINT 'No Sales or OrderHeader table found — skipping.';
     RETURN;
 END
 
@@ -149,10 +149,10 @@ INSERT INTO #R VALUES ('Employees', 'Employee hierarchy valid',
 DECLARE @mgr_sp INT;
 SELECT @mgr_sp = COUNT(*) FROM dbo.Employees
 WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000
-  AND SalesPersonFlag = 1;
+  AND IsSalesperson = 1;
 INSERT INTO #R VALUES ('Employees', 'No managers flagged as salespeople',
     CASE WHEN @mgr_sp = 0 THEN 'PASS' ELSE 'FAIL' END,
-    CAST(@mgr_sp AS VARCHAR) + ' manager(s) with SalesPersonFlag=1');
+    CAST(@mgr_sp AS VARCHAR) + ' manager(s) with IsSalesperson=1');
 
 
 -- ############################################################################
@@ -385,7 +385,7 @@ IF @has_sales = 1
 ELSE
     SELECT @n_sales = COUNT(*), @min_date = MIN(OrderDate), @max_date = MAX(OrderDate),
            @n_s_stores = COUNT(DISTINCT StoreKey), @n_s_emps = COUNT(DISTINCT EmployeeKey)
-    FROM dbo.SalesOrderHeader;
+    FROM dbo.OrderHeader;
 INSERT INTO #R VALUES ('Sales', 'Sales row count', 'INFO',
     CAST(@n_sales AS VARCHAR) + ' rows, ' + CAST(@min_date AS VARCHAR) + ' to ' + CAST(@max_date AS VARCHAR)
     + ', ' + CAST(@n_s_stores AS VARCHAR) + ' stores, ' + CAST(@n_s_emps AS VARCHAR) + ' employees');
@@ -395,7 +395,7 @@ DECLARE @null_ek INT;
 IF @has_sales = 1
     SELECT @null_ek = COUNT(*) FROM dbo.Sales WHERE EmployeeKey <= 0;
 ELSE
-    SELECT @null_ek = COUNT(*) FROM dbo.SalesOrderHeader WHERE EmployeeKey <= 0;
+    SELECT @null_ek = COUNT(*) FROM dbo.OrderHeader WHERE EmployeeKey <= 0;
 INSERT INTO #R VALUES ('Sales', 'No null/zero EmployeeKey in sales',
     CASE WHEN @null_ek = 0 THEN 'PASS' ELSE 'FAIL' END,
     CAST(@null_ek AS VARCHAR) + ' sale(s) with EmployeeKey <= 0');
@@ -407,7 +407,7 @@ IF @has_sales = 1
     LEFT JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
     WHERE s.StoreKey IS NULL;
 ELSE
-    SELECT @orphan_s_sk = COUNT(*) FROM dbo.SalesOrderHeader f
+    SELECT @orphan_s_sk = COUNT(*) FROM dbo.OrderHeader f
     LEFT JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
     WHERE s.StoreKey IS NULL;
 INSERT INTO #R VALUES ('Sales', 'Sales StoreKey exists in Stores',
@@ -424,7 +424,7 @@ IF @has_sales = 1
     ) x;
 ELSE
     SELECT @orphan_s_ek = COUNT(*) FROM (
-        SELECT DISTINCT f.EmployeeKey FROM dbo.SalesOrderHeader f
+        SELECT DISTINCT f.EmployeeKey FROM dbo.OrderHeader f
         WHERE f.EmployeeKey > 0
           AND NOT EXISTS (SELECT 1 FROM dbo.EmployeeStoreAssignments esa WHERE esa.EmployeeKey = f.EmployeeKey)
     ) x;
@@ -438,7 +438,7 @@ IF @has_sales = 1
     SELECT @mgr_sales = COUNT(*) FROM dbo.Sales
     WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000;
 ELSE
-    SELECT @mgr_sales = COUNT(*) FROM dbo.SalesOrderHeader
+    SELECT @mgr_sales = COUNT(*) FROM dbo.OrderHeader
     WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000;
 INSERT INTO #R VALUES ('Sales', 'No manager keys in sales',
     CASE WHEN @mgr_sales = 0 THEN 'PASS' ELSE 'FAIL' END,
@@ -455,9 +455,9 @@ BEGIN
 END
 ELSE
 BEGIN
-    SELECT @phys_at_online = COUNT(*) FROM dbo.SalesOrderHeader
+    SELECT @phys_at_online = COUNT(*) FROM dbo.OrderHeader
     WHERE StoreKey >= 10000 AND EmployeeKey < 50000000 AND EmployeeKey > 0;
-    SELECT @online_at_phys = COUNT(*) FROM dbo.SalesOrderHeader
+    SELECT @online_at_phys = COUNT(*) FROM dbo.OrderHeader
     WHERE StoreKey < 10000 AND EmployeeKey >= 50000000;
 END
 INSERT INTO #R VALUES ('Sales', 'Online/physical channel alignment',
@@ -472,10 +472,10 @@ BEGIN
     SELECT @bad_qty = COUNT(*) FROM dbo.Sales WHERE Quantity <= 0;
     SELECT @bad_price = COUNT(*) FROM dbo.Sales WHERE UnitPrice <= 0;
 END
-ELSE IF @has_header = 1 AND OBJECT_ID('dbo.SalesOrderDetail', 'U') IS NOT NULL
+ELSE IF @has_header = 1 AND OBJECT_ID('dbo.OrderDetail', 'U') IS NOT NULL
 BEGIN
-    SELECT @bad_qty = COUNT(*) FROM dbo.SalesOrderDetail WHERE Quantity <= 0;
-    SELECT @bad_price = COUNT(*) FROM dbo.SalesOrderDetail WHERE UnitPrice <= 0;
+    SELECT @bad_qty = COUNT(*) FROM dbo.OrderDetail WHERE Quantity <= 0;
+    SELECT @bad_price = COUNT(*) FROM dbo.OrderDetail WHERE UnitPrice <= 0;
 END
 INSERT INTO #R VALUES ('Sales', 'Quantity > 0 and UnitPrice > 0',
     CASE WHEN @bad_qty = 0 AND @bad_price = 0 THEN 'PASS' ELSE 'FAIL' END,
@@ -494,7 +494,7 @@ IF @has_sales = 1
           AND (esa.EndDate IS NULL OR f.OrderDate <= esa.EndDate)
       );
 ELSE
-    SELECT @unmatched = COUNT(*) FROM dbo.SalesOrderHeader f
+    SELECT @unmatched = COUNT(*) FROM dbo.OrderHeader f
     WHERE f.EmployeeKey > 0
       AND NOT EXISTS (
         SELECT 1 FROM dbo.EmployeeStoreAssignments esa
@@ -517,7 +517,7 @@ IF @has_sales = 1
     WHERE s.RenovationStartDate IS NOT NULL AND s.RenovationEndDate IS NOT NULL
       AND f.OrderDate >= s.RenovationStartDate AND f.OrderDate < s.RenovationEndDate;
 ELSE
-    SELECT @reno_sales = COUNT(*) FROM dbo.SalesOrderHeader f
+    SELECT @reno_sales = COUNT(*) FROM dbo.OrderHeader f
     JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
     WHERE s.RenovationStartDate IS NOT NULL AND s.RenovationEndDate IS NOT NULL
       AND f.OrderDate >= s.RenovationStartDate AND f.OrderDate < s.RenovationEndDate;
@@ -532,7 +532,7 @@ IF @has_sales = 1
     JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
     WHERE s.ClosingDate IS NOT NULL AND f.OrderDate >= s.ClosingDate;
 ELSE
-    SELECT @post_close = COUNT(*) FROM dbo.SalesOrderHeader f
+    SELECT @post_close = COUNT(*) FROM dbo.OrderHeader f
     JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
     WHERE s.ClosingDate IS NOT NULL AND f.OrderDate >= s.ClosingDate;
 INSERT INTO #R VALUES ('Sales', 'No sales after store closure',
@@ -550,7 +550,7 @@ IF @has_sales = 1
     ) le ON le.EmployeeKey = f.EmployeeKey AND le.StoreKey = f.StoreKey
     WHERE f.OrderDate > le.LastEnd;
 ELSE
-    SELECT @leaked = COUNT(*) FROM dbo.SalesOrderHeader f
+    SELECT @leaked = COUNT(*) FROM dbo.OrderHeader f
     JOIN (
         SELECT EmployeeKey, StoreKey, MAX(EndDate) AS LastEnd
         FROM dbo.EmployeeStoreAssignments

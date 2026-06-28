@@ -93,7 +93,7 @@ queryGroup Fact\SecondaryFacts
 
 annotation __PBI_TimeIntelligenceEnabled = 0
 
-annotation PBI_QueryOrder = ["ContosoFolder","FxReadCSVFile","Customer","CustomerProfile","OrganizationProfile","PlanSubscription","LoyaltyTiers","AcquisitionChannel","Plan","Dates","Store","Promotion","Products","Supplier","ProductSubcategory","ProductProfile","ProductCategory","Geography","Currency","SalesOrderHeader","ExchangeRate","ExchangeRateMonthly","Sample_File_SOH","Parameter_SOH","Transform_Sample_SOH","Transform_SOH_File","SalesOrderDetail","Sample_File_SOD","Parameter_SOD","Transform_Sample_SOD","Transform_SOD_File","MeasuresTable","Employee","EmployeeStoreAssignment","ReturnReason","SalesChannel","Sample_File_SalesReturns","Parameter_SalesReturns","Transform_SalesReturns_File","Transform_Sample_SalesReturns","SalesReturn","Time","Budget","BudgetMonthly","Complaints","Sample_File_Complaints","Parameter_Complaints","Transform_Sample_Complaints","Transform_Complaints_File","Warehouse","Inventory","Sample_File_Inventory","Parameter_Inventory","Transform_Sample_Inventory","Transform_Inventory_File","Wishlist","Sample_File_Wishlist","Parameter_Wishlist","Transform_Sample_Wishlist","Transform_Wishlist_File"]
+annotation PBI_QueryOrder = ["ContosoFolder","FxReadCSVFile","Customer","CustomerProfile","OrganizationProfile","PlanSubscription","LoyaltyTiers","AcquisitionChannel","Plan","Dates","Store","Promotion","Products","Supplier","ProductSubcategory","ProductProfile","ProductCategory","Geography","Currency","OrderHeader","ExchangeRate","ExchangeRateMonthly","Sample_File_SOH","Parameter_SOH","Transform_Sample_SOH","Transform_SOH_File","OrderDetail","Sample_File_SOD","Parameter_SOD","Transform_Sample_SOD","Transform_SOD_File","MeasuresTable","Employee","EmployeeStoreAssignment","ReturnReason","Channel","Sample_File_Returns","Parameter_Returns","Transform_Returns_File","Transform_Sample_Returns","Returns","Time","Budget","BudgetMonthly","Complaints","Sample_File_Complaints","Parameter_Complaints","Transform_Sample_Complaints","Transform_Complaints_File","Warehouse","Inventory","Sample_File_Inventory","Parameter_Inventory","Transform_Sample_Inventory","Transform_Inventory_File","Wishlist","Sample_File_Wishlist","Parameter_Wishlist","Transform_Sample_Wishlist","Transform_Wishlist_File"]
 
 annotation PBI_ProTooling = ["TMDLView_Desktop","DevMode"]
 
@@ -107,14 +107,14 @@ ref table ProductCategory
 ref table Geography
 ref table Currency
 ref table ExchangeRate
-ref table SalesOrderHeader
-ref table SalesOrderDetail
+ref table OrderHeader
+ref table OrderDetail
 ref table MeasuresTable
 ref table Employee
 ref table EmployeeStoreAssignment
 ref table ReturnReason
-ref table SalesChannel
-ref table SalesReturn
+ref table Channel
+ref table Returns
 ref table Time
 ref table CustomerProfile
 ref table OrganizationProfile

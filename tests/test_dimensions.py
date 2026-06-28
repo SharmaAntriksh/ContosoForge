@@ -1154,7 +1154,7 @@ class TestCustomerGenerator:
         cfg = self._minimal_cfg(n=200)
         cfg["customers"]["pct_org"] = 10  # 10%
         customers_df, *_ = self._run(cfg)
-        org_count = (customers_df["Gender"] == "O").sum()
+        org_count = (customers_df["GenderCode"] == "O").sum()
         assert org_count > 0, "Expected some organization customers"
 
     def test_no_nan_in_customer_key(self):
@@ -1185,19 +1185,31 @@ class TestCustomerGenerator:
         cfg = self._minimal_cfg(n=100)
         cfg["customers"]["pct_org"] = 15
         customers_df, *_ = self._run(cfg)
-        org_mask = customers_df["Gender"] == "O"
+        org_mask = customers_df["GenderCode"] == "O"
         assert (customers_df.loc[org_mask, "CustomerType"] == "Organization").all()
         assert (customers_df.loc[~org_mask, "CustomerType"] == "Individual").all()
 
-    def test_gender_codes(self):
-        """Gender is emitted as single-char codes: M/F for persons, O for orgs."""
+    def test_gender_and_gender_code(self):
+        """Gender keeps readable labels (Male/Female/Org); GenderCode carries the
+        single-char code (M/F/O) with a 1:1 mapping. Gender is NOT overwritten."""
         cfg = self._minimal_cfg(n=200)
         cfg["customers"]["pct_org"] = 15
         customers_df, *_ = self._run(cfg)
-        assert set(customers_df["Gender"].unique()).issubset({"M", "F", "O"})
+
+        # Readable Gender column preserved.
+        assert set(customers_df["Gender"].unique()).issubset({"Male", "Female", "Org"})
+        # Parallel GenderCode column with single-char codes.
+        assert set(customers_df["GenderCode"].unique()).issubset({"M", "F", "O"})
+        # GenderCode lands immediately after Gender.
+        cols = list(customers_df.columns)
+        assert cols[cols.index("Gender") + 1] == "GenderCode"
+        # 1:1 mapping holds for every row.
+        expected = customers_df["Gender"].map({"Male": "M", "Female": "F", "Org": "O"})
+        assert (customers_df["GenderCode"] == expected).all()
+
         person_mask = customers_df["CustomerType"] == "Individual"
-        assert set(customers_df.loc[person_mask, "Gender"].unique()).issubset({"M", "F"})
-        assert (customers_df.loc[~person_mask, "Gender"] == "O").all()
+        assert set(customers_df.loc[person_mask, "Gender"].unique()).issubset({"Male", "Female"})
+        assert (customers_df.loc[~person_mask, "Gender"] == "Org").all()
 
     def test_phone_number_uniform_10_digits(self):
         """PhoneNumber is a uniform 10-digit string with no country/region code."""

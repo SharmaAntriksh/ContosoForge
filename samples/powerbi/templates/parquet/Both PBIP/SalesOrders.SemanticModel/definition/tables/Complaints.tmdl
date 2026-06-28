@@ -19,12 +19,12 @@ table Complaints
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 92898bb4-041e-4462-a100-1831966275d1
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		annotation SummarizationSetBy = Automatic
 

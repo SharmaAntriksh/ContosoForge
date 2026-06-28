@@ -8,7 +8,7 @@
 
   When BRIN helps here
   ────────────────────
-  • Sales / SalesReturn / SalesOrderHeader / SalesOrderDetail are loaded
+  • Sales / Returns / OrderHeader / OrderDetail are loaded
     via COPY in chronological order, so OrderDate / DueDate / DeliveryDate
     / ReturnDate columns are naturally clustered in the heap.
   • InventorySnapshot is generated month-by-month, so SnapshotDate is
@@ -34,34 +34,34 @@ END $$;
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='ReturnDate')
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnDate')
     THEN
-        CREATE INDEX IF NOT EXISTS "BRIN_SalesReturn_ReturnDate"
-            ON "public"."SalesReturn" USING BRIN ("ReturnDate");
+        CREATE INDEX IF NOT EXISTS "BRIN_Returns_ReturnDate"
+            ON "public"."Returns" USING BRIN ("ReturnDate");
     END IF;
 END $$;
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesOrderHeader"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesOrderHeader' AND column_name='OrderDate')
+    IF to_regclass('"public"."OrderHeader"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderHeader' AND column_name='OrderDate')
     THEN
-        CREATE INDEX IF NOT EXISTS "BRIN_SalesOrderHeader_OrderDate"
-            ON "public"."SalesOrderHeader" USING BRIN ("OrderDate");
+        CREATE INDEX IF NOT EXISTS "BRIN_OrderHeader_OrderDate"
+            ON "public"."OrderHeader" USING BRIN ("OrderDate");
     END IF;
 END $$;
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesOrderDetail"') IS NOT NULL THEN
-        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesOrderDetail' AND column_name='DueDate') THEN
-            CREATE INDEX IF NOT EXISTS "BRIN_SalesOrderDetail_DueDate"
-                ON "public"."SalesOrderDetail" USING BRIN ("DueDate");
+    IF to_regclass('"public"."OrderDetail"') IS NOT NULL THEN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='DueDate') THEN
+            CREATE INDEX IF NOT EXISTS "BRIN_OrderDetail_DueDate"
+                ON "public"."OrderDetail" USING BRIN ("DueDate");
         END IF;
-        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesOrderDetail' AND column_name='DeliveryDate') THEN
-            CREATE INDEX IF NOT EXISTS "BRIN_SalesOrderDetail_DeliveryDate"
-                ON "public"."SalesOrderDetail" USING BRIN ("DeliveryDate");
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='DeliveryDate') THEN
+            CREATE INDEX IF NOT EXISTS "BRIN_OrderDetail_DeliveryDate"
+                ON "public"."OrderDetail" USING BRIN ("DeliveryDate");
         END IF;
     END IF;
 END $$;

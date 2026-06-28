@@ -5,12 +5,12 @@
 --
 -- Supports both sales_output modes:
 --   sales        -> single Sales table
---   sales_order  -> SalesOrderHeader + SalesOrderDetail tables
+--   sales_order  -> OrderHeader + OrderDetail tables
 -- ============================================================================
 
 -- Detect which sales table exists
 DECLARE @has_sales  BIT = CASE WHEN OBJECT_ID('dbo.Sales') IS NOT NULL THEN 1 ELSE 0 END;
-DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.SalesOrderHeader') IS NOT NULL THEN 1 ELSE 0 END;
+DECLARE @has_header BIT = CASE WHEN OBJECT_ID('dbo.OrderHeader') IS NOT NULL THEN 1 ELSE 0 END;
 
 
 -- ============================================================================
@@ -89,7 +89,7 @@ END
 ELSE IF @has_header = 1
 BEGIN
     SELECT DISTINCT h.CurrencyKey
-    FROM SalesOrderHeader h
+    FROM OrderHeader h
     LEFT JOIN Currency c ON c.CurrencyKey = h.CurrencyKey
     WHERE c.CurrencyKey IS NULL;
     -- EXPECTED: zero rows
@@ -228,28 +228,28 @@ END
 ELSE IF @has_header = 1
 BEGIN
     SELECT DISTINCT h.EmployeeKey
-    FROM SalesOrderHeader h
+    FROM OrderHeader h
     LEFT JOIN Employees e ON e.EmployeeKey = h.EmployeeKey
     WHERE h.EmployeeKey IS NOT NULL
       AND e.EmployeeKey IS NULL;
     -- EXPECTED: zero rows
 END
 
--- 8b. Sales person employees should have SalesPersonFlag=1
+-- 8b. Sales person employees should have IsSalesperson=1
 IF @has_sales = 1
 BEGIN
-    SELECT DISTINCT f.EmployeeKey, e.SalesPersonFlag
+    SELECT DISTINCT f.EmployeeKey, e.IsSalesperson
     FROM Sales f
     JOIN Employees e ON e.EmployeeKey = f.EmployeeKey
-    WHERE e.SalesPersonFlag = 0;
+    WHERE e.IsSalesperson = 0;
     -- EXPECTED: zero rows
 END
 ELSE IF @has_header = 1
 BEGIN
-    SELECT DISTINCT h.EmployeeKey, e.SalesPersonFlag
-    FROM SalesOrderHeader h
+    SELECT DISTINCT h.EmployeeKey, e.IsSalesperson
+    FROM OrderHeader h
     JOIN Employees e ON e.EmployeeKey = h.EmployeeKey
-    WHERE e.SalesPersonFlag = 0;
+    WHERE e.IsSalesperson = 0;
     -- EXPECTED: zero rows
 END
 
@@ -332,14 +332,14 @@ BEGIN
     SELECT 'Currency: all sales currencies valid' AS [Check],
         'Every CurrencyKey used in Sales must exist in Currency dim; FAIL = orphaned currency reference' AS [Description],
         CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS Result
-    FROM (SELECT DISTINCT CurrencyKey FROM SalesOrderHeader) f
+    FROM (SELECT DISTINCT CurrencyKey FROM OrderHeader) f
     LEFT JOIN Currency c ON c.CurrencyKey = f.CurrencyKey
     WHERE c.CurrencyKey IS NULL;
 
     SELECT 'SalesPerson: valid employee references' AS [Check],
-        'Every EmployeeKey in SalesOrderHeader must exist in Employees; FAIL = sale assigned to non-existent employee' AS [Description],
+        'Every EmployeeKey in OrderHeader must exist in Employees; FAIL = sale assigned to non-existent employee' AS [Description],
         CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS Result
-    FROM (SELECT DISTINCT EmployeeKey FROM SalesOrderHeader WHERE EmployeeKey IS NOT NULL) f
+    FROM (SELECT DISTINCT EmployeeKey FROM OrderHeader WHERE EmployeeKey IS NOT NULL) f
     LEFT JOIN Employees e ON e.EmployeeKey = f.EmployeeKey
     WHERE e.EmployeeKey IS NULL;
 END

@@ -1,8 +1,8 @@
 -----------------------------------------------------------------------
--- FACT: SalesOrderHeader (CANDIDATE KEY + FOREIGN KEYS + CHECKS)
+-- FACT: OrderHeader (CANDIDATE KEY + FOREIGN KEYS + CHECKS)
 -- Columns (expected):
---   SalesOrderNumber, CustomerKey, StoreKey, EmployeeKey,
---   OrderDate, TimeKey, SalesChannelKey, IsOrderDelayed
+--   OrderNumber, CustomerKey, StoreKey, EmployeeKey,
+--   OrderDate, TimeKey, ChannelKey, IsOrderDelayed
 -----------------------------------------------------------------------
 
 SET NOCOUNT ON;
@@ -12,85 +12,85 @@ SET XACT_ABORT ON;
 -- CLEANUP: remove legacy/incorrect constraint if it exists
 -- (DeliveryDate is NOT a header column in the current schema)
 -----------------------------------------------------------------------
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
 AND EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesOrderHeader_Dates_DeliveryDate'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'FK_OrderHeader_Dates_DeliveryDate'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader DROP CONSTRAINT FK_SalesOrderHeader_Dates_DeliveryDate;
+    ALTER TABLE dbo.OrderHeader DROP CONSTRAINT FK_OrderHeader_Dates_DeliveryDate;
 END;
 
 -----------------------------------------------------------------------
--- CANDIDATE KEY (required for SalesOrderDetail -> SalesOrderHeader FK)
+-- CANDIDATE KEY (required for OrderDetail -> OrderHeader FK)
 -----------------------------------------------------------------------
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesOrderHeader', N'SalesOrderNumber') IS NOT NULL
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.OrderHeader', N'OrderNumber') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.key_constraints
-    WHERE name = N'UQ_SalesOrderHeader_SalesOrderNumber'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'UQ_OrderHeader_OrderNumber'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader
-    ADD CONSTRAINT UQ_SalesOrderHeader_SalesOrderNumber
-        UNIQUE NONCLUSTERED ([SalesOrderNumber]);
+    ALTER TABLE dbo.OrderHeader
+    ADD CONSTRAINT UQ_OrderHeader_OrderNumber
+        UNIQUE NONCLUSTERED ([OrderNumber]);
 END;
 
 -----------------------------------------------------------------------
 -- FOREIGN KEYS (WITH CHECK)
 -----------------------------------------------------------------------
 
--- SalesOrderHeader -> Customers
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
+-- OrderHeader -> Customers
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
 AND OBJECT_ID(N'dbo.Customers', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesOrderHeader', N'CustomerKey') IS NOT NULL
+AND COL_LENGTH(N'dbo.OrderHeader', N'CustomerKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesOrderHeader_Customers'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'FK_OrderHeader_Customers'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader WITH CHECK
-    ADD CONSTRAINT FK_SalesOrderHeader_Customers
+    ALTER TABLE dbo.OrderHeader WITH CHECK
+    ADD CONSTRAINT FK_OrderHeader_Customers
         FOREIGN KEY ([CustomerKey])
         REFERENCES dbo.Customers ([CustomerKey]);
 
-    ALTER TABLE dbo.SalesOrderHeader CHECK CONSTRAINT FK_SalesOrderHeader_Customers;
+    ALTER TABLE dbo.OrderHeader CHECK CONSTRAINT FK_OrderHeader_Customers;
 END;
 
--- SalesOrderHeader -> Stores
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
+-- OrderHeader -> Stores
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
 AND OBJECT_ID(N'dbo.Stores', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesOrderHeader', N'StoreKey') IS NOT NULL
+AND COL_LENGTH(N'dbo.OrderHeader', N'StoreKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesOrderHeader_Stores'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'FK_OrderHeader_Stores'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader WITH CHECK
-    ADD CONSTRAINT FK_SalesOrderHeader_Stores
+    ALTER TABLE dbo.OrderHeader WITH CHECK
+    ADD CONSTRAINT FK_OrderHeader_Stores
         FOREIGN KEY ([StoreKey])
         REFERENCES dbo.Stores ([StoreKey]);
 
-    ALTER TABLE dbo.SalesOrderHeader CHECK CONSTRAINT FK_SalesOrderHeader_Stores;
+    ALTER TABLE dbo.OrderHeader CHECK CONSTRAINT FK_OrderHeader_Stores;
 END;
 
--- SalesOrderHeader -> Employees (EmployeeKey) [guarded for type compatibility]
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
+-- OrderHeader -> Employees (EmployeeKey) [guarded for type compatibility]
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
 AND OBJECT_ID(N'dbo.Employees', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesOrderHeader', N'EmployeeKey') IS NOT NULL
+AND COL_LENGTH(N'dbo.OrderHeader', N'EmployeeKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesOrderHeader_Employees_EmployeeKey'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'FK_OrderHeader_Employees_EmployeeKey'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 AND EXISTS (
     SELECT 1
@@ -98,7 +98,7 @@ AND EXISTS (
     JOIN sys.columns rc
       ON rc.object_id = OBJECT_ID(N'dbo.Employees')
      AND rc.name = N'EmployeeKey'
-    WHERE pc.object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE pc.object_id = OBJECT_ID(N'dbo.OrderHeader')
       AND pc.name = N'EmployeeKey'
       AND pc.system_type_id = rc.system_type_id
       AND pc.user_type_id = rc.user_type_id
@@ -107,69 +107,69 @@ AND EXISTS (
       AND pc.scale = rc.scale
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader WITH CHECK
-    ADD CONSTRAINT FK_SalesOrderHeader_Employees_EmployeeKey
+    ALTER TABLE dbo.OrderHeader WITH CHECK
+    ADD CONSTRAINT FK_OrderHeader_Employees_EmployeeKey
         FOREIGN KEY ([EmployeeKey])
         REFERENCES dbo.Employees ([EmployeeKey]);
 
-    ALTER TABLE dbo.SalesOrderHeader CHECK CONSTRAINT FK_SalesOrderHeader_Employees_EmployeeKey;
+    ALTER TABLE dbo.OrderHeader CHECK CONSTRAINT FK_OrderHeader_Employees_EmployeeKey;
 END;
 
--- SalesOrderHeader -> Dates (OrderDate)
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
+-- OrderHeader -> Dates (OrderDate)
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
 AND OBJECT_ID(N'dbo.Dates', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesOrderHeader', N'OrderDate') IS NOT NULL
+AND COL_LENGTH(N'dbo.OrderHeader', N'OrderDate') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesOrderHeader_Dates_OrderDate'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'FK_OrderHeader_Dates_OrderDate'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader WITH CHECK
-    ADD CONSTRAINT FK_SalesOrderHeader_Dates_OrderDate
+    ALTER TABLE dbo.OrderHeader WITH CHECK
+    ADD CONSTRAINT FK_OrderHeader_Dates_OrderDate
         FOREIGN KEY ([OrderDate])
         REFERENCES dbo.Dates ([Date]);
 
-    ALTER TABLE dbo.SalesOrderHeader CHECK CONSTRAINT FK_SalesOrderHeader_Dates_OrderDate;
+    ALTER TABLE dbo.OrderHeader CHECK CONSTRAINT FK_OrderHeader_Dates_OrderDate;
 END;
 
--- SalesOrderHeader -> Time
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
+-- OrderHeader -> Time
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
 AND OBJECT_ID(N'dbo.Time', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesOrderHeader', N'TimeKey') IS NOT NULL
+AND COL_LENGTH(N'dbo.OrderHeader', N'TimeKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesOrderHeader_Time'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'FK_OrderHeader_Time'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader WITH CHECK
-    ADD CONSTRAINT FK_SalesOrderHeader_Time
+    ALTER TABLE dbo.OrderHeader WITH CHECK
+    ADD CONSTRAINT FK_OrderHeader_Time
         FOREIGN KEY ([TimeKey])
         REFERENCES dbo.Time ([TimeKey]);
 
-    ALTER TABLE dbo.SalesOrderHeader CHECK CONSTRAINT FK_SalesOrderHeader_Time;
+    ALTER TABLE dbo.OrderHeader CHECK CONSTRAINT FK_OrderHeader_Time;
 END;
 
--- SalesOrderHeader -> SalesChannels
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
-AND OBJECT_ID(N'dbo.SalesChannels', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesOrderHeader', N'SalesChannelKey') IS NOT NULL
+-- OrderHeader -> Channels
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
+AND OBJECT_ID(N'dbo.Channels', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.OrderHeader', N'ChannelKey') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.foreign_keys
-    WHERE name = N'FK_SalesOrderHeader_SalesChannels'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'FK_OrderHeader_Channels'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader WITH CHECK
-    ADD CONSTRAINT FK_SalesOrderHeader_SalesChannels
-        FOREIGN KEY ([SalesChannelKey])
-        REFERENCES dbo.SalesChannels ([SalesChannelKey]);
+    ALTER TABLE dbo.OrderHeader WITH CHECK
+    ADD CONSTRAINT FK_OrderHeader_Channels
+        FOREIGN KEY ([ChannelKey])
+        REFERENCES dbo.Channels ([ChannelKey]);
 
-    ALTER TABLE dbo.SalesOrderHeader CHECK CONSTRAINT FK_SalesOrderHeader_SalesChannels;
+    ALTER TABLE dbo.OrderHeader CHECK CONSTRAINT FK_OrderHeader_Channels;
 END;
 
 -----------------------------------------------------------------------
@@ -177,16 +177,16 @@ END;
 -----------------------------------------------------------------------
 
 -- IsOrderDelayed is a bit/flag represented as INT in the fact schema (0/1).
-IF OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.SalesOrderHeader', N'IsOrderDelayed') IS NOT NULL
+IF OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.OrderHeader', N'IsOrderDelayed') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.check_constraints
-    WHERE name = N'CK_SalesOrderHeader_IsOrderDelayed_01'
-      AND parent_object_id = OBJECT_ID(N'dbo.SalesOrderHeader')
+    WHERE name = N'CK_OrderHeader_IsOrderDelayed_01'
+      AND parent_object_id = OBJECT_ID(N'dbo.OrderHeader')
 )
 BEGIN
-    ALTER TABLE dbo.SalesOrderHeader WITH CHECK
-    ADD CONSTRAINT CK_SalesOrderHeader_IsOrderDelayed_01
+    ALTER TABLE dbo.OrderHeader WITH CHECK
+    ADD CONSTRAINT CK_OrderHeader_IsOrderDelayed_01
         CHECK ([IsOrderDelayed] IN (0, 1));
 END;

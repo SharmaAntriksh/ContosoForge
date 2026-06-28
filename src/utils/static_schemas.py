@@ -87,7 +87,7 @@ def _derive_schema_from_base(base: Schema, cols: Sequence[str], *, name: str) ->
     """
     Build a schema by selecting columns from a base schema, preserving the provided column order.
 
-    This keeps datatypes consistent across derived tables (e.g., SalesOrderHeader/Detail)
+    This keeps datatypes consistent across derived tables (e.g., OrderHeader/OrderDetail)
     while making the column list explicit and easy to review.
     """
     base_map = {c: t for c, t in base}
@@ -135,15 +135,15 @@ def _validate_schema_map(schema_map: Mapping[str, Schema]) -> None:
 # FACT BASE SCHEMAS (single source of truth for derivations)
 # ============================================================================
 _SALES_SCHEMA: Schema = (
-    ("SalesOrderNumber", INT_NN),
-    ("SalesOrderLineNumber", INT_NN),
+    ("OrderNumber", INT_NN),
+    ("OrderLineNumber", INT_NN),
     ("CustomerKey", INT_NN),
     ("ProductKey", INT_NN),
     ("StoreKey", INT_NN),
     ("EmployeeKey", INT_NN),
     ("PromotionKey", INT_NN),
     ("CurrencyKey", INT_NN),
-    ("SalesChannelKey", SMALLINT_NN),
+    ("ChannelKey", SMALLINT_NN),
     ("TimeKey", SMALLINT_NN),
     ("OrderDate", DATE_NN),
     ("DueDate", DATE_NN),
@@ -160,26 +160,26 @@ _SALES_SCHEMA: Schema = (
 
 _SALES_SCHEMA_NO_ORDER: Schema = tuple(
     (name, dtype) for (name, dtype) in _SALES_SCHEMA
-    if name not in ("SalesOrderNumber", "SalesOrderLineNumber")
+    if name not in ("OrderNumber", "OrderLineNumber")
 )
 
 # Derived fact tables (PascalCase table names for SQL)
 _SALES_ORDER_HEADER_COLS: Tuple[str, ...] = (
-    "SalesOrderNumber",
+    "OrderNumber",
     "CustomerKey",
     "StoreKey",
     "EmployeeKey",
     "PromotionKey",
     "CurrencyKey",
-    "SalesChannelKey",
+    "ChannelKey",
     "OrderDate",
     "TimeKey",
     "IsOrderDelayed",
 )
 
 _SALES_ORDER_DETAIL_COLS: Tuple[str, ...] = (
-    "SalesOrderNumber",
-    "SalesOrderLineNumber",
+    "OrderNumber",
+    "OrderLineNumber",
     "ProductKey",
     "DueDate",
     "DeliveryDate",
@@ -192,10 +192,10 @@ _SALES_ORDER_DETAIL_COLS: Tuple[str, ...] = (
 )
 
 _SALES_ORDER_HEADER_SCHEMA: Schema = _derive_schema_from_base(
-    _SALES_SCHEMA, _SALES_ORDER_HEADER_COLS, name="SalesOrderHeader"
+    _SALES_SCHEMA, _SALES_ORDER_HEADER_COLS, name="OrderHeader"
 )
 _SALES_ORDER_DETAIL_SCHEMA: Schema = _derive_schema_from_base(
-    _SALES_SCHEMA, _SALES_ORDER_DETAIL_COLS, name="SalesOrderDetail"
+    _SALES_SCHEMA, _SALES_ORDER_DETAIL_COLS, name="OrderDetail"
 )
 
 
@@ -216,7 +216,8 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("LastName", VARCHAR(50, not_null=False)),
         ("FullName", VARCHAR(100, not_null=True)),
         ("DOB", DATE_NULL),
-        ("Gender", CHAR(1, not_null=True)),
+        ("Gender", VARCHAR(10, not_null=True)),
+        ("GenderCode", CHAR(1, not_null=True)),
         ("EmailAddress", VARCHAR(100, not_null=False)),
         ("PhoneNumber", VARCHAR(15, not_null=False)),
         ("HomeAddress", VARCHAR(200, not_null=False)),
@@ -668,7 +669,7 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("BaseRate", DECIMAL(10, 2, not_null=True)),
         ("VacationHours", INT_NN),
         ("Status", VARCHAR(20, not_null=True)),
-        ("SalesPersonFlag", BIT(not_null=True)),
+        ("IsSalesperson", BIT(not_null=True)),
         ("DepartmentName", VARCHAR(50, not_null=True)),
     ),
     "EmployeeStoreAssignments": (
@@ -723,7 +724,7 @@ DIM_SCHEMAS: Dict[str, Schema] = {
     "Complaints": (
         ("ComplaintKey", INT_NN),
         ("CustomerKey", INT_NN),
-        ("SalesOrderNumber", INT(not_null=False)),
+        ("OrderNumber", INT(not_null=False)),
         ("LineNumber", INT(not_null=False)),
         ("ComplaintDate", DATE_NN),
         ("ResolutionDate", DATE(not_null=False)),
@@ -741,13 +742,13 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("TierRank", TINYINT(not_null=True)),
         ("PointsMultiplier", DECIMAL(4, 2, not_null=True)),
     ),
-    "SalesChannels": (
-        ("SalesChannelKey", SMALLINT_NN),
-        ("SalesChannel", VARCHAR(50, not_null=False)),
-        ("SalesChannelDescription", VARCHAR(200, not_null=False)),
+    "Channels": (
+        ("ChannelKey", SMALLINT_NN),
+        ("Channel", VARCHAR(50, not_null=False)),
+        ("ChannelDescription", VARCHAR(200, not_null=False)),
         ("ChannelGroup", VARCHAR(50, not_null=False)),
         ("ChannelGroupDescription", VARCHAR(200, not_null=False)),
-        ("SalesChannelCode", VARCHAR(30, not_null=False)),
+        ("ChannelCode", VARCHAR(30, not_null=False)),
         ("SortOrder", SMALLINT(not_null=False)),
         ("IsDigital", BIT(not_null=False)),
         ("IsPhysical", BIT(not_null=False)),
@@ -779,11 +780,11 @@ FACT_SCHEMAS: Dict[str, Schema] = {
         ("NetPrice", DECIMAL(10, 2, not_null=True)),
     ),
     "Sales": _SALES_SCHEMA,
-    "SalesOrderHeader": _SALES_ORDER_HEADER_SCHEMA,
-    "SalesOrderDetail": _SALES_ORDER_DETAIL_SCHEMA,
-    "SalesReturn": (
-        ("SalesOrderNumber", INT_NN),
-        ("SalesOrderLineNumber", INT_NN),
+    "OrderHeader": _SALES_ORDER_HEADER_SCHEMA,
+    "OrderDetail": _SALES_ORDER_DETAIL_SCHEMA,
+    "Returns": (
+        ("OrderNumber", INT_NN),
+        ("OrderLineNumber", INT_NN),
         ("ReturnDate", DATE_NN),
         ("ReturnReasonKey", INT_NN),
         ("ReturnQuantity", INT_NN),
@@ -816,8 +817,8 @@ FACT_SCHEMAS: Dict[str, Schema] = {
         ("BudgetYear", INT_NN),
         ("Scenario", VARCHAR(20, not_null=True)),
         ("BudgetGrowthPct", DECIMAL(9, 6, not_null=True)),
-        ("BudgetSalesAmount", DECIMAL(19, 2, not_null=True)),
-        ("BudgetSalesQuantity", DECIMAL(19, 2, not_null=True)),
+        ("BudgetAmount", DECIMAL(19, 2, not_null=True)),
+        ("BudgetQuantity", DECIMAL(19, 2, not_null=True)),
         ("BudgetMethod", VARCHAR(140, not_null=True)),
     ),
     "BudgetMonthly": (
@@ -1062,20 +1063,20 @@ _INT32_HALF = 1_073_741_823  # int32_max // 2
 
 
 def promote_order_number(cols: Sequence[SchemaCol], total_rows: int) -> List[SchemaCol]:
-    """Widen ``SalesOrderNumber`` to BIGINT when *total_rows* would overflow
+    """Widen ``OrderNumber`` to BIGINT when *total_rows* would overflow
     int32, preserving the column's nullability.
 
-    Single source of the int64 ``SalesOrderNumber`` decision for generated SQL:
+    Single source of the int64 ``OrderNumber`` decision for generated SQL:
     used by ``get_sales_schema`` (Sales fact) and by the CREATE TABLE generator
-    for the other fact tables that carry the column (SalesOrderHeader/Detail/
-    Return/Complaints) — which pass the static (tuple) schemas. The
+    for the other fact tables that carry the column (OrderHeader/OrderDetail/
+    Returns/Complaints) — which pass the static (tuple) schemas. The
     parquet/generation side makes the same int64 call via the ``order_id_int64``
     flag.
     """
     if total_rows <= _INT32_HALF:
         return list(cols)
     return [
-        (name, BIGINT(not_null=not dtype.nullable)) if name == "SalesOrderNumber" else (name, dtype)
+        (name, BIGINT(not_null=not dtype.nullable)) if name == "OrderNumber" else (name, dtype)
         for name, dtype in cols
     ]
 
@@ -1083,7 +1084,7 @@ def promote_order_number(cols: Sequence[SchemaCol], total_rows: int) -> List[Sch
 def get_sales_schema(skip_order_cols: bool, total_rows: int = 0) -> List[SchemaCol]:
     """Return the Sales schema with or without order number columns.
 
-    When *total_rows* exceeds half of int32 max, ``SalesOrderNumber`` is
+    When *total_rows* exceeds half of int32 max, ``OrderNumber`` is
     promoted to BIGINT to prevent overflow in both parquet and SQL output.
     """
     cols = list(_SALES_SCHEMA_NO_ORDER if skip_order_cols else _SALES_SCHEMA)
@@ -1091,12 +1092,12 @@ def get_sales_schema(skip_order_cols: bool, total_rows: int = 0) -> List[SchemaC
 
 
 def get_sales_order_header_schema() -> List[SchemaCol]:
-    """Return the SalesOrderHeader schema."""
+    """Return the OrderHeader schema."""
     return list(_SALES_ORDER_HEADER_SCHEMA)
 
 
 def get_sales_order_detail_schema() -> List[SchemaCol]:
-    """Return the SalesOrderDetail schema."""
+    """Return the OrderDetail schema."""
     return list(_SALES_ORDER_DETAIL_SCHEMA)
 
 

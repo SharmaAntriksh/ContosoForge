@@ -203,13 +203,13 @@ BEGIN
     FROM Sales f
     LEFT JOIN Customers c ON c.CustomerKey = f.CustomerKey;
 END
-ELSE IF OBJECT_ID('dbo.SalesOrderHeader') IS NOT NULL
+ELSE IF OBJECT_ID('dbo.OrderHeader') IS NOT NULL
 BEGIN
     SELECT
         COUNT(*)                                                        AS TotalSales,
         SUM(CASE WHEN c.CustomerKey IS NULL THEN 1 ELSE 0 END)         AS OrphanedSales,
         SUM(CASE WHEN c.IsCurrent = 1 THEN 1 ELSE 0 END)              AS CurrentVersionSales
-    FROM SalesOrderHeader f
+    FROM OrderHeader f
     LEFT JOIN Customers c ON c.CustomerKey = f.CustomerKey;
 END
 -- EXPECTED: zero orphaned sales, all join to IsCurrent=1

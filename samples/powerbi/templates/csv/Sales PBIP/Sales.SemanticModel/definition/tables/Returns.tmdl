@@ -1,21 +1,21 @@
-table SalesReturn
+table Returns
 	lineageTag: e5942e12-813c-4803-97fb-879b388a5987
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 6f44264e-b30f-45fd-bc01-cb9ec8c8f392
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesOrderLineNumber
+	column OrderLineNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 00d34491-6def-4c63-8e04-3d7a1e728452
 		summarizeBy: sum
-		sourceColumn: SalesOrderLineNumber
+		sourceColumn: OrderLineNumber
 
 		annotation SummarizationSetBy = Automatic
 
@@ -77,26 +77,26 @@ table SalesReturn
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesReturn = m
+	partition Returns = m
 		mode: import
 		queryGroup: Fact\SecondaryFacts
 		source =
 				let
-				    Source = Folder.Files ( ContosoFolder & "\facts\sales_return" ),
+				    Source = Folder.Files ( ContosoFolder & "\facts\returns" ),
 				    RemoveCols = Table.SelectColumns ( Source, { "Content" } ),
 				    RemoveHidden = Table.SelectRows ( RemoveCols, each [Attributes]?[Hidden]? <> true ),
 				    InvokeCustom = Table.AddColumn (
 				        RemoveHidden,
 				        "Transform File",
-				        each Transform_SalesReturns_File ( [Content] )
+				        each Transform_Returns_File ( [Content] )
 				    ),
 				    RemoveOtherCol = Table.SelectColumns ( InvokeCustom, { "Transform File" } ),
 				    CombineTables = Table.ExpandTableColumn (
 				        RemoveOtherCol,
 				        "Transform File",
-				        Table.ColumnNames ( Transform_SalesReturns_File ( Sample_File_SalesReturns ) )
+				        Table.ColumnNames ( Transform_Returns_File ( Sample_File_Returns ) )
 				    ),
-				    ChangeType = Table.TransformColumnTypes(CombineTables,{{"SalesOrderNumber", Int64.Type}, {"SalesOrderLineNumber", Int64.Type}, {"ReturnDate", type date}, {"ReturnReasonKey", Int64.Type}, {"ReturnQuantity", Int64.Type}, {"ReturnNetPrice", Currency.Type}, {"ReturnEventKey", Int64.Type}, {"ReturnSequence", Int64.Type}})
+				    ChangeType = Table.TransformColumnTypes(CombineTables,{{"OrderNumber", Int64.Type}, {"OrderLineNumber", Int64.Type}, {"ReturnDate", type date}, {"ReturnReasonKey", Int64.Type}, {"ReturnQuantity", Int64.Type}, {"ReturnNetPrice", Currency.Type}, {"ReturnEventKey", Int64.Type}, {"ReturnSequence", Int64.Type}})
 				in
 				    ChangeType
 

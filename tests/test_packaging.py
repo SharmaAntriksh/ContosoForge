@@ -88,15 +88,15 @@ class TestStaticSchemas:
         "Plans",
         "CustomerSubscriptions",
         "LoyaltyTiers",
-        "SalesChannels",
+        "Channels",
         "ReturnReason",
     }
 
     EXPECTED_FACT_TABLES = {
         "Sales",
-        "SalesOrderHeader",
-        "SalesOrderDetail",
-        "SalesReturn",
+        "OrderHeader",
+        "OrderDetail",
+        "Returns",
         "ExchangeRates",
         "BudgetYearly",
         "BudgetMonthly",
@@ -160,25 +160,25 @@ class TestStaticSchemas:
     def test_get_sales_schema_with_order_cols(self):
         schema = get_sales_schema(skip_order_cols=False)
         col_names = [c for c, _ in schema]
-        assert "SalesOrderNumber" in col_names
-        assert "SalesOrderLineNumber" in col_names
+        assert "OrderNumber" in col_names
+        assert "OrderLineNumber" in col_names
 
     def test_get_sales_schema_without_order_cols(self):
         schema = get_sales_schema(skip_order_cols=True)
         col_names = [c for c, _ in schema]
-        assert "SalesOrderNumber" not in col_names
-        assert "SalesOrderLineNumber" not in col_names
+        assert "OrderNumber" not in col_names
+        assert "OrderLineNumber" not in col_names
 
     def test_sales_order_header_schema_has_key_columns(self):
         schema = get_sales_order_header_schema()
         col_names = [c for c, _ in schema]
-        assert "SalesOrderNumber" in col_names
+        assert "OrderNumber" in col_names
         assert "CustomerKey" in col_names
 
     def test_sales_order_detail_schema_has_key_columns(self):
         schema = get_sales_order_detail_schema()
         col_names = [c for c, _ in schema]
-        assert "SalesOrderNumber" in col_names
+        assert "OrderNumber" in col_names
         assert "ProductKey" in col_names
 
     def test_get_dates_schema_base_only(self):
@@ -274,8 +274,8 @@ class TestSQLDDLGeneration:
             output_folder=tmp_path / "sql", cfg=cfg,
         )
         fact_sql = fact_out.read_text(encoding="utf-8")
-        assert "[SalesOrderHeader]" in fact_sql
-        assert "[SalesOrderDetail]" in fact_sql
+        assert "[OrderHeader]" in fact_sql
+        assert "[OrderDetail]" in fact_sql
 
     def test_generate_all_create_tables_both_mode(self, tmp_path):
         cfg = AppConfig.model_validate({
@@ -287,8 +287,8 @@ class TestSQLDDLGeneration:
         )
         fact_sql = fact_out.read_text(encoding="utf-8")
         assert "[Sales]" in fact_sql
-        assert "[SalesOrderHeader]" in fact_sql
-        assert "[SalesOrderDetail]" in fact_sql
+        assert "[OrderHeader]" in fact_sql
+        assert "[OrderDetail]" in fact_sql
 
     def test_generate_all_budget_enabled(self, tmp_path):
         cfg = AppConfig.model_validate({
@@ -532,8 +532,8 @@ class TestBulkInsert:
 
     def test_infer_table_from_filename(self):
         assert _infer_table_from_filename("sales_chunk0001.csv") == "Sales"
-        assert _infer_table_from_filename("sales_order_detail_chunk0001.csv") == "SalesOrderDetail"
-        assert _infer_table_from_filename("sales_order_header_chunk0001.csv") == "SalesOrderHeader"
+        assert _infer_table_from_filename("order_detail_chunk0001.csv") == "OrderDetail"
+        assert _infer_table_from_filename("order_header_chunk0001.csv") == "OrderHeader"
         assert _infer_table_from_filename("budget_yearly.csv") == "BudgetYearly"
 
     def test_generate_dims_and_facts_scripts(self, tmp_path):
@@ -641,12 +641,12 @@ class TestParquetPackager:
         assert result is None
 
     def test_resolve_merged_parquet_non_sales(self, tmp_path):
-        pq_dir = tmp_path / "parquet" / "sales_order_detail"
+        pq_dir = tmp_path / "parquet" / "order_detail"
         pq_dir.mkdir(parents=True)
-        pq_file = pq_dir / "sales_order_detail.parquet"
+        pq_file = pq_dir / "order_detail.parquet"
         pq_file.write_bytes(b"PAR1fake")
 
-        result = resolve_merged_parquet(tmp_path, {}, "SalesOrderDetail")
+        result = resolve_merged_parquet(tmp_path, {}, "OrderDetail")
         assert result == pq_file
 
     def test_copy_parquet_facts_success(self, tmp_path):
@@ -799,7 +799,7 @@ class TestPathUtilities:
     """Test path helper functions."""
 
     def test_to_snake_pascal_case(self):
-        assert to_snake("SalesOrderDetail") == "sales_order_detail"
+        assert to_snake("OrderDetail") == "order_detail"
 
     def test_to_snake_already_snake(self):
         assert to_snake("sales_order_detail") == "sales_order_detail"
@@ -812,9 +812,9 @@ class TestPathUtilities:
 
     def test_table_dir_name_mapped(self):
         assert table_dir_name("Sales") == "sales"
-        assert table_dir_name("SalesOrderDetail") == "sales_order_detail"
-        assert table_dir_name("SalesOrderHeader") == "sales_order_header"
-        assert table_dir_name("SalesReturn") == "sales_return"
+        assert table_dir_name("OrderDetail") == "order_detail"
+        assert table_dir_name("OrderHeader") == "order_header"
+        assert table_dir_name("Returns") == "returns"
 
     def test_table_dir_name_unmapped_uses_snake(self):
         assert table_dir_name("BudgetYearly") == "budget_yearly"
@@ -853,19 +853,19 @@ class TestPathUtilities:
     def test_tables_from_sales_cfg_sales_mode(self):
         tables = tables_from_sales_cfg(SalesConfig.model_validate({"sales_output": "sales"}))
         assert "Sales" in tables
-        assert "SalesOrderDetail" not in tables
+        assert "OrderDetail" not in tables
 
     def test_tables_from_sales_cfg_sales_order_mode(self):
         tables = tables_from_sales_cfg(SalesConfig.model_validate({"sales_output": "sales_order"}))
         assert "Sales" not in tables
-        assert "SalesOrderDetail" in tables
-        assert "SalesOrderHeader" in tables
+        assert "OrderDetail" in tables
+        assert "OrderHeader" in tables
 
     def test_tables_from_sales_cfg_both_mode(self):
         tables = tables_from_sales_cfg(SalesConfig.model_validate({"sales_output": "both"}))
         assert "Sales" in tables
-        assert "SalesOrderDetail" in tables
-        assert "SalesOrderHeader" in tables
+        assert "OrderDetail" in tables
+        assert "OrderHeader" in tables
 
     def test_tables_from_sales_cfg_invalid_mode(self):
         with pytest.raises(ValueError, match="Invalid sales_output"):
@@ -876,14 +876,14 @@ class TestPathUtilities:
             SalesConfig.model_validate({"sales_output": "sales"}),
             cfg=AppConfig.model_validate({"returns": {"enabled": True}}),
         )
-        assert "SalesReturn" in tables
+        assert "Returns" in tables
 
     def test_tables_from_sales_cfg_returns_disabled(self):
         tables = tables_from_sales_cfg(
             SalesConfig.model_validate({"sales_output": "sales"}),
             cfg=AppConfig.model_validate({"returns": {"enabled": False}}),
         )
-        assert "SalesReturn" not in tables
+        assert "Returns" not in tables
 
     def test_tables_from_sales_cfg_returns_blocked_by_skip_order(self):
         """Returns disabled when skip_order_cols=True and sales_output=sales."""
@@ -891,7 +891,7 @@ class TestPathUtilities:
             SalesConfig.model_validate({"sales_output": "sales", "skip_order_cols": True}),
             cfg=AppConfig.model_validate({"returns": {"enabled": True}}),
         )
-        assert "SalesReturn" not in tables
+        assert "Returns" not in tables
 
 
 # ===================================================================

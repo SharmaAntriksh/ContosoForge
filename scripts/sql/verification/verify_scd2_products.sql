@@ -165,12 +165,12 @@ BEGIN
     FROM Sales f
     LEFT JOIN Products p ON p.ProductKey = f.ProductKey;
 END
-ELSE IF OBJECT_ID('dbo.SalesOrderDetail') IS NOT NULL
+ELSE IF OBJECT_ID('dbo.OrderDetail') IS NOT NULL
 BEGIN
     SELECT
         COUNT(*)                                                        AS TotalSales,
         SUM(CASE WHEN p.ProductKey IS NULL THEN 1 ELSE 0 END)          AS OrphanedSales
-    FROM SalesOrderDetail f
+    FROM OrderDetail f
     LEFT JOIN Products p ON p.ProductKey = f.ProductKey;
 END
 -- EXPECTED: zero orphaned sales

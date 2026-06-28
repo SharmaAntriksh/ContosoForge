@@ -44,8 +44,8 @@ class TestComplaintsAccumulator:
         df = acc.finalize()
         assert df.empty
         assert "CustomerKey" in df.columns
-        assert "SalesOrderNumber" in df.columns
-        assert "SalesOrderLineNumber" in df.columns
+        assert "OrderNumber" in df.columns
+        assert "OrderLineNumber" in df.columns
 
     def test_has_data_false_initially(self):
         acc = ComplaintsAccumulator()
@@ -74,7 +74,7 @@ class TestComplaintsAccumulator:
         assert acc.has_data is False
 
     def test_concatenation_across_chunks(self):
-        """Each chunk has unique SalesOrderNumbers (chunk_idx × stride),
+        """Each chunk has unique OrderNumbers (chunk_idx × stride),
         so cross-chunk duplicates cannot occur.  Accumulator concatenates
         without dedup for performance."""
         acc = ComplaintsAccumulator()
@@ -112,8 +112,8 @@ class TestMicroAggregateComplaints:
     def _make_table(self, ck, so, ln):
         return pa.table({
             "CustomerKey": pa.array(ck, type=pa.int64()),
-            "SalesOrderNumber": pa.array(so, type=pa.int64()),
-            "SalesOrderLineNumber": pa.array(ln, type=pa.int64()),
+            "OrderNumber": pa.array(so, type=pa.int64()),
+            "OrderLineNumber": pa.array(ln, type=pa.int64()),
         })
 
     def test_basic_extraction(self):
@@ -135,8 +135,8 @@ class TestMicroAggregateComplaints:
     def test_empty_table(self):
         tbl = pa.table({
             "CustomerKey": pa.array([], type=pa.int64()),
-            "SalesOrderNumber": pa.array([], type=pa.int64()),
-            "SalesOrderLineNumber": pa.array([], type=pa.int64()),
+            "OrderNumber": pa.array([], type=pa.int64()),
+            "OrderLineNumber": pa.array([], type=pa.int64()),
         })
         assert micro_aggregate_complaints(tbl) is None
 
@@ -231,8 +231,8 @@ class TestBuildOrderLookup:
     def test_basic_lookup(self):
         order_arrays = {
             "CustomerKey": np.array([1, 1, 2, 2, 3], dtype=np.int64),
-            "SalesOrderNumber": np.array([100, 101, 200, 201, 300], dtype=np.int64),
-            "SalesOrderLineNumber": np.array([1, 1, 1, 2, 1], dtype=np.int64),
+            "OrderNumber": np.array([100, 101, 200, 201, 300], dtype=np.int64),
+            "OrderLineNumber": np.array([1, 1, 1, 2, 1], dtype=np.int64),
         }
         lookup = _build_order_lookup(order_arrays)
         assert 1 in lookup
@@ -245,8 +245,8 @@ class TestBuildOrderLookup:
     def test_empty_arrays(self):
         order_arrays = {
             "CustomerKey": np.array([], dtype=np.int64),
-            "SalesOrderNumber": np.array([], dtype=np.int64),
-            "SalesOrderLineNumber": np.array([], dtype=np.int64),
+            "OrderNumber": np.array([], dtype=np.int64),
+            "OrderLineNumber": np.array([], dtype=np.int64),
         }
         lookup = _build_order_lookup(order_arrays)
         assert len(lookup) == 0
@@ -254,8 +254,8 @@ class TestBuildOrderLookup:
     def test_single_customer(self):
         order_arrays = {
             "CustomerKey": np.array([5, 5, 5], dtype=np.int64),
-            "SalesOrderNumber": np.array([10, 11, 12], dtype=np.int64),
-            "SalesOrderLineNumber": np.array([1, 1, 1], dtype=np.int64),
+            "OrderNumber": np.array([10, 11, 12], dtype=np.int64),
+            "OrderLineNumber": np.array([1, 1, 1], dtype=np.int64),
         }
         lookup = _build_order_lookup(order_arrays)
         assert len(lookup) == 1
@@ -454,7 +454,7 @@ class TestComplaintsSchema:
         names = schema.names
         assert "ComplaintKey" in names
         assert "CustomerKey" in names
-        assert "SalesOrderNumber" in names
+        assert "OrderNumber" in names
         assert "LineNumber" in names
         assert "ComplaintDate" in names
         assert "ResolutionDate" in names
@@ -489,7 +489,7 @@ class TestArraysToTable:
         assert table.num_columns == 13
 
         # Nullable columns should have nulls where sentinel -1 was
-        so_col = table.column("SalesOrderNumber")
+        so_col = table.column("OrderNumber")
         assert so_col[1].as_py() is None  # -1 → null
 
         ln_col = table.column("LineNumber")

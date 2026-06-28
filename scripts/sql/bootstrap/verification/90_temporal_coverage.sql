@@ -8,7 +8,7 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @has_sales BIT = CASE WHEN OBJECT_ID(N'dbo.Sales', N'U') IS NOT NULL THEN 1 ELSE 0 END;
-    DECLARE @has_soh   BIT = CASE WHEN OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL THEN 1 ELSE 0 END;
+    DECLARE @has_soh   BIT = CASE WHEN OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL THEN 1 ELSE 0 END;
 
     IF (@has_sales = 0 AND @has_soh = 0) OR OBJECT_ID(N'dbo.Dates', N'U') IS NULL
         RETURN;
@@ -30,8 +30,8 @@ BEGIN
     END
     ELSE
     BEGIN
-        SELECT @min_order = MIN(OrderDate), @max_order = MAX(OrderDate) FROM dbo.SalesOrderHeader;
-        SELECT @total_months = COUNT(DISTINCT YEAR(OrderDate) * 100 + MONTH(OrderDate)) FROM dbo.SalesOrderHeader;
+        SELECT @min_order = MIN(OrderDate), @max_order = MAX(OrderDate) FROM dbo.OrderHeader;
+        SELECT @total_months = COUNT(DISTINCT YEAR(OrderDate) * 100 + MONTH(OrderDate)) FROM dbo.OrderHeader;
     END
 
     -- Sales gap months — load order dates into a temp table for the NOT EXISTS check
@@ -39,7 +39,7 @@ BEGIN
     IF @has_sales = 1
         INSERT INTO #OrderDates SELECT DISTINCT OrderDate FROM dbo.Sales;
     ELSE
-        INSERT INTO #OrderDates SELECT DISTINCT OrderDate FROM dbo.SalesOrderHeader;
+        INSERT INTO #OrderDates SELECT DISTINCT OrderDate FROM dbo.OrderHeader;
 
     DECLARE @gap_months INT;
     SELECT @gap_months = COUNT(*) FROM (

@@ -1,21 +1,21 @@
 table Sales
 	lineageTag: 98d27fd9-d067-4f71-8701-62e4cf08a2f5
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: 65df8146-1199-43ff-a8b3-0709583ed02a
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesOrderLineNumber
+	column OrderLineNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: e69c2d84-eba5-46ff-ac4e-23ee9db30392
 		summarizeBy: sum
-		sourceColumn: SalesOrderLineNumber
+		sourceColumn: OrderLineNumber
 
 		annotation SummarizationSetBy = Automatic
 
@@ -64,12 +64,12 @@ table Sales
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelKey
+	column ChannelKey
 		dataType: int64
 		formatString: 0
 		lineageTag: 799a98da-8823-4ae7-a0b2-5a65e8c2257f
 		summarizeBy: count
-		sourceColumn: SalesChannelKey
+		sourceColumn: ChannelKey
 
 		annotation SummarizationSetBy = Automatic
 
@@ -214,8 +214,8 @@ table Sales
 				        Table.ColumnNames ( Transform_Sales_File ( Sample_File_Sales ) )
 				    ),
 				    DataTypes = {
-				        { "SalesOrderNumber", Int64.Type },
-				        { "SalesOrderLineNumber", Int64.Type },
+				        { "OrderNumber", Int64.Type },
+				        { "OrderLineNumber", Int64.Type },
 				        { "CustomerKey", Int64.Type },
 				        { "ProductKey", Int64.Type },
 				        { "StoreKey", Int64.Type },
@@ -232,13 +232,13 @@ table Sales
 				        { "DeliveryStatus", type text },
 				        { "IsOrderDelayed", Int64.Type },
 				        { "EmployeeKey", Int64.Type },
-				        { "SalesChannelKey", Int64.Type },
+				        { "ChannelKey", Int64.Type },
 				        { "TimeKey", Int64.Type }
 				    },
 				    CheckNamesForTypes =
 				        if List.ContainsAny (
 				            Table.ColumnNames ( CombineTables ),
-				            { "SalesOrderNumber", "SalesOrderLineNumber" }
+				            { "OrderNumber", "OrderLineNumber" }
 				        )
 				        then
 				            DataTypes

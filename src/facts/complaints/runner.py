@@ -1,5 +1,5 @@
 """Complaints pipeline runner — generates complaints.parquet using
-accumulated (CustomerKey, SalesOrderNumber, SalesOrderLineNumber) triples
+accumulated (CustomerKey, OrderNumber, OrderLineNumber) triples
 from the sales pipeline.
 
 Runs AFTER sales generation.  A configurable fraction of customers file
@@ -322,8 +322,8 @@ def _build_order_lookup(
 ) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
     """Build {customer_key: (so_array, ln_array)} from flat order arrays."""
     ck_arr = order_arrays["CustomerKey"]
-    so_arr = order_arrays["SalesOrderNumber"]
-    ln_arr = order_arrays["SalesOrderLineNumber"]
+    so_arr = order_arrays["OrderNumber"]
+    ln_arr = order_arrays["OrderLineNumber"]
 
     cust_orders: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
     if len(ck_arr) > 0:
@@ -354,7 +354,7 @@ def _complaints_worker_task(args: Tuple) -> Dict[str, np.ndarray]:
         complainer_keys_chunk: np.ndarray[int64] — CustomerKeys for this chunk
         complaints_per_chunk:  np.ndarray[int32] — complaint counts per customer
         order_arrays_chunk:    dict of numpy arrays — order data for this chunk's customers
-            Keys: "CustomerKey", "SalesOrderNumber", "SalesOrderLineNumber"
+            Keys: "CustomerKey", "OrderNumber", "OrderLineNumber"
         complaints_cfg:        _ComplaintsCfg — complaint config (frozen dataclass, picklable)
         date_range:            tuple[int, int] — (g_start_ns, g_end_ns)
 
@@ -438,7 +438,7 @@ def _complaints_schema() -> pa.Schema:
     return pa.schema([
         pa.field("ComplaintKey", pa.int64()),
         pa.field("CustomerKey", pa.int64()),
-        pa.field("SalesOrderNumber", pa.int64(), nullable=True),
+        pa.field("OrderNumber", pa.int64(), nullable=True),
         pa.field("LineNumber", pa.int64(), nullable=True),
         pa.field("ComplaintDate", pa.date32()),
         pa.field("ResolutionDate", pa.date32(), nullable=True),
@@ -555,8 +555,8 @@ def _generate_complaints_serial(
     filtered = order_data[_complainer_mask]
     cust_orders = _build_order_lookup({
         "CustomerKey": filtered["CustomerKey"].to_numpy(dtype=np.int64),
-        "SalesOrderNumber": filtered["SalesOrderNumber"].to_numpy(dtype=np.int64),
-        "SalesOrderLineNumber": filtered["SalesOrderLineNumber"].to_numpy(dtype=np.int64),
+        "OrderNumber": filtered["OrderNumber"].to_numpy(dtype=np.int64),
+        "OrderLineNumber": filtered["OrderLineNumber"].to_numpy(dtype=np.int64),
     })
 
     result = _generate_rows_batch(
@@ -626,8 +626,8 @@ def _generate_complaints_parallel(
 
     # Convert to numpy arrays for pickle-efficient IPC
     orders_ck = filtered["CustomerKey"].to_numpy(dtype=np.int64, copy=True)
-    orders_so = filtered["SalesOrderNumber"].to_numpy(dtype=np.int64, copy=True)
-    orders_ln = filtered["SalesOrderLineNumber"].to_numpy(dtype=np.int64, copy=True)
+    orders_so = filtered["OrderNumber"].to_numpy(dtype=np.int64, copy=True)
+    orders_ln = filtered["OrderLineNumber"].to_numpy(dtype=np.int64, copy=True)
 
     # --- Partition complainers into chunks ---
     n_chunks = min(n_complainers, n_workers * 2)
@@ -651,8 +651,8 @@ def _generate_complaints_parallel(
         mask = np.isin(orders_ck, list(chunk_key_set))
         order_arrays_chunk = {
             "CustomerKey": orders_ck[mask],
-            "SalesOrderNumber": orders_so[mask],
-            "SalesOrderLineNumber": orders_ln[mask],
+            "OrderNumber": orders_so[mask],
+            "OrderLineNumber": orders_ln[mask],
         }
 
         tasks.append((
@@ -764,12 +764,12 @@ def _generate_complaints(
 # ---------------------------------------------------------------------------
 
 _COMPLAINTS_CSV_COLUMNS = [
-    "ComplaintKey", "CustomerKey", "SalesOrderNumber", "LineNumber",
+    "ComplaintKey", "CustomerKey", "OrderNumber", "LineNumber",
     "ComplaintDate", "ResolutionDate", "ComplaintType", "ComplaintDetail",
     "Severity", "Channel", "Status", "ResolutionType", "ResponseDays",
 ]
 
-_COMPLAINTS_CSV_INT_COLS = ("ComplaintKey", "CustomerKey", "SalesOrderNumber", "LineNumber", "ResponseDays")
+_COMPLAINTS_CSV_INT_COLS = ("ComplaintKey", "CustomerKey", "OrderNumber", "LineNumber", "ResponseDays")
 
 
 def _prepare_complaints_csv(df: pd.DataFrame) -> pd.DataFrame:

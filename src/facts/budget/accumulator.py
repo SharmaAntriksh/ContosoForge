@@ -47,7 +47,7 @@ class BudgetAccumulator:
 
     _SALES_OUTPUT_COLS = [
         "Country", "Category", "Year", "Month",
-        "SalesChannelKey", "SalesAmount", "SalesQuantity",
+        "ChannelKey", "SalesAmount", "SalesQuantity",
     ]
 
     def finalize_sales(self) -> pd.DataFrame:
@@ -89,7 +89,7 @@ class BudgetAccumulator:
         monthly.rename(columns={
             "year": "Year",
             "month": "Month",
-            "channel_key": "SalesChannelKey",
+            "channel_key": "ChannelKey",
             "sales_amount": "SalesAmount",
             "sales_qty": "SalesQuantity",
         }, inplace=True)

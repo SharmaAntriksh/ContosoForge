@@ -102,22 +102,22 @@ def _df_sales_channels(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
     Backward-compatible override:
       sales_channels:
         rows:
-          - {SalesChannelKey: 1, SalesChannel: Store, ChannelGroup: Physical}
+          - {ChannelKey: 1, Channel: Store, ChannelGroup: Physical}
           - ...
 
     If override rows are provided, only the 3 base columns are required; all new columns are derived/fill-defaulted.
     """
 
-    base_required = ["SalesChannelKey", "SalesChannel", "ChannelGroup"]
+    base_required = ["ChannelKey", "Channel", "ChannelGroup"]
 
-    # Output column order — must match STATIC_SCHEMAS["SalesChannels"] for BULK INSERT
+    # Output column order — must match STATIC_SCHEMAS["Channels"] for BULK INSERT
     cols = [
-        "SalesChannelKey",
-        "SalesChannel",
-        "SalesChannelDescription",
+        "ChannelKey",
+        "Channel",
+        "ChannelDescription",
         "ChannelGroup",
         "ChannelGroupDescription",
-        "SalesChannelCode",
+        "ChannelCode",
         "SortOrder",
         "IsDigital",
         "IsPhysical",
@@ -196,11 +196,11 @@ def _df_sales_channels(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
         return s.strip("_") or "UNKNOWN"
 
     def _derive_flags(df: pd.DataFrame) -> pd.DataFrame:
-        df["SalesChannelKey"] = df["SalesChannelKey"].astype(np.int32)
+        df["ChannelKey"] = df["ChannelKey"].astype(np.int32)
 
         # Defaults
-        if "SalesChannelDescription" not in df.columns:
-            df["SalesChannelDescription"] = df["SalesChannel"].map(
+        if "ChannelDescription" not in df.columns:
+            df["ChannelDescription"] = df["Channel"].map(
                 lambda n: _CHANNEL_DESCRIPTIONS.get(str(n).strip(), "")
             )
 
@@ -209,15 +209,15 @@ def _df_sales_channels(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
                 lambda g: _GROUP_DESCRIPTIONS.get(str(g).strip(), "")
             )
 
-        if "SalesChannelCode" not in df.columns:
-            df["SalesChannelCode"] = df["SalesChannel"].map(_normalize_code)
+        if "ChannelCode" not in df.columns:
+            df["ChannelCode"] = df["Channel"].map(_normalize_code)
 
         if "SortOrder" not in df.columns:
-            df["SortOrder"] = df["SalesChannelKey"].astype(np.int32)
+            df["SortOrder"] = df["ChannelKey"].astype(np.int32)
 
         # Derive based on ChannelGroup + name heuristics
         grp = df["ChannelGroup"].astype(str).str.strip().str.lower()
-        nm = df["SalesChannel"].astype(str).str.strip().str.lower()
+        nm = df["Channel"].astype(str).str.strip().str.lower()
 
         if "IsDigital" not in df.columns:
             df["IsDigital"] = (grp == "digital")
@@ -244,12 +244,12 @@ def _df_sales_channels(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
             df["CloseTime"] = None
 
         if "CommissionRate" not in df.columns:
-            df["CommissionRate"] = df["SalesChannel"].map(
+            df["CommissionRate"] = df["Channel"].map(
                 lambda n: _COMMISSION_RATES.get(str(n).strip(), 0.00)
             )
 
         if "TypicalFulfillmentDays" not in df.columns:
-            df["TypicalFulfillmentDays"] = df["SalesChannel"].map(
+            df["TypicalFulfillmentDays"] = df["Channel"].map(
                 lambda n: _FULFILLMENT_DAYS.get(str(n).strip(), 0)
             )
 
@@ -291,12 +291,12 @@ def _df_sales_channels(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
     if include_unknown:
         rows.append(
             dict(
-                SalesChannelKey=0,
-                SalesChannel="Unknown",
-                SalesChannelDescription=_d["Unknown"],
+                ChannelKey=0,
+                Channel="Unknown",
+                ChannelDescription=_d["Unknown"],
                 ChannelGroup="NA",
                 ChannelGroupDescription=_g["NA"],
-                SalesChannelCode="UNKNOWN",
+                ChannelCode="UNKNOWN",
                 SortOrder=0,
                 IsDigital=False,
                 IsPhysical=False,
@@ -314,28 +314,28 @@ def _df_sales_channels(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
 
     # Core (keep your existing 1..5 stable)
     rows += [
-        dict(SalesChannelKey=1, SalesChannel="Store",       SalesChannelDescription=_d["Store"],
-             ChannelGroup="Physical", ChannelGroupDescription=_g["Physical"], SalesChannelCode="STORE",
+        dict(ChannelKey=1, Channel="Store",       ChannelDescription=_d["Store"],
+             ChannelGroup="Physical", ChannelGroupDescription=_g["Physical"], ChannelCode="STORE",
              SortOrder=1, IsDigital=False, IsPhysical=True,  IsThirdParty=False, IsB2B=False, IsAssisted=False,
              IsOwnedChannel=True, Is24x7=False, OpenTime=_mt(9*60),  CloseTime=_mt(21*60),
              CommissionRate=_cr["Store"], TypicalFulfillmentDays=_fd["Store"]),
-        dict(SalesChannelKey=2, SalesChannel="Online",      SalesChannelDescription=_d["Online"],
-             ChannelGroup="Digital",  ChannelGroupDescription=_g["Digital"],  SalesChannelCode="ONLINE",
+        dict(ChannelKey=2, Channel="Online",      ChannelDescription=_d["Online"],
+             ChannelGroup="Digital",  ChannelGroupDescription=_g["Digital"],  ChannelCode="ONLINE",
              SortOrder=2, IsDigital=True,  IsPhysical=False, IsThirdParty=False, IsB2B=False, IsAssisted=False,
              IsOwnedChannel=True, Is24x7=True,  OpenTime=None, CloseTime=None,
              CommissionRate=_cr["Online"], TypicalFulfillmentDays=_fd["Online"]),
-        dict(SalesChannelKey=3, SalesChannel="Marketplace", SalesChannelDescription=_d["Marketplace"],
-             ChannelGroup="Digital",  ChannelGroupDescription=_g["Digital"],  SalesChannelCode="MARKETPLACE",
+        dict(ChannelKey=3, Channel="Marketplace", ChannelDescription=_d["Marketplace"],
+             ChannelGroup="Digital",  ChannelGroupDescription=_g["Digital"],  ChannelCode="MARKETPLACE",
              SortOrder=3, IsDigital=True,  IsPhysical=False, IsThirdParty=True,  IsB2B=False, IsAssisted=False,
              IsOwnedChannel=False, Is24x7=True,  OpenTime=None, CloseTime=None,
              CommissionRate=_cr["Marketplace"], TypicalFulfillmentDays=_fd["Marketplace"]),
-        dict(SalesChannelKey=4, SalesChannel="B2B",         SalesChannelDescription=_d["B2B"],
-             ChannelGroup="Business", ChannelGroupDescription=_g["Business"], SalesChannelCode="B2B",
+        dict(ChannelKey=4, Channel="B2B",         ChannelDescription=_d["B2B"],
+             ChannelGroup="Business", ChannelGroupDescription=_g["Business"], ChannelCode="B2B",
              SortOrder=4, IsDigital=False, IsPhysical=False, IsThirdParty=False, IsB2B=True,  IsAssisted=False,
              IsOwnedChannel=True, Is24x7=False, OpenTime=_mt(8*60),  CloseTime=_mt(18*60),
              CommissionRate=_cr["B2B"], TypicalFulfillmentDays=_fd["B2B"]),
-        dict(SalesChannelKey=5, SalesChannel="CallCenter",  SalesChannelDescription=_d["CallCenter"],
-             ChannelGroup="Assisted", ChannelGroupDescription=_g["Assisted"], SalesChannelCode="CALLCENTER",
+        dict(ChannelKey=5, Channel="CallCenter",  ChannelDescription=_d["CallCenter"],
+             ChannelGroup="Assisted", ChannelGroupDescription=_g["Assisted"], ChannelCode="CALLCENTER",
              SortOrder=5, IsDigital=False, IsPhysical=False, IsThirdParty=False, IsB2B=False, IsAssisted=True,
              IsOwnedChannel=True, Is24x7=False, OpenTime=_mt(8*60),  CloseTime=_mt(20*60),
              CommissionRate=_cr["CallCenter"], TypicalFulfillmentDays=_fd["CallCenter"]),
@@ -343,28 +343,28 @@ def _df_sales_channels(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
 
     if include_extended:
         rows += [
-            dict(SalesChannelKey=6, SalesChannel="Web",          SalesChannelDescription=_d["Web"],
-                 ChannelGroup="Digital",  ChannelGroupDescription=_g["Digital"],  SalesChannelCode="WEB",
+            dict(ChannelKey=6, Channel="Web",          ChannelDescription=_d["Web"],
+                 ChannelGroup="Digital",  ChannelGroupDescription=_g["Digital"],  ChannelCode="WEB",
                  SortOrder=6, IsDigital=True,  IsPhysical=False, IsThirdParty=False, IsB2B=False, IsAssisted=False,
                  IsOwnedChannel=True, Is24x7=True,  OpenTime=None, CloseTime=None,
                  CommissionRate=_cr["Web"], TypicalFulfillmentDays=_fd["Web"]),
-            dict(SalesChannelKey=7, SalesChannel="MobileApp",    SalesChannelDescription=_d["MobileApp"],
-                 ChannelGroup="Digital",  ChannelGroupDescription=_g["Digital"],  SalesChannelCode="APP",
+            dict(ChannelKey=7, Channel="MobileApp",    ChannelDescription=_d["MobileApp"],
+                 ChannelGroup="Digital",  ChannelGroupDescription=_g["Digital"],  ChannelCode="APP",
                  SortOrder=7, IsDigital=True,  IsPhysical=False, IsThirdParty=False, IsB2B=False, IsAssisted=False,
                  IsOwnedChannel=True, Is24x7=True,  OpenTime=None, CloseTime=None,
                  CommissionRate=_cr["MobileApp"], TypicalFulfillmentDays=_fd["MobileApp"]),
-            dict(SalesChannelKey=8, SalesChannel="SocialCommerce", SalesChannelDescription=_d["SocialCommerce"],
-                 ChannelGroup="Digital", ChannelGroupDescription=_g["Digital"],  SalesChannelCode="SOCIAL",
+            dict(ChannelKey=8, Channel="SocialCommerce", ChannelDescription=_d["SocialCommerce"],
+                 ChannelGroup="Digital", ChannelGroupDescription=_g["Digital"],  ChannelCode="SOCIAL",
                  SortOrder=8, IsDigital=True,  IsPhysical=False, IsThirdParty=True,  IsB2B=False, IsAssisted=False,
                  IsOwnedChannel=False, Is24x7=True,  OpenTime=None, CloseTime=None,
                  CommissionRate=_cr["SocialCommerce"], TypicalFulfillmentDays=_fd["SocialCommerce"]),
-            dict(SalesChannelKey=9, SalesChannel="PartnerReseller", SalesChannelDescription=_d["PartnerReseller"],
-                 ChannelGroup="Business", ChannelGroupDescription=_g["Business"], SalesChannelCode="PARTNER",
+            dict(ChannelKey=9, Channel="PartnerReseller", ChannelDescription=_d["PartnerReseller"],
+                 ChannelGroup="Business", ChannelGroupDescription=_g["Business"], ChannelCode="PARTNER",
                  SortOrder=9, IsDigital=False, IsPhysical=False, IsThirdParty=True,  IsB2B=True,  IsAssisted=False,
                  IsOwnedChannel=False, Is24x7=False, OpenTime=_mt(8*60), CloseTime=_mt(18*60),
                  CommissionRate=_cr["PartnerReseller"], TypicalFulfillmentDays=_fd["PartnerReseller"]),
-            dict(SalesChannelKey=10, SalesChannel="Kiosk",       SalesChannelDescription=_d["Kiosk"],
-                 ChannelGroup="Physical", ChannelGroupDescription=_g["Physical"], SalesChannelCode="KIOSK",
+            dict(ChannelKey=10, Channel="Kiosk",       ChannelDescription=_d["Kiosk"],
+                 ChannelGroup="Physical", ChannelGroupDescription=_g["Physical"], ChannelCode="KIOSK",
                  SortOrder=10, IsDigital=False, IsPhysical=True, IsThirdParty=False, IsB2B=False, IsAssisted=False,
                  IsOwnedChannel=True, Is24x7=False, OpenTime=_mt(10*60), CloseTime=_mt(20*60),
                  CommissionRate=_cr["Kiosk"], TypicalFulfillmentDays=_fd["Kiosk"]),
@@ -423,7 +423,7 @@ def _df_customer_acquisition_channels(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
 # =========================================================
 
 def run_sales_channels(cfg: Dict[str, Any], parquet_folder: Path) -> None:
-    _run_lookup_dim(cfg=cfg, dim_key="sales_channels", out_name="sales_channels.parquet",
+    _run_lookup_dim(cfg=cfg, dim_key="sales_channels", out_name="channels.parquet",
                     build_df=_df_sales_channels, parquet_folder=parquet_folder)
 
 

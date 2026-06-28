@@ -20,9 +20,9 @@ Schema = Sequence[Tuple[str, ColumnSpec]]
 
 # Fact table names (SQL tables should remain PascalCase)
 TABLE_SALES = "Sales"
-TABLE_SALES_ORDER_HEADER = "SalesOrderHeader"
-TABLE_SALES_ORDER_DETAIL = "SalesOrderDetail"
-TABLE_SALES_RETURN = "SalesReturn"
+TABLE_SALES_ORDER_HEADER = "OrderHeader"
+TABLE_SALES_ORDER_DETAIL = "OrderDetail"
+TABLE_SALES_RETURN = "Returns"
 
 # Budget fact table names
 TABLE_BUDGET_YEARLY = "BudgetYearly"
@@ -199,7 +199,7 @@ def generate_all_create_tables(
     include_returns = _returns_enabled(cfg)
 
     eff_skip_order_cols = _skip_order_cols(cfg, skip_order_cols)
-    # int64 SalesOrderNumber promotion threshold, shared across all fact tables
+    # int64 OrderNumber promotion threshold, shared across all fact tables
     # that carry the column (keeps DDL in sync with the parquet/generation side).
     sales_total_rows = int(getattr(getattr(cfg, "sales", None), "total_rows", 0) or 0)
 
@@ -220,7 +220,7 @@ def generate_all_create_tables(
             promote_order_number(_require_static_schema(TABLE_SALES_ORDER_DETAIL), sales_total_rows),
         ))
 
-    # SalesReturn placement:
+    # Returns placement:
     # - If sales_order tables exist: emit after detail
     # - Else: emit after Sales (if present) or as the only fact
     if include_returns and (include_sales or include_sales_order):

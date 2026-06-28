@@ -309,10 +309,10 @@ def _check_referential_integrity(
         ("sales", "fact", "PromotionKey", "promotions", "PromotionKey"),
         ("sales", "fact", "CurrencyKey", "currency", "CurrencyKey"),
         ("sales", "fact", "EmployeeKey", "employees", "EmployeeKey"),
-        ("sales", "fact", "SalesChannelKey", "sales_channels", "SalesChannelKey"),
+        ("sales", "fact", "ChannelKey", "channels", "ChannelKey"),
         ("sales", "fact", "TimeKey", "time", "TimeKey"),
         # Sales return → dimensions
-        ("sales_return", "fact", "ReturnReasonKey", "return_reason", "ReturnReasonKey"),
+        ("returns", "fact", "ReturnReasonKey", "return_reason", "ReturnReasonKey"),
         # Inventory → dimensions
         ("inventory_snapshot", "fact", "ProductKey", "products", "ProductKey"),
         ("inventory_snapshot", "fact", "StoreKey", "stores", "StoreKey"),
@@ -445,19 +445,19 @@ def _check_referential_integrity(
             src_keys, dim_keys, src_name, fk_col, dim_name,
         )
 
-    # --- Fact-to-fact links: returns / complaints → SalesOrderHeader ---
-    # SalesOrderNumber is the order PK in the header; returns and complaints
+    # --- Fact-to-fact links: returns / complaints → OrderHeader ---
+    # OrderNumber is the order PK in the header; returns and complaints
     # reference it. CHUNK-1's cross-chunk duplicate order numbers would also
     # surface here as orphan references when the join no longer resolves.
-    header_path = _find_table(facts_folder, "sales_order_header")
+    header_path = _find_table(facts_folder, "order_header")
     if header_path is not None:
-        header_keys = _get_unique_keys_fast(header_path, "SalesOrderNumber")
+        header_keys = _get_unique_keys_fast(header_path, "OrderNumber")
         if header_keys is not None and len(header_keys) > 0:
-            # (fact_table, fk_column) — SalesOrderNumber nulls are dropped by the
+            # (fact_table, fk_column) — OrderNumber nulls are dropped by the
             # unique extractor, so unlinked complaints are correctly ignored.
             fact_link_checks = [
-                ("sales_return", "SalesOrderNumber"),
-                ("complaints", "SalesOrderNumber"),
+                ("returns", "OrderNumber"),
+                ("complaints", "OrderNumber"),
             ]
             for src_name, fk_col in fact_link_checks:
                 src_path = _find_table(facts_folder, src_name)
@@ -468,8 +468,8 @@ def _check_referential_integrity(
                     continue
                 _emit_fk_check(
                     report,
-                    f"FK: {src_name}.{fk_col} → sales_order_header.SalesOrderNumber",
-                    src_keys, header_keys, src_name, fk_col, "sales_order_header",
+                    f"FK: {src_name}.{fk_col} → order_header.OrderNumber",
+                    src_keys, header_keys, src_name, fk_col, "order_header",
                 )
 
     # --- Date-range checks: fact dates must fall within dates dimension ---
@@ -572,9 +572,9 @@ def _check_nulls_and_duplicates(
         ("dates", "DateKey", dims_folder),
         ("geography", "GeographyKey", dims_folder),
         ("currency", "CurrencyKey", dims_folder),
-        # Fact PK: SalesOrderNumber is the true PK of the order header (when emitted).
+        # Fact PK: OrderNumber is the true PK of the order header (when emitted).
         # Cross-chunk duplicate order numbers (CHUNK-1) surface here as duplicate PKs.
-        ("sales_order_header", "SalesOrderNumber", facts_folder),
+        ("order_header", "OrderNumber", facts_folder),
     ]
 
     for table_name, pk_col, folder in pk_checks:
@@ -695,7 +695,7 @@ def _check_distributions(
                 ))
 
     # Returns: check return rate if sales return exists
-    returns_path = _find_table(facts_folder, "sales_return")
+    returns_path = _find_table(facts_folder, "returns")
     if returns_path is not None and sales_path is not None:
         returns_count = _row_count_fast(returns_path)
         sales_count = _row_count_fast(sales_path)

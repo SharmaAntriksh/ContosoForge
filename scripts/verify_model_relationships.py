@@ -40,8 +40,8 @@ TBL2PARQUET = {
     "ProductProfile": "dimensions/product_profile", "Products": "dimensions/products",
     "ProductSubcategory": "dimensions/product_subcategory",
     "Promotion": "dimensions/promotions", "ReturnReason": "dimensions/return_reason",
-    "Sales": "facts/sales", "SalesChannel": "dimensions/sales_channels",
-    "SalesReturn": "facts/sales_return", "Store": "dimensions/stores",
+    "Sales": "facts/sales", "Channel": "dimensions/channels",
+    "Returns": "facts/returns", "Store": "dimensions/stores",
     "Supplier": "dimensions/suppliers", "Time": "dimensions/time",
     "Warehouse": "dimensions/warehouses", "Wishlist": "facts/customer_wishlists",
 }

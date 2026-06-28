@@ -10,24 +10,24 @@ from src.defaults import RETURN_REASON_KEYS, RETURN_REASON_DEFAULT_WEIGHTS
 from src.exceptions import SalesError
 
 
-# Columns required from SalesOrderDetail to produce a returns fact table.
+# Columns required from OrderDetail to produce a returns fact table.
 RETURNS_REQUIRED_DETAIL_COLS: tuple[str, ...] = (
-    "SalesOrderNumber",
-    "SalesOrderLineNumber",
+    "OrderNumber",
+    "OrderLineNumber",
     "DeliveryDate",
     "Quantity",
     "NetPrice",
     "IsOrderDelayed",
 )
 
-# Output schema for the SalesReturn fact table.
+# Output schema for the Returns fact table.
 #
 # Notes on semantics:
 # - ReturnNetPrice is a *line amount* prorated by returned quantity.
 RETURNS_SCHEMA = pa.schema(
     [
-        ("SalesOrderNumber", pa.int32()),
-        ("SalesOrderLineNumber", pa.int32()),
+        ("OrderNumber", pa.int32()),
+        ("OrderLineNumber", pa.int32()),
         ("ReturnDate", pa.date32()),
         ("ReturnReasonKey", pa.int32()),
         ("ReturnQuantity", pa.int32()),
@@ -61,16 +61,16 @@ class ReturnsConfig:
 
 
 def _returns_schema_for(so_type: pa.DataType) -> pa.Schema:
-    """RETURNS_SCHEMA with SalesOrderNumber set to *so_type*.
+    """RETURNS_SCHEMA with OrderNumber set to *so_type*.
 
-    Returns mirror the dtype the detail table carries for SalesOrderNumber, so a
+    Returns mirror the dtype the detail table carries for OrderNumber, so a
     large run with int64 order numbers produces int64 here too (rather than
     silently truncating to the int32 default).
     """
     if so_type == pa.int32():
         return RETURNS_SCHEMA
     return pa.schema([
-        pa.field(f.name, so_type) if f.name == "SalesOrderNumber" else f
+        pa.field(f.name, so_type) if f.name == "OrderNumber" else f
         for f in RETURNS_SCHEMA
     ])
 
@@ -259,7 +259,7 @@ def build_sales_returns_from_detail(
     cfg: ReturnsConfig,
 ) -> pa.Table:
     """
-    Build SalesReturn event rows from SalesOrderDetail lines.
+    Build Returns event rows from OrderDetail lines.
 
     Supports multi-event returns: a single line item can produce multiple
     return events on different dates (e.g., return 5 of 10 on day 3, then
@@ -267,11 +267,11 @@ def build_sales_returns_from_detail(
 
     Determinism: seeded from chunk_seed.
     """
-    # Mirror the detail table's SalesOrderNumber dtype (int32 or, for large runs,
+    # Mirror the detail table's OrderNumber dtype (int32 or, for large runs,
     # int64) so returns never truncate the order number.
     _so_type = (
-        detail.schema.field("SalesOrderNumber").type
-        if "SalesOrderNumber" in detail.schema.names
+        detail.schema.field("OrderNumber").type
+        if "OrderNumber" in detail.schema.names
         else pa.int32()
     )
 
@@ -302,8 +302,8 @@ def build_sales_returns_from_detail(
 
     # Read as int64 to avoid truncating large order numbers; the output array is
     # built back to _so_type below.
-    so = _as_np_i64(_col_np(detail_cc, "SalesOrderNumber"))[mask]
-    line = _as_np_i32(_col_np(detail_cc, "SalesOrderLineNumber"))[mask]
+    so = _as_np_i64(_col_np(detail_cc, "OrderNumber"))[mask]
+    line = _as_np_i32(_col_np(detail_cc, "OrderLineNumber"))[mask]
     delivery_raw = _col_np(detail_cc, "DeliveryDate")[mask]
     delivery = _to_np_date_days(delivery_raw)
     qty = qty_all[mask]
@@ -444,8 +444,8 @@ def build_sales_returns_from_detail(
 
     return pa.table(
         {
-            "SalesOrderNumber": pa.array(so_exp, type=_so_type),
-            "SalesOrderLineNumber": pa.array(line_exp, type=pa.int32()),
+            "OrderNumber": pa.array(so_exp, type=_so_type),
+            "OrderLineNumber": pa.array(line_exp, type=pa.int32()),
             "ReturnDate": pa.array(ret_date, type=pa.date32()),
             "ReturnReasonKey": pa.array(reason, type=pa.int32()),
             "ReturnQuantity": pa.array(event_qty, type=pa.int32()),

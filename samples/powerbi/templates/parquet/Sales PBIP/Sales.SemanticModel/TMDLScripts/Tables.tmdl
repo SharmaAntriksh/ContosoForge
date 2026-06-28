@@ -241,21 +241,21 @@ createOrReplace
 
 			annotation PBI_FormatHint = {"isGeneralNumber":true}
 
-		column BudgetSalesAmount
+		column BudgetAmount
 			dataType: double
 			lineageTag: 102902de-5597-439f-8c2c-1be834625f5e
 			summarizeBy: sum
-			sourceColumn: BudgetSalesAmount
+			sourceColumn: BudgetAmount
 
 			annotation SummarizationSetBy = Automatic
 
 			annotation PBI_FormatHint = {"isGeneralNumber":true}
 
-		column BudgetSalesQuantity
+		column BudgetQuantity
 			dataType: double
 			lineageTag: b7bad7de-beaa-48dd-8b25-8e6fd5dcd12d
 			summarizeBy: sum
-			sourceColumn: BudgetSalesQuantity
+			sourceColumn: BudgetQuantity
 
 			annotation SummarizationSetBy = Automatic
 
@@ -391,12 +391,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesOrderNumber
+		column OrderNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: e2a4a9e5-3907-471b-b065-843baacc8f3a
 			summarizeBy: sum
-			sourceColumn: SalesOrderNumber
+			sourceColumn: OrderNumber
 
 			annotation SummarizationSetBy = Automatic
 
@@ -1852,12 +1852,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesPersonFlag
+		column IsSalesperson
 			dataType: boolean
 			formatString: """TRUE"";""TRUE"";""FALSE"""
 			lineageTag: b3ec8d5a-7747-46f7-bb4f-5d70876d6093
 			summarizeBy: none
-			sourceColumn: SalesPersonFlag
+			sourceColumn: IsSalesperson
 
 			annotation SummarizationSetBy = Automatic
 
@@ -3818,21 +3818,21 @@ createOrReplace
 	table Sales
 		lineageTag: de40eea4-7040-475a-bb1e-d07e4e500968
 
-		column SalesOrderNumber
+		column OrderNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: 52eb274c-026f-4713-914c-1efcddb6e686
 			summarizeBy: sum
-			sourceColumn: SalesOrderNumber
+			sourceColumn: OrderNumber
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesOrderLineNumber
+		column OrderLineNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: be1e5bc4-26b3-4f5d-bf30-969ad4061136
 			summarizeBy: sum
-			sourceColumn: SalesOrderLineNumber
+			sourceColumn: OrderLineNumber
 
 			annotation SummarizationSetBy = Automatic
 
@@ -3890,12 +3890,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesChannelKey
+		column ChannelKey
 			dataType: int64
 			formatString: 0
 			lineageTag: db59f6e0-4d73-471e-8d09-184c1093beef
 			summarizeBy: none
-			sourceColumn: SalesChannelKey
+			sourceColumn: ChannelKey
 
 			annotation SummarizationSetBy = Automatic
 
@@ -4026,31 +4026,31 @@ createOrReplace
 
 		annotation PBI_ResultType = Table
 
-	table SalesChannel
+	table Channel
 		lineageTag: 58345d4a-ca8f-4681-a02c-ddf07824b262
 
-		column SalesChannelKey
+		column ChannelKey
 			dataType: int64
 			formatString: 0
 			lineageTag: 7fa10691-46f2-4382-badb-a7f8ba6d81e2
 			summarizeBy: count
-			sourceColumn: SalesChannelKey
+			sourceColumn: ChannelKey
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesChannel
+		column Channel
 			dataType: string
 			lineageTag: 09c6eb7e-015f-4741-ab4a-87d0f3303f56
 			summarizeBy: none
-			sourceColumn: SalesChannel
+			sourceColumn: Channel
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesChannelDescription
+		column ChannelDescription
 			dataType: string
 			lineageTag: 9ec33bc8-a141-4fcd-82c6-3877146ced6c
 			summarizeBy: none
-			sourceColumn: SalesChannelDescription
+			sourceColumn: ChannelDescription
 
 			annotation SummarizationSetBy = Automatic
 
@@ -4070,11 +4070,11 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesChannelCode
+		column ChannelCode
 			dataType: string
 			lineageTag: 7779561a-d3d1-4bde-a5ea-bfa1c56d23f6
 			summarizeBy: none
-			sourceColumn: SalesChannelCode
+			sourceColumn: ChannelCode
 
 			annotation SummarizationSetBy = Automatic
 
@@ -4185,13 +4185,13 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		partition SalesChannel = m
+		partition Channel = m
 			mode: import
 			queryGroup: Dimensions
 			source =
 					let
-					    Source     = FxReadParquetFile ( "dimensions\sales_channels" ),
-					    ChangeType = Table.TransformColumnTypes ( Source, { { "SalesChannelKey", Int64.Type } } )
+					    Source     = FxReadParquetFile ( "dimensions\channels" ),
+					    ChangeType = Table.TransformColumnTypes ( Source, { { "ChannelKey", Int64.Type } } )
 					in
 					    ChangeType
 
@@ -4199,24 +4199,24 @@ createOrReplace
 
 		annotation PBI_ResultType = Table
 
-	table SalesReturn
+	table Returns
 		lineageTag: d8f35106-f551-4dcd-b8cb-422debfa82c6
 
-		column SalesOrderNumber
+		column OrderNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: 9765951b-8f6c-47e0-8fd8-f0504a627df3
 			summarizeBy: sum
-			sourceColumn: SalesOrderNumber
+			sourceColumn: OrderNumber
 
 			annotation SummarizationSetBy = Automatic
 
-		column SalesOrderLineNumber
+		column OrderLineNumber
 			dataType: int64
 			formatString: 0
 			lineageTag: 63a28ddd-6e03-49e0-a23d-64143209a8f0
 			summarizeBy: sum
-			sourceColumn: SalesOrderLineNumber
+			sourceColumn: OrderLineNumber
 
 			annotation SummarizationSetBy = Automatic
 
@@ -4280,12 +4280,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		partition SalesReturn = m
+		partition Returns = m
 			mode: import
 			queryGroup: Fact\SecondaryFacts
 			source =
 					let
-					    Source      = FxReadParquetFile ( "facts\sales_return" )
+					    Source      = FxReadParquetFile ( "facts\returns" )
 					in
 					    Source
 

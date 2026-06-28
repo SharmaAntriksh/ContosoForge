@@ -1,5 +1,5 @@
 /*
-  10_sales.sql – Fact table constraints for Postgres: Sales + SalesReturn.
+  10_sales.sql – Fact table constraints for Postgres: Sales + Returns.
   Hand-translated from scripts/sql/bootstrap/constraints/10_sales.sql.
 
   Included when sales_output mode is 'sales' or 'both' (see sql_scripts.py).
@@ -7,17 +7,17 @@
 
   Postgres-specific notes
   ───────────────────────
-  • Sales PK is composite (SalesOrderNumber, SalesOrderLineNumber).
+  • Sales PK is composite (OrderNumber, OrderLineNumber).
     NONCLUSTERED is dropped — Postgres has no equivalent.
 
-  • Column-existence guards on SalesOrderNumber / SalesOrderLineNumber are
+  • Column-existence guards on OrderNumber / OrderLineNumber are
     kept so the PK is silently skipped when skip_order_cols is true.
 
   • Column-existence guards remain on FKs that reference config-optional
-    columns (SalesChannels, Time, Employees, ReturnReason).
+    columns (Channels, Time, Employees, ReturnReason).
 
   • The SQL Server type-compatibility EXISTS blocks for Sales -> Employees
-    and SalesReturn -> ReturnReason are dropped. The Postgres importer
+    and Returns -> ReturnReason are dropped. The Postgres importer
     always runs against a fresh DB built by the same generator, so
     reference types match by construction.
 */
@@ -29,13 +29,13 @@
 DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='SalesOrderNumber')
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='SalesOrderLineNumber')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='OrderNumber')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='OrderLineNumber')
        AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Sales')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "PK_Sales"
-            PRIMARY KEY ("SalesOrderNumber", "SalesOrderLineNumber");
+            PRIMARY KEY ("OrderNumber", "OrderLineNumber");
     END IF;
 END $$;
 
@@ -128,18 +128,18 @@ BEGIN
     END IF;
 END $$;
 
--- Sales -> SalesChannels (config-optional dimension)
+-- Sales -> Channels (config-optional dimension)
 DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
-       AND to_regclass('"public"."SalesChannels"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='SalesChannelKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_SalesChannels' AND contype = 'f')
+       AND to_regclass('"public"."Channels"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='ChannelKey')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Channels' AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
-        ADD CONSTRAINT "FK_Sales_SalesChannels"
-            FOREIGN KEY ("SalesChannelKey")
-            REFERENCES "public"."SalesChannels" ("SalesChannelKey");
+        ADD CONSTRAINT "FK_Sales_Channels"
+            FOREIGN KEY ("ChannelKey")
+            REFERENCES "public"."Channels" ("ChannelKey");
     END IF;
 END $$;
 
@@ -214,25 +214,25 @@ END $$;
 -- PK: ReturnEventKey (surrogate; only when column exists)
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='ReturnEventKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_SalesReturn')
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnEventKey')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Returns')
     THEN
-        ALTER TABLE "public"."SalesReturn"
-        ADD CONSTRAINT "PK_SalesReturn" PRIMARY KEY ("ReturnEventKey");
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "PK_Returns" PRIMARY KEY ("ReturnEventKey");
     END IF;
 END $$;
 
 -- Natural-key access path (non-unique; supports joins back to Sales)
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='SalesOrderNumber')
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='SalesOrderLineNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='SalesReturn' AND indexname='IX_SalesReturn_NaturalKey')
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderNumber')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderLineNumber')
+       AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='Returns' AND indexname='IX_Returns_NaturalKey')
     THEN
-        CREATE INDEX "IX_SalesReturn_NaturalKey"
-        ON "public"."SalesReturn" ("SalesOrderNumber", "SalesOrderLineNumber", "ReturnSequence");
+        CREATE INDEX "IX_Returns_NaturalKey"
+        ON "public"."Returns" ("OrderNumber", "OrderLineNumber", "ReturnSequence");
     END IF;
 END $$;
 
@@ -240,47 +240,47 @@ END $$;
 -- 5. SALESRETURN: FOREIGN KEYS
 -----------------------------------------------------------------------
 
--- SalesReturn -> Sales (composite natural key)
+-- Returns -> Sales (composite natural key)
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL
+    IF to_regclass('"public"."Returns"') IS NOT NULL
        AND to_regclass('"public"."Sales"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='SalesOrderNumber')
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='SalesOrderLineNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_SalesReturn_Sales' AND contype = 'f')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderNumber')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderLineNumber')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Sales' AND contype = 'f')
     THEN
-        ALTER TABLE "public"."SalesReturn"
-        ADD CONSTRAINT "FK_SalesReturn_Sales"
-            FOREIGN KEY ("SalesOrderNumber", "SalesOrderLineNumber")
-            REFERENCES "public"."Sales" ("SalesOrderNumber", "SalesOrderLineNumber");
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "FK_Returns_Sales"
+            FOREIGN KEY ("OrderNumber", "OrderLineNumber")
+            REFERENCES "public"."Sales" ("OrderNumber", "OrderLineNumber");
     END IF;
 END $$;
 
--- SalesReturn -> Dates (ReturnDate)
+-- Returns -> Dates (ReturnDate)
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL
+    IF to_regclass('"public"."Returns"') IS NOT NULL
        AND to_regclass('"public"."Dates"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='ReturnDate')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_SalesReturn_Dates_ReturnDate' AND contype = 'f')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnDate')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Dates_ReturnDate' AND contype = 'f')
     THEN
-        ALTER TABLE "public"."SalesReturn"
-        ADD CONSTRAINT "FK_SalesReturn_Dates_ReturnDate"
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "FK_Returns_Dates_ReturnDate"
             FOREIGN KEY ("ReturnDate")
             REFERENCES "public"."Dates" ("Date");
     END IF;
 END $$;
 
--- SalesReturn -> ReturnReason
+-- Returns -> ReturnReason
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL
+    IF to_regclass('"public"."Returns"') IS NOT NULL
        AND to_regclass('"public"."ReturnReason"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='SalesReturn' AND column_name='ReturnReasonKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_SalesReturn_ReturnReason' AND contype = 'f')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnReasonKey')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_ReturnReason' AND contype = 'f')
     THEN
-        ALTER TABLE "public"."SalesReturn"
-        ADD CONSTRAINT "FK_SalesReturn_ReturnReason"
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "FK_Returns_ReturnReason"
             FOREIGN KEY ("ReturnReasonKey")
             REFERENCES "public"."ReturnReason" ("ReturnReasonKey");
     END IF;

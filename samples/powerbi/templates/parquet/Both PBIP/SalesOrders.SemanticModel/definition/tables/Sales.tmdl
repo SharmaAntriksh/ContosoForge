@@ -1,21 +1,21 @@
 table Sales
 	lineageTag: c46666e0-089b-497d-a696-28f1c1d5c0ec
 
-	column SalesOrderNumber
+	column OrderNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: cdf045b9-0574-4b7e-b0a3-c4ec708045e7
 		summarizeBy: sum
-		sourceColumn: SalesOrderNumber
+		sourceColumn: OrderNumber
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesOrderLineNumber
+	column OrderLineNumber
 		dataType: int64
 		formatString: 0
 		lineageTag: ab0bf6de-c3b9-42a4-a2fc-7397a651bb08
 		summarizeBy: sum
-		sourceColumn: SalesOrderLineNumber
+		sourceColumn: OrderLineNumber
 
 		annotation SummarizationSetBy = Automatic
 
@@ -73,12 +73,12 @@ table Sales
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelKey
+	column ChannelKey
 		dataType: int64
 		formatString: 0
 		lineageTag: 335eb56d-518d-4fb1-a80f-361968eb8708
 		summarizeBy: count
-		sourceColumn: SalesChannelKey
+		sourceColumn: ChannelKey
 
 		annotation SummarizationSetBy = Automatic
 

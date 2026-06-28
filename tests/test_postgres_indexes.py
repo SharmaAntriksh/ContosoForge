@@ -70,9 +70,9 @@ class TestIndexFileContent:
             "IX_Sales_ProductKey",
             "IX_Sales_StoreKey",
             "IX_Sales_OrderDate",
-            "IX_SalesOrderHeader_CustomerKey",
-            "IX_SalesOrderDetail_ProductKey",
-            "IX_SalesReturn_ReturnDate",
+            "IX_OrderHeader_CustomerKey",
+            "IX_OrderDetail_ProductKey",
+            "IX_Returns_ReturnDate",
             "IX_InventorySnapshot_WarehouseKey",
         ):
             assert ix in text, f"Missing expected index: {ix}"
@@ -84,7 +84,7 @@ class TestIndexFileContent:
             "BRIN_Sales_OrderDate",
             "BRIN_Sales_DueDate",
             "BRIN_Sales_DeliveryDate",
-            "BRIN_SalesReturn_ReturnDate",
+            "BRIN_Returns_ReturnDate",
             "BRIN_InventorySnapshot_SnapshotDate",
         ):
             assert ix in text, f"Missing expected BRIN index: {ix}"

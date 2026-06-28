@@ -103,7 +103,7 @@ class TestConstants:
     """Module-level encoding constants."""
 
     def test_dict_exclude_contents(self):
-        assert "SalesOrderNumber" in DICT_EXCLUDE
+        assert "OrderNumber" in DICT_EXCLUDE
         assert "CustomerKey" in DICT_EXCLUDE
         assert len(DICT_EXCLUDE) == 2
 
@@ -167,7 +167,7 @@ class TestRequiredPricingColsForTable:
         assert result == REQUIRED_PRICING_COLS
 
     def test_sales_order_detail_table(self):
-        result = required_pricing_cols_for_table("SalesOrderDetail")
+        result = required_pricing_cols_for_table("OrderDetail")
         assert result == REQUIRED_PRICING_COLS
 
     def test_none_table_returns_pricing_cols(self):
@@ -175,7 +175,7 @@ class TestRequiredPricingColsForTable:
         assert result == REQUIRED_PRICING_COLS
 
     def test_non_line_grain_table_returns_empty(self):
-        result = required_pricing_cols_for_table("SalesReturn")
+        result = required_pricing_cols_for_table("Returns")
         assert result == frozenset()
 
     def test_unknown_table_returns_empty(self):
@@ -230,13 +230,13 @@ class TestSchemaDictCols:
     def test_schema_dict_cols_underscore_alias(self):
         """_schema_dict_cols adds DICT_EXCLUDE automatically."""
         schema = pa.schema([
-            pa.field("SalesOrderNumber", pa.string()),
+            pa.field("OrderNumber", pa.string()),
             pa.field("CustomerKey", pa.string()),
             pa.field("Channel", pa.string()),
         ])
         result = _schema_dict_cols(schema)
         assert "Channel" in result
-        assert "SalesOrderNumber" not in result
+        assert "OrderNumber" not in result
         assert "CustomerKey" not in result
 
 
@@ -250,7 +250,7 @@ class TestValidateRequired:
 
     def test_non_line_table_no_validation(self):
         schema = pa.schema([pa.field("x", pa.int32())])
-        _validate_required(schema, table_name="SalesReturn")  # should not raise
+        _validate_required(schema, table_name="Returns")  # should not raise
 
 
 # ===================================================================
@@ -529,9 +529,9 @@ class TestMergeParquetFiles:
         _write_parquet(src, table)
 
         merged = tmp_path / "merged.parquet"
-        # table_name="SalesReturn" bypasses pricing column validation
+        # table_name="Returns" bypasses pricing column validation
         result = merge_parquet_files(
-            [str(src)], str(merged), table_name="SalesReturn", log=False,
+            [str(src)], str(merged), table_name="Returns", log=False,
         )
         assert result is not None
         assert os.path.isfile(result)
@@ -553,7 +553,7 @@ class TestMergeParquetFiles:
 
         merged = tmp_path / "merged.parquet"
         result = merge_parquet_files(
-            paths, str(merged), table_name="SalesReturn", log=False,
+            paths, str(merged), table_name="Returns", log=False,
         )
         out = pq.read_table(result)
         assert out.num_rows == 6
@@ -565,7 +565,7 @@ class TestMergeParquetFiles:
         merged = tmp_path / "merged.parquet"
         merge_parquet_files(
             [str(src)], str(merged),
-            delete_after=True, table_name="SalesReturn", log=False,
+            delete_after=True, table_name="Returns", log=False,
         )
         assert not src.exists()
         assert os.path.isfile(str(merged))
@@ -577,7 +577,7 @@ class TestMergeParquetFiles:
         merged = tmp_path / "merged.parquet"
         merge_parquet_files(
             [str(src)], str(merged),
-            delete_after=False, table_name="SalesReturn", log=False,
+            delete_after=False, table_name="Returns", log=False,
         )
         assert src.exists()
 
@@ -588,7 +588,7 @@ class TestMergeParquetFiles:
 
         merged = tmp_path / "sub" / "deep" / "out.parquet"
         result = merge_parquet_files(
-            [str(src)], str(merged), table_name="SalesReturn", log=False,
+            [str(src)], str(merged), table_name="Returns", log=False,
         )
         assert result is not None
         assert os.path.isfile(result)
@@ -605,7 +605,7 @@ class TestMergeParquetFiles:
         merged = tmp_path / "merged.parquet"
         result = merge_parquet_files(
             [str(p1), str(p2)], str(merged),
-            schema_strategy="union", table_name="SalesReturn", log=False,
+            schema_strategy="union", table_name="Returns", log=False,
         )
         out = pq.read_table(result)
         assert out.num_rows == 2
@@ -619,7 +619,7 @@ class TestMergeParquetFiles:
         merged = tmp_path / "merged.parquet"
         result = merge_parquet_files(
             [str(src)], str(merged),
-            compression="gzip", table_name="SalesReturn", log=False,
+            compression="gzip", table_name="Returns", log=False,
         )
         assert result is not None
 
@@ -706,19 +706,19 @@ class TestOptimizeParquet:
         ]
 
     def test_sorts_by_table_name(self, tmp_path):
-        """Table name 'SalesOrderDetail' infers sort keys from _SORT_KEYS_BY_TABLE."""
+        """Table name 'OrderDetail' infers sort keys from _SORT_KEYS_BY_TABLE."""
         path = tmp_path / "detail.parquet"
         table = pa.table({
-            "SalesOrderNumber": pa.array(["SO003", "SO001", "SO002"]),
-            "SalesOrderLineNumber": pa.array([1, 1, 1], type=pa.int32()),
+            "OrderNumber": pa.array(["SO003", "SO001", "SO002"]),
+            "OrderLineNumber": pa.array([1, 1, 1], type=pa.int32()),
             "Qty": pa.array([5, 10, 3], type=pa.int32()),
         })
         _write_parquet(path, table)
 
-        result = optimize_parquet(str(path), table_name="SalesOrderDetail")
+        result = optimize_parquet(str(path), table_name="OrderDetail")
         assert result is not None
         out = pq.read_table(result)
-        assert out.column("SalesOrderNumber").to_pylist() == [
+        assert out.column("OrderNumber").to_pylist() == [
             "SO001", "SO002", "SO003",
         ]
 

@@ -190,8 +190,8 @@ END $$;
 
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesChannels"') IS NOT NULL THEN
-        EXECUTE 'CREATE OR REPLACE VIEW "public"."vw_SalesChannels" AS SELECT * FROM "public"."SalesChannels"';
+    IF to_regclass('"public"."Channels"') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW "public"."vw_Channels" AS SELECT * FROM "public"."Channels"';
     END IF;
 END $$;
 
@@ -219,41 +219,41 @@ END $$;
 -----------------------------------------------------------------------
 -- FACT VIEWS (conditional, schema-dependent)
 --   - sales_output: sales       -> vw_Sales from Sales
---   - sales_output: sales_order -> vw_SalesOrderHeader/Detail + vw_Sales from join
---   - sales_output: both        -> vw_Sales from Sales + vw_SalesOrderHeader/Detail
+--   - sales_output: sales_order -> vw_OrderHeader/Detail + vw_Sales from join
+--   - sales_output: both        -> vw_Sales from Sales + vw_OrderHeader/Detail
 -----------------------------------------------------------------------
 
--- vw_SalesOrderHeader
+-- vw_OrderHeader
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesOrderHeader"') IS NOT NULL THEN
+    IF to_regclass('"public"."OrderHeader"') IS NOT NULL THEN
         EXECUTE $sql$
-            CREATE OR REPLACE VIEW "public"."vw_SalesOrderHeader" AS
+            CREATE OR REPLACE VIEW "public"."vw_OrderHeader" AS
             SELECT
-                "SalesOrderNumber",
+                "OrderNumber",
                 "CustomerKey",
                 "StoreKey",
                 "EmployeeKey",
                 "PromotionKey",
                 "CurrencyKey",
-                "SalesChannelKey",
+                "ChannelKey",
                 "OrderDate",
                 "TimeKey",
                 "IsOrderDelayed"
-            FROM "public"."SalesOrderHeader"
+            FROM "public"."OrderHeader"
         $sql$;
     END IF;
 END $$;
 
--- vw_SalesOrderDetail
+-- vw_OrderDetail
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesOrderDetail"') IS NOT NULL THEN
+    IF to_regclass('"public"."OrderDetail"') IS NOT NULL THEN
         EXECUTE $sql$
-            CREATE OR REPLACE VIEW "public"."vw_SalesOrderDetail" AS
+            CREATE OR REPLACE VIEW "public"."vw_OrderDetail" AS
             SELECT
-                "SalesOrderNumber",
-                "SalesOrderLineNumber",
+                "OrderNumber",
+                "OrderLineNumber",
                 "ProductKey",
                 "DueDate",
                 "DeliveryDate",
@@ -263,27 +263,27 @@ BEGIN
                 CAST("UnitPrice"      AS NUMERIC(19, 4)) AS "UnitPrice",
                 CAST("DiscountAmount" AS NUMERIC(19, 4)) AS "DiscountAmount",
                 "DeliveryStatus"
-            FROM "public"."SalesOrderDetail"
+            FROM "public"."OrderDetail"
         $sql$;
     END IF;
 END $$;
 
--- vw_SalesReturn
+-- vw_Returns
 DO $$
 BEGIN
-    IF to_regclass('"public"."SalesReturn"') IS NOT NULL THEN
+    IF to_regclass('"public"."Returns"') IS NOT NULL THEN
         EXECUTE $sql$
-            CREATE OR REPLACE VIEW "public"."vw_SalesReturn" AS
+            CREATE OR REPLACE VIEW "public"."vw_Returns" AS
             SELECT
                 "ReturnEventKey",
-                "SalesOrderNumber",
-                "SalesOrderLineNumber",
+                "OrderNumber",
+                "OrderLineNumber",
                 "ReturnSequence",
                 "ReturnDate",
                 "ReturnReasonKey",
                 "ReturnQuantity",
                 CAST("ReturnNetPrice" AS NUMERIC(19, 4)) AS "ReturnNetPrice"
-            FROM "public"."SalesReturn"
+            FROM "public"."Returns"
         $sql$;
     END IF;
 END $$;
@@ -300,7 +300,7 @@ BEGIN
 END $$;
 
 -- vw_Sales: Sales table if present; otherwise join Header+Detail.
--- Order-cols (SalesOrderNumber/LineNumber) are included only when the
+-- Order-cols (OrderNumber/LineNumber) are included only when the
 -- Sales table has them (skip_order_cols=true strips them).
 DO $$
 DECLARE
@@ -310,15 +310,15 @@ BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL THEN
         SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'Sales' AND column_name = 'SalesOrderNumber'
+            WHERE table_schema = 'public' AND table_name = 'Sales' AND column_name = 'OrderNumber'
         ) AND EXISTS (
             SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'Sales' AND column_name = 'SalesOrderLineNumber'
+            WHERE table_schema = 'public' AND table_name = 'Sales' AND column_name = 'OrderLineNumber'
         )
         INTO has_order_cols;
 
         IF has_order_cols THEN
-            select_prefix := '"SalesOrderNumber", "SalesOrderLineNumber", ';
+            select_prefix := '"OrderNumber", "OrderLineNumber", ';
         END IF;
 
         EXECUTE format($sql$
@@ -331,7 +331,7 @@ BEGIN
                 "EmployeeKey",
                 "PromotionKey",
                 "CurrencyKey",
-                CAST("SalesChannelKey" AS INTEGER) AS "SalesChannelKey",
+                CAST("ChannelKey" AS INTEGER) AS "ChannelKey",
                 CAST("TimeKey"         AS INTEGER) AS "TimeKey",
                 "OrderDate",
                 "DueDate",
@@ -346,20 +346,20 @@ BEGIN
             FROM "public"."Sales"
         $sql$, select_prefix);
 
-    ELSIF to_regclass('"public"."SalesOrderHeader"') IS NOT NULL
-          AND to_regclass('"public"."SalesOrderDetail"') IS NOT NULL THEN
+    ELSIF to_regclass('"public"."OrderHeader"') IS NOT NULL
+          AND to_regclass('"public"."OrderDetail"') IS NOT NULL THEN
         EXECUTE $sql$
             CREATE OR REPLACE VIEW "public"."vw_Sales" AS
             SELECT
-                d."SalesOrderNumber",
-                d."SalesOrderLineNumber",
+                d."OrderNumber",
+                d."OrderLineNumber",
                 h."CustomerKey",
                 d."ProductKey",
                 h."StoreKey",
                 h."EmployeeKey",
                 h."PromotionKey",
                 h."CurrencyKey",
-                CAST(h."SalesChannelKey" AS INTEGER) AS "SalesChannelKey",
+                CAST(h."ChannelKey" AS INTEGER) AS "ChannelKey",
                 CAST(h."TimeKey"         AS INTEGER) AS "TimeKey",
                 h."OrderDate",
                 d."DueDate",
@@ -371,12 +371,12 @@ BEGIN
                 CAST(d."DiscountAmount" AS NUMERIC(19, 4)) AS "DiscountAmount",
                 d."DeliveryStatus",
                 h."IsOrderDelayed"
-            FROM "public"."SalesOrderDetail" d
-            JOIN "public"."SalesOrderHeader" h
-              ON h."SalesOrderNumber" = d."SalesOrderNumber"
+            FROM "public"."OrderDetail" d
+            JOIN "public"."OrderHeader" h
+              ON h."OrderNumber" = d."OrderNumber"
         $sql$;
     ELSE
         RAISE EXCEPTION
-            'No fact tables found for vw_Sales. Expected Sales OR (SalesOrderHeader + SalesOrderDetail).';
+            'No fact tables found for vw_Sales. Expected Sales OR (OrderHeader + OrderDetail).';
     END IF;
 END $$;

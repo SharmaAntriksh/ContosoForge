@@ -84,7 +84,7 @@ def _within_day_cursor(d_off: np.ndarray) -> np.ndarray:
     but ``_clamp_order_dates_to_customer_start`` can push individual orders onto
     a later day *after* that sort, breaking the contiguity a naive
     ``arange - first_index`` cursor relies on. That naive cursor would then
-    over-count within a day and spill the resulting SalesOrderNumber past the
+    over-count within a day and spill the resulting OrderNumber past the
     per-chunk allocation band into the next chunk's band → duplicate order
     numbers across chunks (CHUNK-1). Computing the rank from a stable sort by
     day yields the true 0-based within-day position regardless of ordering.
@@ -1038,7 +1038,7 @@ def _apply_store_channel_correlation(
     order_idx, order_starts, n_unique_orders, n_lines,
     store_ch_keys, ch_prob_by_store,
 ):
-    """Sample SalesChannelKey per order/line based on store type channel affinity."""
+    """Sample ChannelKey per order/line based on store type channel affinity."""
     if store_ch_keys is None or ch_prob_by_store is None:
         return None
 
@@ -1223,7 +1223,7 @@ def build_chunk_table(
 
     # Day-based order ID ranges: each calendar day gets a disjoint ID band,
     # and within each day each chunk gets its own non-overlapping slot.
-    # This guarantees SalesOrderNumber increases monotonically with OrderDate
+    # This guarantees OrderNumber increases monotonically with OrderDate
     # even across parallel chunks.
     _day_stride = np.int64(State.month_stride or 0)
     _per_chunk_alloc = np.int64(State.per_chunk_alloc or 0)
@@ -1619,7 +1619,7 @@ def build_chunk_table(
                 else:
                     if _new_ids.size > 0 and int(_new_ids.max()) >= int(INT32_MAX):
                         raise SalesError(
-                            f"Day-based SalesOrderNumber would overflow int32: "
+                            f"Day-based OrderNumber would overflow int32: "
                             f"max_id={int(_new_ids.max())} >= {int(INT32_MAX)} "
                             "but int64 promotion was not enabled for this run."
                         )
@@ -1691,7 +1691,7 @@ def build_chunk_table(
             store_weight=_store_weight,
         )
 
-        # CORRELATION #1: Store → SalesChannelKey
+        # CORRELATION #1: Store → ChannelKey
         sales_channel_key_arr = _apply_store_channel_correlation(
             rng, store_key_arr, skip_cols,
             order_idx, order_starts, n_unique_orders, n_lines,
@@ -1708,7 +1708,7 @@ def build_chunk_table(
         # Product sampling is weighted by PopularityScore and
         # boosted by SeasonalityProfile for the current calendar month.
         #
-        # CORRELATION #4: SalesChannelKey → ProductKey
+        # CORRELATION #4: ChannelKey → ProductKey
         # Filter product pool by channel eligibility flags.
         # --------------------------------------------------------
         # Compute calendar month once (reused by product weight + store assortment CDF)
@@ -1872,7 +1872,7 @@ def build_chunk_table(
             # order_ids_int from the standard path is sequential/ascending & grouped, so the
             # grouping the chunk builder already computed (order_starts/order_idx) equals
             # np.unique's (return_index/return_inverse) in O(n) — no O(n log n) sort.
-            # Guard on monotonicity: the day-based SalesOrderNumber path can reorder ids,
+            # Guard on monotonicity: the day-based OrderNumber path can reorder ids,
             # which would change np.unique's ordering AND the per-order RNG draw sequence
             # below, so fall back to np.unique there to keep output byte-identical.
             _ids_ascending = (
@@ -1947,8 +1947,8 @@ def build_chunk_table(
         cols: dict[str, object] = {}
 
         if not skip_cols:
-            cols["SalesOrderNumber"] = order_ids_int
-            cols["SalesOrderLineNumber"] = line_num
+            cols["OrderNumber"] = order_ids_int
+            cols["OrderLineNumber"] = line_num
 
         # SCD2: remap IsCurrent CustomerKey → version-specific CustomerKey using actual OrderDate
         _cscd2_starts = getattr(State, "customer_scd2_starts", None)
@@ -1982,9 +1982,9 @@ def build_chunk_table(
         cols["PromotionKey"] = promo_keys
         cols["CurrencyKey"] = currency_arr
 
-        # SalesChannelKey produced by store-channel correlation (above)
+        # ChannelKey produced by store-channel correlation (above)
         if sales_channel_key_arr is not None:
-            cols["SalesChannelKey"] = sales_channel_key_arr
+            cols["ChannelKey"] = sales_channel_key_arr
 
         cols["OrderDate"] = _as_datetime64_D(order_dates)
         cols["DueDate"] = _as_datetime64_D(dates["due_date"])

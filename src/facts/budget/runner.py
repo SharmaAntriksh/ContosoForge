@@ -101,7 +101,7 @@ def run_budget_pipeline(
 _BUDGET_CSV_COLUMNS: dict[str, list[str]] = {
     "budget_yearly": [
         "Country", "Category", "BudgetYear", "Scenario",
-        "BudgetGrowthPct", "BudgetSalesAmount", "BudgetSalesQuantity",
+        "BudgetGrowthPct", "BudgetAmount", "BudgetQuantity",
         "BudgetMethod",
     ],
     "budget_monthly": [
@@ -112,8 +112,6 @@ _BUDGET_CSV_COLUMNS: dict[str, list[str]] = {
 
 _BUDGET_CSV_ROUND: dict[str, int] = {
     "BudgetGrowthPct": 6,
-    "BudgetSalesAmount": 2,
-    "BudgetSalesQuantity": 2,
     "BudgetAmount": 2,
     "BudgetQuantity": 2,
 }

@@ -27,7 +27,7 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path):
     """
     Orchestrates packaging:
       - Creates final packaged folder (dims + config copied by output_utils)
-      - Copies fact outputs (Sales / SalesOrderHeader / SalesOrderDetail)
+      - Copies fact outputs (Sales / OrderHeader / OrderDetail)
       - Generates SQL scripts (CSV only)
     """
     file_format = str(sales_cfg.file_format).lower()

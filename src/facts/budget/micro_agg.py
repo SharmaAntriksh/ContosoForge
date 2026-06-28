@@ -115,7 +115,7 @@ def _extract_columns_from_table(
     return _build_dimension_arrays(
         store_keys=table.column("StoreKey").to_numpy(zero_copy_only=False).astype(np.int64),
         product_keys=table.column("ProductKey").to_numpy(zero_copy_only=False).astype(np.int64),
-        channel_raw=table.column("SalesChannelKey").to_numpy(zero_copy_only=False),
+        channel_raw=table.column("ChannelKey").to_numpy(zero_copy_only=False),
         order_dates=table.column("OrderDate").to_numpy(zero_copy_only=False),
         store_to_country=store_to_country,
         product_to_cat=product_to_cat,
@@ -212,7 +212,7 @@ def micro_aggregate_sales(
     Collapse a sales chunk to budget-grain aggregates.
 
     Input:  ~2M row Arrow table with StoreKey, ProductKey, OrderDate,
-            Quantity, NetPrice, SalesChannelKey columns.
+            Quantity, NetPrice, ChannelKey columns.
 
     Output: dict of aligned arrays (each ~500-2000 rows):
         country_id, category_id, year, month, channel_key,

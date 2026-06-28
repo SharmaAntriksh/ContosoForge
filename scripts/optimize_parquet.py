@@ -31,13 +31,13 @@ _SUPPORTS_LEVEL = {"zstd", "gzip", "brotli", "lz4"}
 # Parquet as Decimal instead of Integer.
 _INT_DOWNCASTS: dict[str, pa.DataType] = {
     # Sales fact
-    "SalesOrderLineNumber": pa.int32(),
+    "OrderLineNumber": pa.int32(),
     "Quantity":             pa.int32(),
     "IsOrderDelayed":       pa.bool_(),
     "CurrencyKey":          pa.int32(),
     "PromotionKey":         pa.int32(),
     "ReturnQuantity":       pa.int32(),
-    "SalesChannelKey":      pa.int32(),
+    "ChannelKey":           pa.int32(),
     "TimeKey":              pa.int32(),
     "StoreKey":             pa.int32(),
     "ProductKey":           pa.int32(),
@@ -78,7 +78,7 @@ _INT_DOWNCASTS: dict[str, pa.DataType] = {
 _FLOAT32_COLS = {
     "NetPrice", "UnitCost", "ListPrice", "DiscountAmount",
     "ReturnNetPrice", "PeriodPrice",
-    "BudgetAmount", "BudgetQuantity", "BudgetSalesAmount", "BudgetSalesQuantity",
+    "BudgetAmount", "BudgetQuantity",
     "BudgetGrowthPct",
     "CustomerLifetimeValue", "DistanceToNearestStoreKm", "CreditScore",
     "Latitude", "Longitude", "YearlyIncome",
@@ -88,12 +88,12 @@ _FLOAT32_COLS = {
 # Tables not listed here get no sort.
 _SORT_ORDERS: dict[str, list[str]] = {
     "sales": [
-        "IsOrderDelayed", "DeliveryStatus", "SalesOrderLineNumber",
-        "DiscountAmount", "CurrencyKey", "Quantity", "SalesChannelKey",
+        "IsOrderDelayed", "DeliveryStatus", "OrderLineNumber",
+        "DiscountAmount", "CurrencyKey", "Quantity", "ChannelKey",
         "PromotionKey", "StoreKey", "TimeKey",
     ],
-    "sales_return": [
-        "ReturnReasonKey", "ReturnQuantity", "SalesOrderNumber",
+    "returns": [
+        "ReturnReasonKey", "ReturnQuantity", "OrderNumber",
     ],
     "inventory_snapshot": [
         "StockoutFlag", "ReorderFlag", "StoreKey", "ProductKey", "SnapshotDate",

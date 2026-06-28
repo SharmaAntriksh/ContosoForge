@@ -1,20 +1,20 @@
-table SalesChannel
+table Channel
 	lineageTag: 58913eb8-bce8-4850-8386-331ac43caa89
 
-	column SalesChannelKey
+	column ChannelKey
 		dataType: int64
 		formatString: 0
 		lineageTag: 48ab08aa-e611-42ad-8dc9-3a58ca6fafaa
 		summarizeBy: count
-		sourceColumn: SalesChannelKey
+		sourceColumn: ChannelKey
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannel
+	column Channel
 		dataType: string
 		lineageTag: 274acb0b-4880-4bc2-8d1e-384c8e60d625
 		summarizeBy: none
-		sourceColumn: SalesChannel
+		sourceColumn: Channel
 
 		annotation SummarizationSetBy = Automatic
 
@@ -26,11 +26,11 @@ table SalesChannel
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelCode
+	column ChannelCode
 		dataType: string
 		lineageTag: 34a51e52-ca53-496f-a450-6b522e8a41c4
 		summarizeBy: none
-		sourceColumn: SalesChannelCode
+		sourceColumn: ChannelCode
 
 		annotation SummarizationSetBy = Automatic
 
@@ -106,11 +106,11 @@ table SalesChannel
 
 		annotation SummarizationSetBy = Automatic
 
-	column SalesChannelDescription
+	column ChannelDescription
 		dataType: string
 		lineageTag: bad68015-2fe7-4fe4-a9e2-837db1354ea0
 		summarizeBy: none
-		sourceColumn: SalesChannelDescription
+		sourceColumn: ChannelDescription
 
 		annotation SummarizationSetBy = Automatic
 
@@ -163,13 +163,13 @@ table SalesChannel
 
 		annotation SummarizationSetBy = Automatic
 
-	partition SalesChannel = m
+	partition Channel = m
 		mode: import
 		queryGroup: Dimensions
 		source =
 				let
-				    Source = FxReadCSVFile ( "dimensions", "sales_channels" ),
-				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"SalesChannelKey", Int64.Type}, {"SalesChannel", type text}, {"SalesChannelDescription", type text}, {"ChannelGroup", type text}, {"ChannelGroupDescription", type text}, {"SalesChannelCode", type text}, {"SortOrder", Int64.Type}, {"IsDigital", Int64.Type}, {"IsPhysical", Int64.Type}, {"IsThirdParty", Int64.Type}, {"IsB2B", Int64.Type}, {"IsAssisted", Int64.Type}, {"IsOwnedChannel", Int64.Type}, {"Is24x7", Int64.Type}, {"OpenTime", type time}, {"CloseTime", type time}, {"CommissionRate", type number}, {"TypicalFulfillmentDays", Int64.Type}})
+				    Source = FxReadCSVFile ( "dimensions", "channels" ),
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"ChannelKey", Int64.Type}, {"Channel", type text}, {"ChannelDescription", type text}, {"ChannelGroup", type text}, {"ChannelGroupDescription", type text}, {"ChannelCode", type text}, {"SortOrder", Int64.Type}, {"IsDigital", Int64.Type}, {"IsPhysical", Int64.Type}, {"IsThirdParty", Int64.Type}, {"IsB2B", Int64.Type}, {"IsAssisted", Int64.Type}, {"IsOwnedChannel", Int64.Type}, {"Is24x7", Int64.Type}, {"OpenTime", type time}, {"CloseTime", type time}, {"CommissionRate", type number}, {"TypicalFulfillmentDays", Int64.Type}})
 				in
 				    #"Changed Type"
 

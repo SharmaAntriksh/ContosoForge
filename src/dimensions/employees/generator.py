@@ -105,7 +105,7 @@ def _apply_deterministic_names(
     """
     Stable names per EmployeeKey using shared name pools.
 
-    Assigns deterministic Gender (M/F/O) and region-aware first/last/middle names.
+    Assigns deterministic Gender (Male/Female) and region-aware first/last/middle names.
     """
     if people_pools is None:
         raise DimensionError(
@@ -116,14 +116,14 @@ def _apply_deterministic_names(
     ek = df["EmployeeKey"].astype(np.int32).to_numpy()
     ek_u64 = ek.astype(np.uint64)
 
-    # Deterministic Gender distribution based on hash
-    # Thresholds from defaults.py: EMPLOYEE_GENDER_PROBS
+    # Deterministic Gender distribution based on hash. Employees are persons:
+    # Gender is the readable label Male/Female (no Other, no single-char codes).
     from src.defaults import EMPLOYEE_GENDER_PROBS
-    p_other, p_female = EMPLOYEE_GENDER_PROBS["other"], EMPLOYEE_GENDER_PROBS["female"]
+    p_female = EMPLOYEE_GENDER_PROBS["female"]
     h = hash_u64(ek_u64, int(seed), 9101)
     u = (h % np.uint64(10_000)).astype(np.float64) / 10_000.0
-    gender_code = np.where(u < p_other, "O", np.where(u < p_other + p_female, "F", "M")).astype(object)
-    df["Gender"] = gender_code
+    gender_label = np.where(u < p_female, "Female", "Male").astype(object)
+    df["Gender"] = gender_label
 
     # Region per row from GeographyKey → ISOCode → region code
     if "GeographyKey" in df.columns and iso_by_geo:
@@ -138,11 +138,6 @@ def _apply_deterministic_names(
         )
     else:
         region = np.full(len(df), default_region, dtype=object)
-
-    gender_label = np.where(
-        gender_code == "M", "Male",
-        np.where(gender_code == "F", "Female", "Other"),
-    ).astype(object)
 
     first, last, mid = assign_person_names(
         keys=ek,
@@ -265,8 +260,8 @@ def _enrich_employee_hr_columns(
         )
         df.loc[needs_reason, "TerminationReason"] = reasons
 
-    # SalesPersonFlag
-    df["SalesPersonFlag"] = title.isin(["Sales Associate", ONLINE_SALES_REP_ROLE]).astype(bool)
+    # IsSalesperson
+    df["IsSalesperson"] = title.isin(["Sales Associate", ONLINE_SALES_REP_ROLE]).astype(bool)
 
     # DepartmentName
     dept = np.where(
@@ -317,7 +312,7 @@ def _finalize_employee_integer_cols(df: pd.DataFrame) -> pd.DataFrame:
             df["ParentEmployeeKey"], errors="coerce",
         ).astype("Int32")
     _to_int("OrgLevel", np.int32)
-    _to_int("SalesPersonFlag", bool)
+    _to_int("IsSalesperson", bool)
     _to_int("SalariedFlag", bool)
     _to_int("IsActive", bool)
     _to_int("RegionId", np.int32)
@@ -987,7 +982,7 @@ def run_employees(cfg: Dict[str, Any], parquet_folder: Path) -> None:
             "EmergencyContactName", "EmergencyContactPhone",
             "SalariedFlag", "PayFrequency", "BaseRate", "VacationHours",
             "Status",
-            "SalesPersonFlag", "DepartmentName",
+            "IsSalesperson", "DepartmentName",
         ]
         df = df[_SCHEMA_ORDER]
 

@@ -11,9 +11,9 @@ from src.exceptions import SalesError
 # Logical table names (future)
 # -----------------------------
 TABLE_SALES = "Sales"
-TABLE_SALES_ORDER_DETAIL = "SalesOrderDetail"
-TABLE_SALES_ORDER_HEADER = "SalesOrderHeader"
-TABLE_SALES_RETURN = "SalesReturn"
+TABLE_SALES_ORDER_DETAIL = "OrderDetail"
+TABLE_SALES_ORDER_HEADER = "OrderHeader"
+TABLE_SALES_RETURN = "Returns"
 
 @dataclass(frozen=True)
 class TableSpec:
@@ -61,20 +61,20 @@ DEFAULT_TABLE_SPECS: Dict[str, TableSpec] = {
     # Future tables (not used until you enable sales_output modes)
     TABLE_SALES_ORDER_DETAIL: TableSpec(
         out_subdir=_to_snake(TABLE_SALES_ORDER_DETAIL),
-        chunk_prefix=f"{_to_snake(TABLE_SALES_ORDER_DETAIL)}_chunk",     # sales_order_detail_chunk0001.csv
-        merged_filename=f"{_to_snake(TABLE_SALES_ORDER_DETAIL)}.parquet", # sales_order_detail.parquet
+        chunk_prefix=f"{_to_snake(TABLE_SALES_ORDER_DETAIL)}_chunk",     # order_detail_chunk0001.csv
+        merged_filename=f"{_to_snake(TABLE_SALES_ORDER_DETAIL)}.parquet", # order_detail.parquet
         delta_subdir=_to_snake(TABLE_SALES_ORDER_DETAIL),
     ),
     TABLE_SALES_ORDER_HEADER: TableSpec(
         out_subdir=_to_snake(TABLE_SALES_ORDER_HEADER),
-        chunk_prefix=f"{_to_snake(TABLE_SALES_ORDER_HEADER)}_chunk",      # sales_order_header_chunk0001.csv
-        merged_filename=f"{_to_snake(TABLE_SALES_ORDER_HEADER)}.parquet",  # sales_order_header.parquet
+        chunk_prefix=f"{_to_snake(TABLE_SALES_ORDER_HEADER)}_chunk",      # order_header_chunk0001.csv
+        merged_filename=f"{_to_snake(TABLE_SALES_ORDER_HEADER)}.parquet",  # order_header.parquet
         delta_subdir=_to_snake(TABLE_SALES_ORDER_HEADER),
     ),
     TABLE_SALES_RETURN: TableSpec(
         out_subdir=_to_snake(TABLE_SALES_RETURN),
-        chunk_prefix=f"{_to_snake(TABLE_SALES_RETURN)}_chunk",       # sales_return_chunk0001.csv
-        merged_filename=f"{_to_snake(TABLE_SALES_RETURN)}.parquet",  # sales_return.parquet
+        chunk_prefix=f"{_to_snake(TABLE_SALES_RETURN)}_chunk",       # returns_chunk0001.csv
+        merged_filename=f"{_to_snake(TABLE_SALES_RETURN)}.parquet",  # returns.parquet
         delta_subdir=_to_snake(TABLE_SALES_RETURN),
     ),
 

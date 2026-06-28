@@ -7,14 +7,14 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Support both sales modes: flat Sales table or SalesOrderHeader + SalesOrderDetail
+    -- Support both sales modes: flat Sales table or OrderHeader + OrderDetail
     DECLARE @has_sales BIT = CASE WHEN OBJECT_ID(N'dbo.Sales', N'U') IS NOT NULL THEN 1 ELSE 0 END;
-    DECLARE @has_soh   BIT = CASE WHEN OBJECT_ID(N'dbo.SalesOrderHeader', N'U') IS NOT NULL THEN 1 ELSE 0 END;
+    DECLARE @has_soh   BIT = CASE WHEN OBJECT_ID(N'dbo.OrderHeader', N'U') IS NOT NULL THEN 1 ELSE 0 END;
 
     IF @has_sales = 0 AND @has_soh = 0 RETURN;
 
     IF OBJECT_ID(N'dbo.Stores', N'U') IS NULL
-       OR OBJECT_ID(N'dbo.SalesChannels', N'U') IS NULL
+       OR OBJECT_ID(N'dbo.Channels', N'U') IS NULL
         RETURN;
 
     CREATE TABLE #R (
@@ -36,14 +36,14 @@ BEGIN
             SUM(CASE WHEN sc.IsPhysical = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
         FROM dbo.Sales f
         JOIN dbo.Stores s         ON s.StoreKey = f.StoreKey
-        JOIN dbo.SalesChannels sc ON sc.SalesChannelKey = f.SalesChannelKey
+        JOIN dbo.Channels sc ON sc.ChannelKey = f.ChannelKey
         WHERE s.StoreType NOT IN ('Online', 'Fulfillment');
     ELSE
         SELECT @phys_pct = ISNULL(
             SUM(CASE WHEN sc.IsPhysical = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
-        FROM dbo.SalesOrderHeader f
+        FROM dbo.OrderHeader f
         JOIN dbo.Stores s         ON s.StoreKey = f.StoreKey
-        JOIN dbo.SalesChannels sc ON sc.SalesChannelKey = f.SalesChannelKey
+        JOIN dbo.Channels sc ON sc.ChannelKey = f.ChannelKey
         WHERE s.StoreType NOT IN ('Online', 'Fulfillment');
     INSERT INTO #R VALUES ('Correlation', 'Physical stores use physical channels >50%',
         'Physical stores should skew toward physical channels',
@@ -65,7 +65,7 @@ BEGIN
         ELSE
             SELECT @geo_pct = ISNULL(
                 SUM(CASE WHEN cg.Country = sg.Country THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
-            FROM dbo.SalesOrderHeader f
+            FROM dbo.OrderHeader f
             JOIN dbo.Customers c  ON c.CustomerKey = f.CustomerKey AND c.IsCurrent = 1
             JOIN dbo.Stores s     ON s.StoreKey = f.StoreKey
             JOIN dbo.Geography cg ON cg.GeographyKey = c.GeographyKey
@@ -76,16 +76,16 @@ BEGIN
             CAST(@geo_pct AS VARCHAR) + '%');
     END
 
-    -- Channel-Delivery (DueDate is on SalesOrderDetail in sales_order mode)
+    -- Channel-Delivery (DueDate is on OrderDetail in sales_order mode)
     DECLARE @avg_due DECIMAL(5,1);
     IF @has_sales = 1
         SELECT @avg_due = ISNULL(AVG(CAST(DATEDIFF(DAY, f.OrderDate, f.DueDate) AS FLOAT)), 0)
-        FROM dbo.Sales f WHERE f.SalesChannelKey IN (1, 10);
+        FROM dbo.Sales f WHERE f.ChannelKey IN (1, 10);
     ELSE
         SELECT @avg_due = ISNULL(AVG(CAST(DATEDIFF(DAY, h.OrderDate, d.DueDate) AS FLOAT)), 0)
-        FROM dbo.SalesOrderHeader h
-        JOIN dbo.SalesOrderDetail d ON d.SalesOrderNumber = h.SalesOrderNumber
-        WHERE h.SalesChannelKey IN (1, 10);
+        FROM dbo.OrderHeader h
+        JOIN dbo.OrderDetail d ON d.OrderNumber = h.OrderNumber
+        WHERE h.ChannelKey IN (1, 10);
     INSERT INTO #R VALUES ('Correlation', 'Store/Kiosk avg due days <2',
         'Physical channel orders should have near-zero fulfillment offset',
         CASE WHEN @avg_due < 2 THEN 'PASS' ELSE 'FAIL' END,
@@ -98,10 +98,10 @@ BEGIN
         IF @has_sales = 1
             SELECT @elig_pct = ISNULL(
                 SUM(CASE
-                    WHEN f.SalesChannelKey IN (1, 10)   THEN pp.EligibleStore
-                    WHEN f.SalesChannelKey IN (2, 6, 7) THEN pp.EligibleOnline
-                    WHEN f.SalesChannelKey IN (3, 8)    THEN pp.EligibleMarketplace
-                    WHEN f.SalesChannelKey IN (4, 9)    THEN pp.EligibleB2B
+                    WHEN f.ChannelKey IN (1, 10)   THEN pp.EligibleStore
+                    WHEN f.ChannelKey IN (2, 6, 7) THEN pp.EligibleOnline
+                    WHEN f.ChannelKey IN (3, 8)    THEN pp.EligibleMarketplace
+                    WHEN f.ChannelKey IN (4, 9)    THEN pp.EligibleB2B
                     ELSE 1 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
             FROM dbo.Sales f
             JOIN dbo.Products p        ON p.ProductKey = f.ProductKey
@@ -109,13 +109,13 @@ BEGIN
         ELSE
             SELECT @elig_pct = ISNULL(
                 SUM(CASE
-                    WHEN h.SalesChannelKey IN (1, 10)   THEN pp.EligibleStore
-                    WHEN h.SalesChannelKey IN (2, 6, 7) THEN pp.EligibleOnline
-                    WHEN h.SalesChannelKey IN (3, 8)    THEN pp.EligibleMarketplace
-                    WHEN h.SalesChannelKey IN (4, 9)    THEN pp.EligibleB2B
+                    WHEN h.ChannelKey IN (1, 10)   THEN pp.EligibleStore
+                    WHEN h.ChannelKey IN (2, 6, 7) THEN pp.EligibleOnline
+                    WHEN h.ChannelKey IN (3, 8)    THEN pp.EligibleMarketplace
+                    WHEN h.ChannelKey IN (4, 9)    THEN pp.EligibleB2B
                     ELSE 1 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
-            FROM dbo.SalesOrderHeader h
-            JOIN dbo.SalesOrderDetail d ON d.SalesOrderNumber = h.SalesOrderNumber
+            FROM dbo.OrderHeader h
+            JOIN dbo.OrderDetail d ON d.OrderNumber = h.OrderNumber
             JOIN dbo.Products p         ON p.ProductKey = d.ProductKey
             JOIN dbo.ProductProfile pp  ON pp.ProductKey = p.ProductKey;
         INSERT INTO #R VALUES ('Correlation', 'Channel eligibility compliance >95%',
@@ -133,14 +133,14 @@ BEGIN
                 SUM(CASE WHEN sc.IsDigital = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
             FROM dbo.Sales f
             JOIN dbo.Promotions pr    ON pr.PromotionKey = f.PromotionKey
-            JOIN dbo.SalesChannels sc ON sc.SalesChannelKey = f.SalesChannelKey
+            JOIN dbo.Channels sc ON sc.ChannelKey = f.ChannelKey
             WHERE pr.PromotionCategory = 'Store' AND pr.PromotionKey > 1;
         ELSE
             SELECT @promo_mis = ISNULL(
                 SUM(CASE WHEN sc.IsDigital = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
-            FROM dbo.SalesOrderHeader f
+            FROM dbo.OrderHeader f
             JOIN dbo.Promotions pr    ON pr.PromotionKey = f.PromotionKey
-            JOIN dbo.SalesChannels sc ON sc.SalesChannelKey = f.SalesChannelKey
+            JOIN dbo.Channels sc ON sc.ChannelKey = f.ChannelKey
             WHERE pr.PromotionCategory = 'Store' AND pr.PromotionKey > 1;
         INSERT INTO #R VALUES ('Correlation', 'Store promo on digital channel <5%',
             'Store-category promotions should not appear on digital channels',
@@ -160,7 +160,7 @@ BEGIN
         WHERE c.CurrencyKey IS NULL;
     ELSE
         SELECT @bad_curr = COUNT(DISTINCT f.CurrencyKey)
-        FROM dbo.SalesOrderHeader f LEFT JOIN dbo.Currency c ON c.CurrencyKey = f.CurrencyKey
+        FROM dbo.OrderHeader f LEFT JOIN dbo.Currency c ON c.CurrencyKey = f.CurrencyKey
         WHERE c.CurrencyKey IS NULL;
     INSERT INTO #R VALUES ('Referential', 'Valid CurrencyKey',
         'Every CurrencyKey in Sales must exist in Currency',
@@ -175,7 +175,7 @@ BEGIN
         WHERE c.CustomerKey IS NULL;
     ELSE
         SELECT @bad_cust = COUNT(DISTINCT f.CustomerKey)
-        FROM dbo.SalesOrderHeader f LEFT JOIN dbo.Customers c ON c.CustomerKey = f.CustomerKey
+        FROM dbo.OrderHeader f LEFT JOIN dbo.Customers c ON c.CustomerKey = f.CustomerKey
         WHERE c.CustomerKey IS NULL;
     INSERT INTO #R VALUES ('Referential', 'Valid CustomerKey',
         'Every CustomerKey in Sales must exist in Customers',
@@ -190,7 +190,7 @@ BEGIN
         WHERE p.ProductKey IS NULL;
     ELSE
         SELECT @bad_prod = COUNT(DISTINCT d.ProductKey)
-        FROM dbo.SalesOrderDetail d LEFT JOIN dbo.Products p ON p.ProductKey = d.ProductKey
+        FROM dbo.OrderDetail d LEFT JOIN dbo.Products p ON p.ProductKey = d.ProductKey
         WHERE p.ProductKey IS NULL;
     INSERT INTO #R VALUES ('Referential', 'Valid ProductKey',
         'Every ProductKey in Sales must exist in Products',
@@ -234,7 +234,7 @@ BEGIN
     IF @has_sales = 1
         SELECT @total_sales = COUNT(*) FROM dbo.Sales;
     ELSE
-        SELECT @total_sales = COUNT(*) FROM dbo.SalesOrderDetail;
+        SELECT @total_sales = COUNT(*) FROM dbo.OrderDetail;
     INSERT INTO #R VALUES ('Info', 'Sales row count',
         'Total sales line items',
         'INFO', FORMAT(@total_sales, 'N0'));
@@ -245,7 +245,7 @@ BEGIN
         FROM dbo.Sales;
     ELSE
         SELECT @date_range = CONVERT(VARCHAR, MIN(OrderDate), 23) + ' to ' + CONVERT(VARCHAR, MAX(OrderDate), 23)
-        FROM dbo.SalesOrderHeader;
+        FROM dbo.OrderHeader;
     INSERT INTO #R VALUES ('Info', 'Sales date range',
         'Earliest to latest OrderDate',
         'INFO', @date_range);

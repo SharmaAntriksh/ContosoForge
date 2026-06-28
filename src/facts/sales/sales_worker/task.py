@@ -60,7 +60,7 @@ TaskArgs = Union[Task, Sequence[Task]]
 # ---------------------------------------------------------------------------
 
 class _OrderEncoding:
-    """Pre-computed SalesOrderNumber dictionary encoding + first-row indices.
+    """Pre-computed OrderNumber dictionary encoding + first-row indices.
 
     Shared by _ensure_sales_channel_key_on_lines and _ensure_time_key_on_lines
     to avoid redundant pc.dictionary_encode + np.minimum.at calls.
@@ -76,11 +76,11 @@ class _OrderEncoding:
 
 
 def _encode_orders(table: pa.Table) -> Optional[_OrderEncoding]:
-    """Encode SalesOrderNumber once; returns None if column absent."""
-    if "SalesOrderNumber" not in table.column_names:
+    """Encode OrderNumber once; returns None if column absent."""
+    if "OrderNumber" not in table.column_names:
         return None
 
-    order_col = table["SalesOrderNumber"]
+    order_col = table["OrderNumber"]
     if isinstance(order_col, pa.ChunkedArray):
         order_col = order_col.combine_chunks()
 
@@ -143,7 +143,7 @@ def write_table_by_format(
     return path
 
 
-_DROP_ORDER_COLS = {"SalesOrderNumber", "SalesOrderLineNumber"}
+_DROP_ORDER_COLS = {"OrderNumber", "OrderLineNumber"}
 
 
 def _drop_order_cols_for_sales(table: pa.Table) -> pa.Table:
@@ -275,7 +275,7 @@ def _maybe_build_returns(
     if mode not in {"sales", "sales_order", "both"}:
         return None
 
-    _task_require_cols(source_table, RETURNS_REQUIRED_DETAIL_COLS, ctx="SalesReturn build requires")
+    _task_require_cols(source_table, RETURNS_REQUIRED_DETAIL_COLS, ctx="Returns build requires")
 
     returns_seed = chunk_seed ^ 0x5A5A_1234
     returns_table = build_sales_returns_from_detail(source_table, chunk_seed=returns_seed, cfg=returns_cfg)
@@ -283,11 +283,11 @@ def _maybe_build_returns(
 
 
 # -----------------------------
-# SalesChannelKey + TimeKey
+# ChannelKey + TimeKey
 # -----------------------------
 
 def _channel_keys_and_probs() -> tuple[np.ndarray, np.ndarray]:
-    """(keys, p) for sampling SalesChannelKey, from the shared channel loader.
+    """(keys, p) for sampling ChannelKey, from the shared channel loader.
 
     Falls back to the core channel keys from defaults when the dimension
     parquet is unavailable.
@@ -304,8 +304,8 @@ def _ensure_sales_channel_key_on_lines(
     table: pa.Table, *, seed: int,
     order_enc: Optional[_OrderEncoding] = None,
 ) -> pa.Table:
-    """Add SalesChannelKey to a line-level table; constant within SalesOrderNumber if present."""
-    if "SalesChannelKey" in table.column_names:
+    """Add ChannelKey to a line-level table; constant within OrderNumber if present."""
+    if "ChannelKey" in table.column_names:
         return table
 
     keys, p = _channel_keys_and_probs()
@@ -315,8 +315,8 @@ def _ensure_sales_channel_key_on_lines(
         per_order = rng.choice(keys, size=order_enc.n_orders, p=p).astype(np.int32, copy=False)
         per_order_arr = pa.array(per_order, type=pa.int32())
         col = pc.take(per_order_arr, order_enc.enc.indices)
-    elif "SalesOrderNumber" in table.column_names:
-        order_col = table["SalesOrderNumber"]
+    elif "OrderNumber" in table.column_names:
+        order_col = table["OrderNumber"]
         if isinstance(order_col, pa.ChunkedArray):
             order_col = order_col.combine_chunks()
 
@@ -330,7 +330,7 @@ def _ensure_sales_channel_key_on_lines(
         per_row = rng.choice(keys, size=table.num_rows, p=p).astype(np.int32, copy=False)
         col = pa.array(per_row, type=pa.int32())
 
-    return table.append_column("SalesChannelKey", col)
+    return table.append_column("ChannelKey", col)
 
 
 def _combine_if_chunked(col: pa.Array) -> pa.Array:
@@ -344,12 +344,12 @@ def _ensure_time_key_on_lines(
     table: pa.Table, *, seed: int,
     order_enc: Optional[_OrderEncoding] = None,
 ) -> pa.Table:
-    """Ensure TimeKey exists and is constant within SalesOrderNumber (if present)."""
+    """Ensure TimeKey exists and is constant within OrderNumber (if present)."""
     rng = np.random.default_rng(seed)
 
     cache = _load_sales_channels(State)
     channel_hour_lut = cache[2] if cache is not None else None
-    has_channel = "SalesChannelKey" in table.column_names and channel_hour_lut is not None
+    has_channel = "ChannelKey" in table.column_names and channel_hour_lut is not None
 
     if order_enc is not None:
         enc = order_enc.enc
@@ -368,7 +368,7 @@ def _ensure_time_key_on_lines(
 
         if has_channel:
             sc_np = np.asarray(
-                _combine_if_chunked(table["SalesChannelKey"]).to_numpy(zero_copy_only=False),
+                _combine_if_chunked(table["ChannelKey"]).to_numpy(zero_copy_only=False),
                 dtype=np.int32,
             )
             per_order_sc = sc_np[first]
@@ -384,8 +384,8 @@ def _ensure_time_key_on_lines(
 
     # --- Fallback: no pre-computed encoding ---
 
-    if "SalesOrderNumber" in table.column_names:
-        order_col = _combine_if_chunked(table["SalesOrderNumber"])
+    if "OrderNumber" in table.column_names:
+        order_col = _combine_if_chunked(table["OrderNumber"])
         enc = pc.dictionary_encode(order_col)
         n_orders = len(enc.dictionary)
 
@@ -407,7 +407,7 @@ def _ensure_time_key_on_lines(
 
         if has_channel:
             sc_np = np.asarray(
-                _combine_if_chunked(table["SalesChannelKey"]).to_numpy(zero_copy_only=False),
+                _combine_if_chunked(table["ChannelKey"]).to_numpy(zero_copy_only=False),
                 dtype=np.int32,
             )
             per_order_sc = sc_np[first]
@@ -421,13 +421,13 @@ def _ensure_time_key_on_lines(
 
         return table.append_column("TimeKey", time_col)
 
-    # No SalesOrderNumber: leave existing TimeKey alone; otherwise sample per row
+    # No OrderNumber: leave existing TimeKey alone; otherwise sample per row
     if "TimeKey" in table.column_names:
         return table
 
     if has_channel:
         sc_np = np.asarray(
-            _combine_if_chunked(table["SalesChannelKey"]).to_numpy(zero_copy_only=False),
+            _combine_if_chunked(table["ChannelKey"]).to_numpy(zero_copy_only=False),
             dtype=np.int32,
         )
         out = _sample_timekey_by_channel(rng, sc_np, channel_hour_lut)
@@ -447,12 +447,12 @@ def build_header_from_detail(detail: pa.Table, *, validate_invariants: bool = Tr
         inv_cols.append("PromotionKey")
     if "CurrencyKey" in col_names:
         inv_cols.append("CurrencyKey")
-    if "SalesChannelKey" in col_names:
-        inv_cols.append("SalesChannelKey")
+    if "ChannelKey" in col_names:
+        inv_cols.append("ChannelKey")
     if "TimeKey" in col_names:
         inv_cols.append("TimeKey")
 
-    gb = detail.group_by(["SalesOrderNumber"])
+    gb = detail.group_by(["OrderNumber"])
 
     if validate_invariants:
         aggs = []
@@ -474,13 +474,13 @@ def build_header_from_detail(detail: pa.Table, *, validate_invariants: bool = Tr
             def _py(name: str):
                 return bad_out[name].to_pylist() if name in bad_out.column_names else None
 
-            parts = [f"SalesOrderNumber(s)={_py('SalesOrderNumber')}"]
+            parts = [f"OrderNumber(s)={_py('OrderNumber')}"]
             for c in inv_cols:
                 parts.append(f"{c}_min={_py(f'{c}_min')}")
                 parts.append(f"{c}_max={_py(f'{c}_max')}")
 
             raise RuntimeError(
-                "Invalid SalesOrderNumber invariants: a SalesOrderNumber maps to multiple values. "
+                "Invalid OrderNumber invariants: a OrderNumber maps to multiple values. "
                 + " | ".join(parts)
             )
 
@@ -491,13 +491,13 @@ def build_header_from_detail(detail: pa.Table, *, validate_invariants: bool = Tr
                 cols.append(out[src])
                 names.append(dst)
 
-        _add("SalesOrderNumber", "SalesOrderNumber")
+        _add("OrderNumber", "OrderNumber")
         _add("CustomerKey_min", "CustomerKey")
         _add("StoreKey_min", "StoreKey")
         _add("EmployeeKey_min", "EmployeeKey")
         _add("PromotionKey_min", "PromotionKey")
         _add("CurrencyKey_min", "CurrencyKey")
-        _add("SalesChannelKey_min", "SalesChannelKey")
+        _add("ChannelKey_min", "ChannelKey")
         _add("OrderDate_min", "OrderDate")
         _add("TimeKey_min", "TimeKey")
         _add("IsOrderDelayed_max", "IsOrderDelayed")
@@ -517,13 +517,13 @@ def build_header_from_detail(detail: pa.Table, *, validate_invariants: bool = Tr
             cols.append(out[src])
             names.append(dst)
 
-    _add("SalesOrderNumber", "SalesOrderNumber")
+    _add("OrderNumber", "OrderNumber")
     _add("CustomerKey_min", "CustomerKey")
     _add("StoreKey_min", "StoreKey")
     _add("EmployeeKey_min", "EmployeeKey")
     _add("PromotionKey_min", "PromotionKey")
     _add("CurrencyKey_min", "CurrencyKey")
-    _add("SalesChannelKey_min", "SalesChannelKey")
+    _add("ChannelKey_min", "ChannelKey")
     _add("OrderDate_min", "OrderDate")
     _add("TimeKey_min", "TimeKey")
     _add("IsOrderDelayed_max", "IsOrderDelayed")
@@ -533,7 +533,7 @@ def build_header_from_detail(detail: pa.Table, *, validate_invariants: bool = Tr
 
 # ---------------------------------------------------------------------------
 # Simple micro-agg registry: (result_key, available_flag, state_attr, agg_fn)
-# Budget is excluded — it needs extra State attrs and SalesChannelKey guard.
+# Budget is excluded — it needs extra State attrs and ChannelKey guard.
 # ---------------------------------------------------------------------------
 
 _SIMPLE_AGGS: List[Tuple[str, bool, str, Any]] = [
@@ -569,7 +569,7 @@ def _maybe_budget_agg(detail_table: pa.Table) -> Optional[Dict[str, Any]]:
     """Compute budget micro-aggregate from a detail chunk. Returns None if disabled."""
     if not _budget_enabled():
         return None
-    if "SalesChannelKey" not in detail_table.column_names:
+    if "ChannelKey" not in detail_table.column_names:
         return None
     return micro_aggregate_sales(
         detail_table,
@@ -627,11 +627,11 @@ def _worker_task(args):
     so_require = None
     header_need_set = None
     if mode in {"sales_order", "both"}:
-        so_require = {"SalesOrderNumber", "SalesOrderLineNumber",
+        so_require = {"OrderNumber", "OrderLineNumber",
                       "CustomerKey", "StoreKey", "EmployeeKey",
                       "OrderDate", "IsOrderDelayed"}
         expected_header = State.schema_by_table[TABLE_SALES_ORDER_HEADER]
-        header_need_set = {"StoreKey", "EmployeeKey", "SalesChannelKey",
+        header_need_set = {"StoreKey", "EmployeeKey", "ChannelKey",
                            "TimeKey", "PromotionKey", "CurrencyKey"} & set(expected_header.names)
 
     for idx, batch_size, seed in tasks:

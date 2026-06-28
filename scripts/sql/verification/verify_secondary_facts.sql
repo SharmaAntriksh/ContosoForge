@@ -30,7 +30,7 @@ ORDER BY AvgGrowthPct;
 -- 1c. Budget amounts should be positive
 SELECT Scenario, COUNT(*) AS NegativeBudgets
 FROM BudgetYearly
-WHERE BudgetSalesAmount <= 0
+WHERE BudgetAmount <= 0
 GROUP BY Scenario;
 -- EXPECTED: zero rows
 
@@ -40,11 +40,11 @@ SELECT
     y.Category,
     y.BudgetYear,
     y.Scenario,
-    y.BudgetSalesAmount                                             AS YearlyAmount,
+    y.BudgetAmount                                             AS YearlyAmount,
     m.MonthlyTotal,
-    ABS(y.BudgetSalesAmount - m.MonthlyTotal)                       AS Diff,
-    CAST(ABS(y.BudgetSalesAmount - m.MonthlyTotal) * 100.0
-         / NULLIF(y.BudgetSalesAmount, 0) AS DECIMAL(5,2))         AS DiffPct
+    ABS(y.BudgetAmount - m.MonthlyTotal)                       AS Diff,
+    CAST(ABS(y.BudgetAmount - m.MonthlyTotal) * 100.0
+         / NULLIF(y.BudgetAmount, 0) AS DECIMAL(5,2))         AS DiffPct
 FROM BudgetYearly y
 JOIN (
     SELECT Country, Category, BudgetYear, Scenario,
@@ -55,7 +55,7 @@ JOIN (
    AND m.Category = y.Category
    AND m.BudgetYear = y.BudgetYear
    AND m.Scenario = y.Scenario
-WHERE ABS(y.BudgetSalesAmount - m.MonthlyTotal) / NULLIF(y.BudgetSalesAmount, 0) > 0.02;
+WHERE ABS(y.BudgetAmount - m.MonthlyTotal) / NULLIF(y.BudgetAmount, 0) > 0.02;
 -- EXPECTED: zero or very few rows (monthly should sum to yearly within 2%)
 
 
@@ -330,9 +330,9 @@ FROM BudgetYearly
 UNION ALL
 
 SELECT 'Budget: no negative amounts',
-    'BudgetSalesAmount must be positive; FAIL = budget engine produced invalid negative target',
+    'BudgetAmount must be positive; FAIL = budget engine produced invalid negative target',
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END
-FROM BudgetYearly WHERE BudgetSalesAmount <= 0
+FROM BudgetYearly WHERE BudgetAmount <= 0
 
 UNION ALL
 
