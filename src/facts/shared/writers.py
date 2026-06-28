@@ -84,7 +84,10 @@ def write_fact_table(
         return
 
     if file_format == "csv":
-        df = table.to_pandas() if isinstance(df_or_table, pa.Table) else df_or_table
+        # Use the (date32-cast) table for both Table and DataFrame inputs so CSV
+        # dates render as YYYY-MM-DD, matching the parquet/delta output instead of
+        # a full timestamp for DataFrame callers.
+        df = table.to_pandas()
         # bool → 0/1 for SQL Server BULK INSERT compatibility (BIT columns)
         _bool_cols = list(df.select_dtypes(include=["bool", "boolean"]).columns)
         if _bool_cols:

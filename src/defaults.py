@@ -684,6 +684,13 @@ PRODUCT_PARALLEL_THRESHOLD = 50_000
 # Below this estimated row count, wishlists stay single-process
 WISHLIST_PARALLEL_THRESHOLD = 100_000
 
+# Parallel chunking for secondary facts (complaints, wishlists, inventory). As
+# with customer chunking above, the chunk COUNT must depend only on the data, not
+# on the host CPU / worker count, so the per-chunk RNG streams — and therefore the
+# generated rows and surrogate keys — stay identical across machines. The pool
+# SIZE still adapts to the available workers for speed.
+FACT_MAX_PARALLEL_CHUNKS = 32
+
 # Windows worker memory auto-cap (used in sales.py)
 WORKER_OS_RESERVE_MB = 4_000   # MB reserved for OS + main process
 WORKER_ESTIMATE_MB = 500       # MB estimated per sales worker process

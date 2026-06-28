@@ -26,14 +26,12 @@ def build_budget_lookups(parquet_dims: Path) -> dict:
         budget_channel_keys:      int16[] (distinct ChannelKey values)
     """
     # ---- Store -> Geography -> Country ----
+    import pyarrow.parquet as pq
     _store_cols = ["StoreKey", "GeographyKey"]
-    _store_schema = set(pd.read_parquet(parquet_dims / "stores.parquet", columns=[]).columns)
-    # Fallback: read schema from first row if columns= trick doesn't work
     try:
-        import pyarrow.parquet as pq
         _store_schema = set(pq.read_schema(str(parquet_dims / "stores.parquet")).names)
     except (OSError, ValueError):
-        pass
+        _store_schema = set(pd.read_parquet(parquet_dims / "stores.parquet", columns=[]).columns)
     if "IsCurrent" in _store_schema:
         _store_cols.append("IsCurrent")
     stores = pd.read_parquet(parquet_dims / "stores.parquet", columns=_store_cols)

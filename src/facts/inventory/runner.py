@@ -33,7 +33,7 @@ from src.facts.shared.writers import write_fact_table
 from .accumulator import InventoryAccumulator
 from .engine import load_inventory_config, compute_inventory_snapshots, InventoryConfig, _load_product_attrs
 from .worker import _inventory_worker_task, _cast_snapshot_date, _prepare_csv as _prepare_inventory_csv
-from src.defaults import INVENTORY_PARALLEL_THRESHOLD as _PARALLEL_THRESHOLD
+from src.defaults import INVENTORY_PARALLEL_THRESHOLD as _PARALLEL_THRESHOLD, FACT_MAX_PARALLEL_CHUNKS
 
 
 def _rollup_demand_to_warehouse(
@@ -411,8 +411,11 @@ def _run_parallel(
     if workers is not None and workers >= 1:
         n_cpus = min(n_cpus, workers)
 
-    n_chunks = min(n_warehouses, n_cpus * 2)
-    n_chunks = max(2, n_chunks)
+    # Chunk COUNT depends only on the data (warehouse count), not the worker
+    # count, so the warehouse->chunk partitioning and the per-chunk seed
+    # (icfg.seed + chunk_idx) — and thus the simulated snapshots — are identical
+    # across machines. The pool SIZE still adapts to the available workers.
+    n_chunks = max(2, min(n_warehouses, FACT_MAX_PARALLEL_CHUNKS))
 
     partitions = _partition_demand_by_warehouse(demand, n_chunks)
     partitions = [p for p in partitions if len(p) > 0]
@@ -645,7 +648,16 @@ def _merge_chunks_to_delta(
     partition_by: List[str],
     delete_chunks: bool = True,
 ) -> None:
-    """Consolidate inventory chunk parquets into a partitioned Delta Lake table."""
+    """Consolidate inventory chunk parquets into a partitioned Delta Lake table.
+
+    Concatenates the parts and writes them in ONE overwrite commit. The previous
+    overwrite-then-append-per-part loop paid Delta's full-state log replay on
+    every part (O(N^2) in the number of parts) and scattered tiny files; a single
+    commit produces one log entry and lets delta-rs size the output files.
+    """
+    if not chunk_files:
+        return
+
     try:
         from deltalake import write_deltalake
     except ImportError:
@@ -656,23 +668,28 @@ def _merge_chunks_to_delta(
 
     needs_year_month = any(c in partition_by for c in ("Year", "Month"))
 
-    for i, chunk_path in enumerate(chunk_files):
+    tables = []
+    for chunk_path in sorted(chunk_files):
         table = pq.read_table(str(chunk_path))
-
         if needs_year_month and "Year" not in table.column_names:
             table = _add_year_month_to_table(table)
+        tables.append(table)
 
-        # Validate partition cols against actual schema
-        pcols = [c for c in partition_by if c in table.column_names]
+    merged = pa.concat_tables(tables, promote_options="default")
+    del tables
 
-        write_deltalake(
-            str(delta_dir),
-            table,
-            mode="overwrite" if i == 0 else "append",
-            partition_by=pcols if pcols else None,
-        )
+    # Validate partition cols against actual schema
+    pcols = [c for c in partition_by if c in merged.column_names]
 
-    info(f"[DELTA] Writing {len(chunk_files)} parts (Arrow -> Delta) table=InventorySnapshot")
+    write_deltalake(
+        str(delta_dir),
+        merged,
+        mode="overwrite",
+        partition_by=pcols if pcols else None,
+    )
+    del merged
+
+    info(f"[DELTA] Wrote {len(chunk_files)} parts (Arrow -> Delta, single commit) table=InventorySnapshot")
 
     if delete_chunks:
         for f in chunk_files:

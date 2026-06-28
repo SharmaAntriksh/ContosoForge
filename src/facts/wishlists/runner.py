@@ -37,7 +37,7 @@ from src.facts.wishlists.selection import (
     pool_to_dict,
 )
 from src.utils.logging_utils import info, skip
-from src.defaults import WISHLIST_PARALLEL_THRESHOLD
+from src.defaults import WISHLIST_PARALLEL_THRESHOLD, FACT_MAX_PARALLEL_CHUNKS
 
 
 # ---------------------------------------------------------------------------
@@ -390,8 +390,10 @@ def _run_parallel(
     items_per = np.clip(items_per, 1, min(c.max_items, n_products))
     total_rows = int(items_per.sum())
 
-    n_chunks = min(n_participants, n_cpus * 2)
-    n_chunks = max(2, n_chunks)
+    # Chunk COUNT depends only on the data (not the worker count) so per-chunk
+    # SeedSequence streams and WishlistKey offsets are identical across machines.
+    # The pool SIZE still adapts to the available workers.
+    n_chunks = max(2, min(n_participants, FACT_MAX_PARALLEL_CHUNKS))
     n_workers = min(n_chunks, n_cpus)
 
     info(f"Wishlists parallel: {n_chunks} chunks across {n_workers} workers "

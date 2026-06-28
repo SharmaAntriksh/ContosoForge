@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from src.defaults import NS_PER_DAY as _NS_PER_DAY
+from src.defaults import NS_PER_DAY as _NS_PER_DAY, FACT_MAX_PARALLEL_CHUNKS
 from src.facts.complaints.accumulator import ComplaintsAccumulator
 from src.facts.shared.writers import write_fact_table
 from src.utils.logging_utils import info, skip
@@ -379,7 +379,7 @@ def _complaints_worker_task(args: Tuple) -> Dict[str, np.ndarray]:
     g_start_ns, g_end_ns = date_range
     cust_orders = _build_order_lookup(order_arrays_chunk)
 
-    return _generate_rows_batch(
+    result = _generate_rows_batch(
         child_rng,
         complainer_keys=complainer_keys_chunk,
         complaints_per=complaints_per_chunk,
@@ -388,6 +388,11 @@ def _complaints_worker_task(args: Tuple) -> Dict[str, np.ndarray]:
         g_end_ns=g_end_ns,
         cfg=complaints_cfg,
     )
+    # Tag with chunk_idx so the main process can reassemble in deterministic
+    # chunk order (iter_imap_unordered yields in arrival order). Without this,
+    # ComplaintKey assignment and row order would vary run-to-run.
+    result["chunk_idx"] = chunk_idx
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -630,8 +635,10 @@ def _generate_complaints_parallel(
     orders_ln = filtered["OrderLineNumber"].to_numpy(dtype=np.int64, copy=True)
 
     # --- Partition complainers into chunks ---
-    n_chunks = min(n_complainers, n_workers * 2)
-    n_chunks = max(2, n_chunks)
+    # Chunk COUNT depends only on the data (not the worker count), so per-chunk
+    # SeedSequence streams — and thus the generated rows — are identical across
+    # machines. The pool SIZE still adapts to the available workers.
+    n_chunks = max(2, min(n_complainers, FACT_MAX_PARALLEL_CHUNKS))
     # Actual workers bounded by chunks
     actual_workers = min(n_chunks, n_workers)
 
@@ -676,31 +683,32 @@ def _generate_complaints_parallel(
         label="complaints",
     )
 
-    # Collect results from workers (arrival order — keys are renumbered globally)
-    all_arrays: Dict[str, List[np.ndarray]] = {
-        k: [] for k in [
-            "ckey", "so", "ln", "date_ns", "res_date_ns",
-            "type", "detail", "severity", "channel", "status",
-            "res_type", "resp_days",
-        ]
-    }
+    # Collect results keyed by chunk_idx. iter_imap_unordered yields in worker
+    # arrival order, so we reassemble in deterministic chunk order before
+    # assigning ComplaintKeys — otherwise keys and row order would vary per run.
+    _array_cols = [
+        "ckey", "so", "ln", "date_ns", "res_date_ns",
+        "type", "detail", "severity", "channel", "status",
+        "res_type", "resp_days",
+    ]
+    results_by_chunk: Dict[int, Dict[str, np.ndarray]] = {}
 
     for result in iter_imap_unordered(
         tasks=tasks,
         task_fn=_complaints_worker_task,
         spec=pool_spec,
     ):
-        for col in all_arrays:
-            all_arrays[col].append(result[col])
+        results_by_chunk[int(result["chunk_idx"])] = result
 
     # --- Merge phase ---
-    # ComplaintKeys are assigned globally after concatenation.
+    # ComplaintKeys are assigned globally after concatenation in chunk order.
 
-    if not all_arrays["ckey"]:
+    ordered = [results_by_chunk[i] for i in sorted(results_by_chunk)]
+    if not ordered or all(len(r["ckey"]) == 0 for r in ordered):
         return pa.table({f.name: pa.array([], type=f.type) for f in schema}, schema=schema)
 
     merged: Dict[str, np.ndarray] = {
-        col: np.concatenate(arrs) for col, arrs in all_arrays.items()
+        col: np.concatenate([r[col] for r in ordered]) for col in _array_cols
     }
 
     return _arrays_to_table(
@@ -740,7 +748,10 @@ def _generate_complaints(
     if workers is not None and workers >= 1:
         n_cpus = min(n_cpus, workers)
 
-    use_parallel = n_complainers >= _PARALLEL_THRESHOLD and n_cpus >= 2
+    # Path selection depends only on the data, not the worker count, so the same
+    # dataset always takes the same path (and produces the same output) on any
+    # machine. The pool may run with a single worker on a 1-core host.
+    use_parallel = n_complainers >= _PARALLEL_THRESHOLD
 
     if use_parallel:
         return _generate_complaints_parallel(

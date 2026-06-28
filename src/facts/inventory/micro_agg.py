@@ -62,8 +62,8 @@ def micro_aggregate_inventory(
         # Drop rows with unmapped stores (should not happen if FK integrity holds)
         keep = location_keys >= 0
         if not keep.all():
-            import warnings
-            warnings.warn(f"inventory micro_agg: {int((~keep).sum())} rows dropped (unmapped StoreKey)", stacklevel=2)
+            from src.utils.logging_utils import warn as _warn
+            _warn(f"inventory micro_agg: {int((~keep).sum())} rows dropped (unmapped StoreKey)")
             product_keys = product_keys[keep]
             location_keys = location_keys[keep]
             year = year[keep]
