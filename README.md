@@ -8,7 +8,7 @@ Every run is **deterministic**, **schema-stable**, and **idempotent**, making th
 
 ## What Gets Generated
 
-The generator produces a full star-schema data model across dimension and fact tables.
+The generator produces a full dimensional model across dimension and fact tables (lightly snowflaked, with multiple fact tables, like ContosoRetailDW).
 
 **Dimension tables:**
 

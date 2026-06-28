@@ -1,6 +1,6 @@
 # ContosoForge
 
-Analytics-ready retail data generator (star-schema, inspired by ContosoRetailDW). Produces deterministic, idempotent datasets for BI, analytics, and data engineering.
+Analytics-ready retail data generator (dimensional model, inspired by ContosoRetailDW). Produces deterministic, idempotent datasets for BI, analytics, and data engineering.
 
 ## Tech Stack
 
