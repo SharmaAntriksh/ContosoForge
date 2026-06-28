@@ -413,7 +413,7 @@ BEGIN
         CAST(COUNT(DISTINCT OrderNumber) * 100.0
              / NULLIF((SELECT COUNT(DISTINCT OrderNumber) FROM Sales), 0)
              AS DECIMAL(5,2))                                           AS ReturnRatePct
-    FROM Returns;
+    FROM [Returns];
     -- EXPECTED: ~3% (governed by returns.return_rate)
 END
 ELSE IF @has_header = 1
@@ -424,7 +424,7 @@ BEGIN
         CAST(COUNT(DISTINCT OrderNumber) * 100.0
              / NULLIF((SELECT COUNT(DISTINCT OrderNumber) FROM OrderHeader), 0)
              AS DECIMAL(5,2))                                           AS ReturnRatePct
-    FROM Returns;
+    FROM [Returns];
     -- EXPECTED: ~3% (governed by returns.return_rate)
 END
 
@@ -443,7 +443,7 @@ BEGIN
             WHEN DATEDIFF(DAY, s.OrderDate, r.ReturnDate) BETWEEN 31 AND 60 THEN '31-60 days'
             ELSE '60+ days'
         END AS DaysBand
-        FROM Returns r
+        FROM [Returns] r
         JOIN Sales s ON s.OrderNumber = r.OrderNumber
                     AND s.OrderLineNumber = r.OrderLineNumber
     ) x
@@ -465,7 +465,7 @@ BEGIN
             WHEN DATEDIFF(DAY, h.OrderDate, r.ReturnDate) BETWEEN 31 AND 60 THEN '31-60 days'
             ELSE '60+ days'
         END AS DaysBand
-        FROM Returns r
+        FROM [Returns] r
         JOIN OrderHeader h ON h.OrderNumber = r.OrderNumber
     ) x
     GROUP BY DaysBand
@@ -478,7 +478,7 @@ SELECT
     rr.ReturnReason,
     COUNT(*)                                                        AS Returns,
     CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS DECIMAL(5,1)) AS Pct
-FROM Returns r
+FROM [Returns] r
 JOIN ReturnReason rr ON rr.ReturnReasonKey = r.ReturnReasonKey
 GROUP BY rr.ReturnReason
 ORDER BY Returns DESC;
@@ -537,7 +537,7 @@ BEGIN
     FROM (
         SELECT COUNT(DISTINCT r.OrderNumber) * 100.0
                / NULLIF((SELECT COUNT(DISTINCT OrderNumber) FROM Sales), 0) AS RetRate
-        FROM Returns r
+        FROM [Returns] r
     ) x;
 END
 ELSE IF @has_header = 1
@@ -594,6 +594,6 @@ BEGIN
     FROM (
         SELECT COUNT(DISTINCT r.OrderNumber) * 100.0
                / NULLIF((SELECT COUNT(DISTINCT OrderNumber) FROM OrderHeader), 0) AS RetRate
-        FROM Returns r
+        FROM [Returns] r
     ) x;
 END

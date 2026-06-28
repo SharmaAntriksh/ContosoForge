@@ -197,12 +197,11 @@ STORE_EU_COUNTRY_CODES = [33, 34, 39, 49, 31, 32, 41, 46, 47, 45]
 #  EMPLOYEE_DEFAULTS
 # =================================================================
 
-# Gender distribution for employees: {other, female, male}
-# Thresholds: u < other → "O"; u < other + female → "F"; else → "M"
+# Gender distribution for employees (persons): Male / Female only.
+# Threshold: u < female gives "Female", else "Male".
 EMPLOYEE_GENDER_PROBS: Dict[str, float] = {
-    "other": 0.02,
-    "female": 0.49,
-    "male": 0.49,
+    "female": 0.5,
+    "male": 0.5,
 }
 if abs(sum(EMPLOYEE_GENDER_PROBS.values()) - 1.0) > 1e-9:
     raise ValidationError(

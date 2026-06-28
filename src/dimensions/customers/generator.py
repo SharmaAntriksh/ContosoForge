@@ -700,6 +700,18 @@ def _build_engagement_profile(
 # ---------------------------------------------------------
 # Main generator
 # ---------------------------------------------------------
+def _append_gender_code(customers_df: pd.DataFrame) -> None:
+    """Insert the single-char GenderCode (M/F/O) immediately after the readable
+    Gender column, in place. Gender itself is left untouched (Male/Female/Org).
+    Called at each build path's output boundary, after all post-phases."""
+    gender_pos = customers_df.columns.get_loc("Gender")
+    customers_df.insert(
+        gender_pos + 1,
+        "GenderCode",
+        customers_df["Gender"].map(CUSTOMER_GENDER_CODE_MAP),
+    )
+
+
 def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
                                   *, _skip_post_phases: bool = False):
     cust_cfg = cfg.customers
@@ -1324,17 +1336,11 @@ def generate_synthetic_customers(cfg: Dict, parquet_dims_folder: Path,
             _remap_profiles_to_current_version(customers_df, profile_df, org_profile_df)
 
     if not _skip_post_phases:
-        # Derive GenderCode (M/F/O) from the readable Gender label, only on the
-        # full (serial) path. Gender itself stays readable (Male/Female/Org).
-        # Chunk workers (_skip_post_phases=True) keep the readable labels so the
-        # orchestrator's spouse-matching still keys on Male/Female after merge;
-        # the orchestrator adds GenderCode once post-merge.
-        _gender_pos = customers_df.columns.get_loc("Gender")
-        customers_df.insert(
-            _gender_pos + 1,
-            "GenderCode",
-            customers_df["Gender"].map(CUSTOMER_GENDER_CODE_MAP),
-        )
+        # GenderCode is derived only on the full (serial) path. Chunk workers
+        # (_skip_post_phases=True) keep the readable labels so the orchestrator's
+        # spouse-matching still keys on Male/Female after merge; the orchestrator
+        # adds GenderCode once post-merge.
+        _append_gender_code(customers_df)
 
     active_customer_set = set(active_customer_keys.tolist())
     return customers_df, profile_df, org_profile_df, active_customer_set
@@ -1667,15 +1673,9 @@ def _generate_parallel(cfg, parquet_dims_folder: Path, n_workers: int):
         import shutil
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
-    # Derive GenderCode (M/F/O) after all post-phases (household matching
-    # consumed the readable Gender labels above; SCD2 carried them through).
-    # Gender itself stays readable (Male/Female/Org).
-    _gender_pos = customers_df.columns.get_loc("Gender")
-    customers_df.insert(
-        _gender_pos + 1,
-        "GenderCode",
-        customers_df["Gender"].map(CUSTOMER_GENDER_CODE_MAP),
-    )
+    # GenderCode is derived after all post-phases (household matching consumed the
+    # readable Gender labels above; SCD2 carried them through).
+    _append_gender_code(customers_df)
 
     # Parallel path doesn't track an active-customer set — sales derives
     # it independently from active_ratio + seed (see sales.py). Returning

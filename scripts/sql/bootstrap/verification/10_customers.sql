@@ -66,11 +66,12 @@ BEGIN
         CASE WHEN @date_inv = 0 THEN 'PASS' ELSE 'FAIL' END,
         CAST(@date_inv AS VARCHAR) + ' inversions');
 
-    -- Gender domain (single-char codes: M = Male, F = Female, O = Organization)
+    -- GenderCode domain (single-char codes: M = Male, F = Female, O = Organization).
+    -- Gender itself is the readable label (Male/Female/Org); codes live in GenderCode.
     DECLARE @bad_gender INT;
     SELECT @bad_gender = COUNT(*) FROM dbo.Customers
-    WHERE Gender NOT IN ('M', 'F', 'O');
-    INSERT INTO #R VALUES ('Domain', 'Valid Gender',
+    WHERE GenderCode NOT IN ('M', 'F', 'O');
+    INSERT INTO #R VALUES ('Domain', 'Valid GenderCode',
         'Must be M, F, or O',
         CASE WHEN @bad_gender = 0 THEN 'PASS' ELSE 'FAIL' END,
         CAST(@bad_gender AS VARCHAR) + ' invalid');

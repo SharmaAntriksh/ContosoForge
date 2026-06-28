@@ -114,8 +114,6 @@ _BUDGET_CSV_ROUND: dict[str, int] = {
     "BudgetGrowthPct": 6,
     "BudgetAmount": 2,
     "BudgetQuantity": 2,
-    "BudgetAmount": 2,
-    "BudgetQuantity": 2,
 }
 
 _BUDGET_CSV_INT_COLS: tuple[str, ...] = ("BudgetYear",)

@@ -46,17 +46,18 @@ HAVING COUNT(*) > 1;
 -- 2. Gender Domain Values
 -- ============================================================================
 
--- 2a. Customer gender must be M, F, or O (M=Male, F=Female, O=Organization)
-SELECT Gender, COUNT(*) AS Cnt
+-- 2a. Customer GenderCode must be M, F, or O (M=Male, F=Female, O=Organization).
+-- Gender holds the readable label (Male/Female/Org); the single-char code is GenderCode.
+SELECT GenderCode, COUNT(*) AS Cnt
 FROM Customers
-WHERE Gender NOT IN ('M', 'F', 'O')
-GROUP BY Gender;
+WHERE GenderCode NOT IN ('M', 'F', 'O')
+GROUP BY GenderCode;
 -- EXPECTED: zero rows
 
--- 2b. Employee gender must be M, F, or O
+-- 2b. Employee Gender must be Male or Female (readable labels)
 SELECT Gender, COUNT(*) AS Cnt
 FROM Employees
-WHERE Gender NOT IN ('M', 'F', 'O')
+WHERE Gender NOT IN ('Male', 'Female')
 GROUP BY Gender;
 -- EXPECTED: zero rows
 
