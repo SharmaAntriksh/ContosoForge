@@ -1,6 +1,6 @@
 # Contoso Sales Data Generator
 
-Generate a complete, **analytics-ready retail dataset** inspired by the **ContosoRetailDW** schema — with configurable dimensions, realistic sales behavior, budget forecasts, inventory snapshots, wishlists, and complaints. Designed for BI, analytics, data engineering, and data modeling scenarios.
+Generate a complete, **analytics-ready retail dataset** inspired by the **ContosoRetailDW** schema - with configurable dimensions, realistic sales behavior, budget forecasts, inventory snapshots, wishlists, and complaints. Designed for BI, analytics, data engineering, and data modeling scenarios.
 
 Every run is **deterministic**, **schema-stable**, and **idempotent**, making the generator ideal for repeatable demos, training environments, and benchmarking.
 
@@ -41,7 +41,7 @@ Each run produces a self-contained output folder under `generated_datasets/` wit
 - Git
 
 Optional:
-- [uv](https://docs.astral.sh/uv/) — recommended for fast, locked dependency installs (`pip install uv`)
+- [uv](https://docs.astral.sh/uv/) - recommended for fast, locked dependency installs (`pip install uv`)
 - Power BI Desktop (to explore the included `.pbip` project template)
 
 Verify Python:
@@ -68,7 +68,7 @@ installs. Install it once if you don't have it:
 - **Without Python (Windows):** `irm https://astral.sh/uv/install.ps1 | iex`
 - **Without Python (macOS / Linux):** `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-uv then provisions the correct Python itself — no separate Python install needed.
+uv then provisions the correct Python itself - no separate Python install needed.
 
 **Windows (PowerShell):**
 
@@ -89,7 +89,7 @@ To update dependencies later:
 **macOS / Linux:**
 
 ```bash
-# Locked, reproducible — includes SQL Server + Postgres import drivers
+# Locked, reproducible - includes SQL Server + Postgres import drivers
 uv sync --extra sql --extra postgres
 
 # Core only (no database import drivers)
@@ -103,7 +103,7 @@ uv sync
 
 ### 2. Generate data
 
-The fastest way to get started — run with default settings from `config.yaml`:
+The fastest way to get started - run with default settings from `config.yaml`:
 
 ```powershell
 .\scripts\run_generator.ps1
@@ -132,7 +132,7 @@ Generated datasets land in `generated_datasets/` with a timestamped folder name 
 
 ```
 generated_datasets/
-  └── 2026-03-07 02_30_45 PM Customers 5K Sales 100K Parquet/
+  └── 2026-03-07 02_30_45 PM Customers 5K Sales 100K CSV/
       ├── Sales PBIP/
       │   └── Sales.pbip    ← open directly in Power BI
       ├── config/
@@ -151,11 +151,11 @@ generated_datasets/
       │   ├── inventory/                       ← if inventory enabled
       │   ├── customer_wishlists/              ← if wishlists enabled
       │   └── complaints/                      ← if complaints enabled
-      ├── sql/                                 ← CSV mode only — SQL Server bootstrap
+      ├── sql/                                 ← CSV mode only - SQL Server bootstrap
       │   ├── schema/
       │   ├── load/
       │   └── indexes/
-      └── postgres/                            ← CSV mode only — PostgreSQL bootstrap
+      └── postgres/                            ← CSV mode only - PostgreSQL bootstrap
           ├── schema/                          ← CREATE TABLE, views, constraints (DDL)
           ├── load/                            ← COPY scripts
           ├── admin/                           ← manage_primary_keys procedure
@@ -168,11 +168,11 @@ generated_datasets/
 
 The generator is driven by two YAML files at the project root.
 
-- **`config.yaml`** — controls the **shape and scale** of the dataset: row counts, entity counts, date ranges, output format, parallelism, and feature toggles. Full reference: [CONFIG_GUIDE](docs/CONFIG_GUIDE.md).
+- **`config.yaml`** - controls the **shape and scale** of the dataset: row counts, entity counts, date ranges, output format, parallelism, and feature toggles. Full reference: [CONFIG_GUIDE](docs/CONFIG_GUIDE.md).
 
-- **`models.yaml`** — controls **how sales behave**: demand curves, pricing dynamics, basket sizes, brand popularity, return patterns, and the overall business shape via [trend presets](docs/MODELS_GUIDE.md#available-presets). Not overridable via CLI — edit directly or via the web UI. Full reference: [MODELS_GUIDE](docs/MODELS_GUIDE.md).
+- **`models.yaml`** - controls **how sales behave**: demand curves, pricing dynamics, basket sizes, brand popularity, return patterns, and the overall business shape via [trend presets](docs/MODELS_GUIDE.md#available-presets). Not overridable via CLI - edit directly or via the web UI. Full reference: [MODELS_GUIDE](docs/MODELS_GUIDE.md).
 
-CLI flags override `config.yaml` values for the current run only — they are not persisted.
+CLI flags override `config.yaml` values for the current run only - they are not persisted.
 
 For tuning the customer/row/date balance to get visually interesting charts, see [Scaling tips](docs/CONFIG_GUIDE.md#scaling-tips).
 
@@ -224,7 +224,7 @@ A web UI (FastAPI + React) is also available for interactive generation:
 
 ## Power BI Data Model
 
-Each output includes a Power BI Project (`.pbip`) template with pre-configured folder paths. Open the `.pbip` file directly in Power BI Desktop — no manual path setup required.
+Each output includes a Power BI Project (`.pbip`) template with pre-configured folder paths. Open the `.pbip` file directly in Power BI Desktop - no manual path setup required.
 
 <img src="docs/assets/data-model-diagram-view.png" alt="Power BI model collapsed" width="600" />
 
@@ -265,4 +265,6 @@ pytest --lf
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+
+You are free to use, modify, and share it for any **noncommercial** purpose. Commercial use, including selling it, is not permitted. You must keep the attribution notice (`Copyright (c) 2026 Antriksh Sharma`). See [LICENSE.md](LICENSE.md) for the full terms.
