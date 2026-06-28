@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -8,6 +9,19 @@ import pandas as pd
 from src.utils import info, skip
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning import should_regenerate, save_version
+
+
+def _file_sha256(path: Path, _chunk: int = 1 << 20) -> str:
+    """Content fingerprint of a file, stable across git clone/checkout.
+
+    Used instead of mtime so a checkout that rewrites the source with
+    byte-identical content does not trigger a needless regeneration.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(_chunk), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def load_static_dimension(
@@ -44,11 +58,13 @@ def load_static_dimension(
 
     stat = src_path.stat()
 
-    # Stronger version key: path + file fingerprint
+    # Version key: path + content fingerprint. Uses a content hash (not mtime)
+    # so a git clone/checkout that rewrites the file with identical bytes does
+    # not trigger a needless regeneration.
     version_key = {
         "source": str(src_path),
         "source_size": int(stat.st_size),
-        "source_mtime_ns": int(stat.st_mtime_ns),
+        "source_sha256": _file_sha256(src_path),
         "date_cols": list(date_cols) if date_cols is not None else None,
         "cast_all_datetime": bool(cast_all_datetime),
         "compression": str(compression),
