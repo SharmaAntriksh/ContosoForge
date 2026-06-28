@@ -51,17 +51,27 @@ class PipelineOverrides:
 
 
 
+def _band_to_dict(b):
+    """Coerce a band entry (Pydantic ``PriceBandEntry`` or dict) to a plain dict."""
+    if hasattr(b, "model_dump"):
+        return b.model_dump()
+    return dict(b) if isinstance(b, Mapping) else b
+
+
 def _inject_models_appearance(cfg, models_cfg) -> None:
     """Translate ``models.pricing.appearance`` into the product pricing format.
 
     This ensures product dimension generation and sales-time pricing_pipeline
     both use the same price/cost bands from a single source in models.yaml.
     Mutates ``cfg.products.pricing["appearance"]`` in place.
+
+    Both ``models_cfg`` and the nested sections are ``_Base`` Pydantic models
+    (registered as virtual ``Mapping``), so ``.get()`` works uniformly here.
     """
-    pricing = models_cfg.pricing if hasattr(models_cfg, "pricing") else models_cfg.get("pricing") if isinstance(models_cfg, dict) else None
+    pricing = models_cfg.get("pricing") if isinstance(models_cfg, Mapping) else None
     if not isinstance(pricing, Mapping):
         return
-    appearance = pricing.appearance if hasattr(pricing, "appearance") else pricing.get("appearance") if isinstance(pricing, dict) else None
+    appearance = pricing.get("appearance") if isinstance(pricing, Mapping) else None
     if not isinstance(appearance, Mapping):
         return
 
@@ -83,14 +93,20 @@ def _inject_models_appearance(cfg, models_cfg) -> None:
         if isinstance(first, Mapping):
             ending = float(first.get("value", 0.99))
 
-    prod_appearance = {
+    # Coerce band entries to plain dicts so cfg.products.pricing stays a pure
+    # dict tree. Leaving Pydantic PriceBandEntry instances in place forces the
+    # products version hash onto the str() fallback in version_store
+    # (json.dumps can't serialize them) instead of the canonical-JSON path.
+    price_bands = [_band_to_dict(b) for b in (up_cfg.get("bands") or [])]
+    cost_bands = [_band_to_dict(b) for b in (uc_cfg.get("bands") or [])]
+
+    prod_pricing["appearance"] = {
         "snap_unit_price": bool(appearance.get("enabled", True)),
         "price_ending": ending,
-        "price_bands": up_cfg.get("bands") or [],
-        "round_unit_cost": bool(uc_cfg.get("bands")),
-        "cost_bands": uc_cfg.get("bands") or [],
+        "price_bands": price_bands,
+        "round_unit_cost": bool(cost_bands),
+        "cost_bands": cost_bands,
     }
-    prod_pricing["appearance"] = prod_appearance
 
 
 def run_pipeline(
@@ -296,10 +312,10 @@ def run_pipeline(
 def _normalize_overrides(overrides: PipelineOverrides) -> PipelineOverrides:
     # Normalize format alias
     ff = overrides.file_format
-    if ff is not None and str(ff).strip().lower() == "delta":
-        ff = "deltaparquet"
     if ff is not None:
         ff = str(ff).strip().lower()
+        if ff == "delta":
+            ff = "deltaparquet"
     return PipelineOverrides(**{**overrides.__dict__, "file_format": ff})
 
 

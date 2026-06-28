@@ -87,9 +87,6 @@ def tables_from_sales_cfg(sales_cfg, cfg=None) -> list[str]:
                 returns_enabled = False
 
     if returns_enabled:
-        # Import locally to avoid hard dependency if returns isn’t wired in some branches yet
-        from src.facts.sales.output_paths import TABLE_SALES_RETURN  # noqa: WPS433
-
         tables.append(TABLE_SALES_RETURN)
 
     return tables

@@ -422,9 +422,15 @@ def generate_dimensions(
     if _is_random_mode(cfg):
         force_set = set(known)
 
-    # Special per-dimension force expansions (e.g., products -> suppliers)
-    for n in list(force_set):
-        force_set.update(by_name[n].force_also)
+    # Special per-dimension force expansions (e.g., products -> suppliers).
+    # Iterate to a fixed point so chained force_also entries are all included.
+    _pending = list(force_set)
+    while _pending:
+        n = _pending.pop()
+        for extra in by_name[n].force_also:
+            if extra not in force_set:
+                force_set.add(extra)
+                _pending.append(extra)
 
     # Date-dependent expansion:
     date_dependent_names = {s.name for s in DIM_SPECS if s.date_dependent}
@@ -452,7 +458,6 @@ def generate_dimensions(
         # orphaned files from prior runs (e.g. moved or renamed outputs).
         all_dim_names = {s.name for s in DIM_SPECS}
         if force_set >= all_dim_names:
-            import shutil
             for f in parquet_dims_folder.glob("*.parquet"):
                 f.unlink()
 
@@ -486,16 +491,29 @@ def generate_dimensions(
 
             regenerated[spec.name] = bool(regen)
 
-        # If stores regenerated (hash change or force) but warehouses did not,
-        # warehouses must re-run to add WarehouseKey to the fresh stores.parquet.
-        if regenerated.get("stores") and not regenerated.get("warehouses"):
-            wh_spec = by_name.get("warehouses")
-            if wh_spec is not None:
-                info("Stores regenerated — forcing warehouses to re-add WarehouseKey to stores.parquet")
-                delete_version("warehouses")
-                cfg_run = _cfg_for_dimension(cfg, wh_spec.cfg_key)
-                wh_spec.run_fn(cfg_run, parquet_dims_folder)
-                regenerated["warehouses"] = True
+        # Propagate to downstream dims that consume a regenerated upstream but
+        # were skipped (their own version hash didn't change). The canonical
+        # case: warehouses MODIFIES stores.parquet to add WarehouseKey, so a
+        # stores regen (hash change, not force) leaves a fresh stores.parquet
+        # without WarehouseKey unless warehouses re-runs — which then breaks
+        # inventory. Other consumers (employees, ESA) likewise need fresh
+        # upstream data. Walk in topological order so each re-run cascades to
+        # its own dependents (stores -> warehouses -> employees -> ESA).
+        for spec in specs_ordered:
+            if regenerated.get(spec.name):
+                continue
+            if not (spec.enabled(cfg) or spec.name in force_set):
+                continue
+            if not any(regenerated.get(dep) for dep in spec.deps):
+                continue
+            info(f"{spec.name} re-running: an upstream dependency regenerated")
+            delete_version(spec.name)
+            cfg_run = cfg
+            if spec.inject_global_dates:
+                cfg_run = _cfg_with_global_dates(cfg_run, spec.cfg_key, global_dates)
+            cfg_run = _cfg_for_dimension(cfg_run, spec.cfg_key)
+            spec.run_fn(cfg_run, parquet_dims_folder)
+            regenerated[spec.name] = True
 
     return {
         "global_dates": global_dates,

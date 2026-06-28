@@ -34,8 +34,10 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path):
     is_csv = file_format == "csv"
 
     _raw_folder = unquote(str(cfg.defaults.final_output))
-    if ".." in _raw_folder:
-        raise ValueError(f"defaults.final_output must not contain '..': {_raw_folder}")
+    # Reject path traversal via an explicit ".." path segment. A bare substring
+    # check would false-positive on legitimate names like "my..backup".
+    if ".." in Path(_raw_folder).parts:
+        raise ValueError(f"defaults.final_output must not contain a '..' path segment: {_raw_folder}")
     final_root = Path(_raw_folder).resolve()
 
     config_yaml_path = get_first_existing_path(

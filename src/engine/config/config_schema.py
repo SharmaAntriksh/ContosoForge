@@ -95,12 +95,14 @@ class _MutationMixin:
         return val
 
     def setdefault(self, key: str, default: Any = None) -> Any:
-        try:
-            val = getattr(self, key)
-            if val is not None:
-                return val
-        except AttributeError:
-            pass
+        """Dict-compatible setdefault: only sets when *key* is absent.
+
+        Matches ``dict.setdefault`` semantics — a present key whose value is
+        ``None`` is returned as-is and NOT overwritten with *default* (many
+        config fields legitimately default to ``None``).
+        """
+        if key in self._all_fields():
+            return getattr(self, key)
         object.__setattr__(self, key, default)
         return default
 
