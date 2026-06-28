@@ -182,14 +182,17 @@ def configure_logging(
 
     if log_file is not None:
         LOG_FILE = str(log_file)
-        _LOG_FILE_PATH = None
-        _LOG_DIR_READY = False
-        if _LOG_FD is not None:
-            try:
-                os.close(_LOG_FD)
-            except OSError:
-                pass
-            _LOG_FD = None
+        # Guard FD state with the same lock _ensure_log_file_open() uses, so
+        # reconfiguring after worker threads start can't race _write_to_file.
+        with _LOG_FD_LOCK:
+            _LOG_FILE_PATH = None
+            _LOG_DIR_READY = False
+            if _LOG_FD is not None:
+                try:
+                    os.close(_LOG_FD)
+                except OSError:
+                    pass
+                _LOG_FD = None
 
     if verbosity is not None:
         LOG_VERBOSITY = verbosity
@@ -312,6 +315,7 @@ def warn(msg: Any) -> None:
 
 
 def fail(msg: Any) -> None:
+    _activate_pending()
     _flush(_line("FAIL", msg))
 
 

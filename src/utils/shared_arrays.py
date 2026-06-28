@@ -22,6 +22,7 @@ Usage (worker init)::
 """
 from __future__ import annotations
 
+import atexit
 import uuid
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Dict, List, Optional
@@ -36,8 +37,26 @@ _SHM_MARKER = "__shm__"
 MIN_SHARE_BYTES = 100_000  # 100 KB
 
 # Keep SharedMemory handles alive in worker processes so they aren't GC'd
-# while numpy views still reference the underlying buffer.
-_worker_shm_handles: List[SharedMemory] = []
+# while numpy views still reference the underlying buffer. Keyed by block
+# name so resolving the same descriptor twice reuses a single handle
+# (instead of leaking a new one per call).
+_worker_shm_handles: Dict[str, SharedMemory] = {}
+
+
+@atexit.register
+def _close_worker_shm_handles() -> None:
+    """Close (not unlink) worker-side handles at process exit.
+
+    The main process owns unlinking via SharedArrayGroup.cleanup(); workers
+    only close their mappings. Closing here keeps the POSIX resource_tracker
+    quiet instead of relying solely on interpreter teardown.
+    """
+    for shm in _worker_shm_handles.values():
+        try:
+            shm.close()
+        except (OSError, BufferError):
+            pass
+    _worker_shm_handles.clear()
 
 
 def _is_shareable(v: Any) -> bool:
@@ -58,8 +77,11 @@ def resolve_array(value: Any) -> Any:
     if not isinstance(value, dict) or _SHM_MARKER not in value:
         return value
 
-    shm = SharedMemory(name=value["name"], create=False)
-    _worker_shm_handles.append(shm)  # prevent GC
+    name = value["name"]
+    shm = _worker_shm_handles.get(name)
+    if shm is None:
+        shm = SharedMemory(name=name, create=False)
+        _worker_shm_handles[name] = shm  # cache + prevent GC
 
     arr = np.ndarray(
         tuple(value["shape"]),

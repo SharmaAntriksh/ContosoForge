@@ -1,5 +1,6 @@
 import json
 import hashlib
+from collections.abc import Mapping
 from pathlib import Path
 
 # -----------------------------------------------------------
@@ -13,12 +14,28 @@ VERSION_DIR.mkdir(parents=True, exist_ok=True)
 # -----------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------
+def _canonical_default(o):
+    """Deterministic coercion for objects ``json`` can't serialize natively.
+
+    Critically, sets are sorted: ``str(set)`` iteration order depends on
+    PYTHONHASHSEED, so the old ``str(obj)`` fallback could hash the same
+    config to different values across runs and spuriously regenerate.
+    """
+    if isinstance(o, (set, frozenset)):
+        return sorted(o, key=repr)
+    if hasattr(o, "model_dump"):          # Pydantic models (config sub-sections)
+        return o.model_dump()
+    if isinstance(o, Mapping):
+        return dict(o)
+    return str(o)
+
+
 def _compute_hash(obj) -> str:
     """Compute deterministic hash for config sections."""
     try:
-        data = json.dumps(obj, sort_keys=True).encode("utf-8")
+        data = json.dumps(obj, sort_keys=True, default=_canonical_default).encode("utf-8")
     except TypeError:
-        # If object contains non-serializable fields, fallback to string repr
+        # Last resort: should be unreachable given the default handler above.
         data = str(obj).encode("utf-8")
     return hashlib.sha256(data).hexdigest()
 
