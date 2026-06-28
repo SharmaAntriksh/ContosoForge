@@ -309,9 +309,8 @@ def run_coverage_preflight(cfg, parquet_dims: Path, global_start, global_end) ->
 
     if report.n_gap_cells:
         info(f"Coverage pre-flight: {report.n_gap_cells} reduced-coverage store-month(s) "
-             f"({report.n_fully_open_gaps} avoidable); "
-             f"{len(report.uncovered_months)} fully-uncovered month(s). "
-             "EmployeeKey=-1 is prevented unconditionally (orphan lines dropped).")
+             f"({report.n_fully_open_gaps} avoidable), "
+             f"{len(report.uncovered_months)} fully-uncovered.")
 
     # Only fully-open gaps are avoidable data loss; boundary (open/close) months
     # are expected and don't trigger the policy.
