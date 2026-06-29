@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Set
 
 from src.tools.sql.dialect import DEFAULT_DIALECT, Dialect
 from src.utils.logging_utils import work, skip
 from src.tools.sql.sql_helpers import (
-    sql_escape_literal as _sql_escape_literal,
-    quote_ident as _quote_ident,
     returns_enabled as _returns_enabled_from_cfg,
     budget_enabled as _budget_enabled_from_cfg,
     inventory_enabled as _inventory_enabled_from_cfg,
@@ -191,11 +188,11 @@ def generate_bulk_insert_script(
         skip(f"No CSV files found in {csv_folder}. Skipping load script.")
         return None
 
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # No generation timestamp: keep the script byte-stable across runs
+    # (provenance lives in the timestamped run folder).
     banner = dialect.load_script_kind.replace("_", " ").upper()
     header: list[str] = [
         f"-- Auto-generated {banner} script",
-        f"-- Generated on: {ts}",
     ]
     if dialect.load_script_note:
         header.append(dialect.load_script_note)

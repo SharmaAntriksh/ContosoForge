@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re as _re
-from datetime import datetime
 from pathlib import Path
 from typing import Mapping, Sequence, Tuple
 
@@ -91,6 +90,8 @@ def create_table_from_schema(
         schema = dialect.default_schema
     _validate_sql_identifier(table_name, "table name")
     _validate_sql_identifier(schema, "schema name")
+    if not cols:
+        raise ValueError(f"Cannot generate CREATE TABLE for {table_name!r}: no columns.")
     fq_table = dialect.qualify(schema, table_name)
 
     emit_separator = include_batch_separator and bool(dialect.batch_separator)
@@ -152,10 +153,11 @@ def generate_all_create_tables(
     dim_out_path = schema_dir / "01_create_dimensions.sql"
     fact_out_path = schema_dir / "02_create_facts.sql"
 
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # No generation timestamp in the header: it would make otherwise-identical
+    # scripts differ byte-for-byte between runs. Provenance lives in the
+    # timestamped run folder instead.
     header = [
         "-- Auto-generated CREATE TABLE scripts",
-        f"-- Generated on: {ts}",
         *dialect.script_preamble,
         "",
     ]

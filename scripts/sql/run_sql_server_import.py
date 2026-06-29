@@ -164,9 +164,12 @@ def main() -> int:
         default=4,
         help=(
             "Number of parallel BULK INSERT workers for multi-chunk fact tables. "
-            "Each worker holds its own connection and loads chunks concurrently "
-            "into the same heap (TABLOCK allows this). 1 disables parallelism. "
-            "Default: 4. Diminishing returns past ~8 on a single NVMe."
+            "Each worker holds its own connection and loads chunks concurrently. "
+            "Concurrent TABLOCK loads only run in parallel into a table with NO "
+            "indexes, so pair with --drop-pk-before-load --restore-pk-after-load "
+            "for the advertised speedup; otherwise a present PK serializes the "
+            "chunk loads. 1 disables parallelism. Default: 4. Diminishing returns "
+            "past ~8 on a single NVMe."
         ),
     )
 

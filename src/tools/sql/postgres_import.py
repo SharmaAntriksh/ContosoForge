@@ -112,11 +112,19 @@ def _execute_script(conn, sql_file: Path) -> None:
 # load can be executed client-side via ``COPY ... FROM STDIN``. The WITH
 # clause is intentionally ignored: every CSV the generator emits uses the
 # same options, so we just hard-code them in the STDIN statement below.
+# The path is a SQL single-quoted literal, so an embedded apostrophe is
+# written doubled (``''``); the body matches non-quotes OR escaped pairs,
+# and the caller un-doubles them via ``_unescape_sql_literal``.
 _COPY_STATEMENT_RE = re.compile(
     r'COPY\s+(?P<target>(?:"[^"]+"\."[^"]+"|"[^"]+"|[\w.]+))\s+'
-    r"FROM\s+'(?P<path>[^']+)'",
+    r"FROM\s+'(?P<path>(?:[^']|'')*)'",
     flags=re.IGNORECASE,
 )
+
+
+def _unescape_sql_literal(value: str) -> str:
+    """Reverse ``sql_escape_literal``: collapse doubled single quotes."""
+    return value.replace("''", "'")
 
 # psycopg's Copy.write() chunks into libpq's PQputCopyData, which itself
 # buffers; 1 MB minimises Python-level loop overhead for multi-GB files
@@ -395,7 +403,7 @@ def _apply_copy_script_via_stdin(
     groups: list[tuple[str, list[Path]]] = []
     for m in matches:
         target = m.group("target")
-        csv_path = Path(m.group("path"))
+        csv_path = Path(_unescape_sql_literal(m.group("path")))
         if not csv_path.is_file():
             raise PostgresImportError(
                 f"CSV not found for {target}: {csv_path}. "

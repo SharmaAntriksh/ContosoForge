@@ -3,7 +3,6 @@ from __future__ import annotations
 import sys
 import time as _time
 import threading as _threading
-from datetime import datetime
 import re
 from pathlib import Path
 from typing import Iterable, List, Tuple
@@ -12,7 +11,6 @@ from src.exceptions import SqlServerImportError
 from src.tools.sql._import_common import (
     _extract_tables_from_create_sql,
     _log,
-    _short_path,
     find_create_sql as _find_create_sql,
     find_prepare_load_script,
     find_finish_load_script,
@@ -46,8 +44,8 @@ _CT_FK = "FK"
 
 
 
-# Importer logging helpers (_ts, _log, _COLORS), _extract_tables_from_create_sql,
-# and _short_path are imported from _import_common above.
+# Importer logging helpers (_ts, _log, _COLORS) and
+# _extract_tables_from_create_sql are imported from _import_common above.
 
 
 def _find_table_schema(cursor: "pyodbc.Cursor", table_name: str) -> str:
@@ -208,7 +206,17 @@ def execute_sql_files(cursor, files: Iterable[Path]) -> None:
 
 # Anchored at line start so matches inside ``-- ...`` comments are ignored.
 _BULK_INSERT_LINE_PREFIX = r"^[ \t]*BULK\s+INSERT\s+"
-_TABLE_REF_TAIL = r"(?:\[?\w+\]?\.)?\[?(\w+)\]?"
+# Optional schema prefix, then the table ref. Bracketed/quoted names may
+# carry embedded spaces (e.g. [My Table]) to match the identifier charset
+# accepted by _validate_sql_identifier; bare names cannot.
+_TABLE_REF_TAIL = (
+    r"(?:(?:\[[\w ]+\]|\"[\w ]+\"|\w+)\s*\.\s*)?"
+    r"(?:\[(?P<b>[\w ]+?)\]|\"(?P<q>[\w ]+?)\"|(?P<u>\w+))"
+)
+
+
+def _table_ref_match(m: "re.Match[str]") -> str:
+    return (m.group("b") or m.group("q") or m.group("u") or "").strip()
 
 
 def _extract_table_from_batch(batch_text: str) -> str:
@@ -218,13 +226,13 @@ def _extract_table_from_batch(batch_text: str) -> str:
         batch_text, flags=re.IGNORECASE | re.MULTILINE,
     )
     if m:
-        return m.group(1)
+        return _table_ref_match(m)
     m = re.search(
         r"^[ \t]*INSERT\s+(?:INTO\s+)?" + _TABLE_REF_TAIL,
         batch_text, flags=re.IGNORECASE | re.MULTILINE,
     )
     if m:
-        return m.group(1)
+        return _table_ref_match(m)
     return ""
 
 
@@ -432,8 +440,6 @@ def _execute_load_with_progress(
     cursor,
     sql_file: Path,
     *,
-    base: Path = None,
-    label: str = "Loading",
     db_conn_str: str | None = None,
     load_workers: int = 1,
 ) -> None:
@@ -463,12 +469,14 @@ def _execute_load_with_progress(
     grouped: list[tuple[str, list[str]]] = []
     for table_name, sql_stmt in statements:
         if not table_name or table_name == "batch":
-            # Preamble / non-BULK-INSERT batch — execute silently
+            # Preamble / non-BULK-INSERT batch (e.g. SET NOCOUNT ON).
             try:
                 cursor.execute(sql_stmt)
                 _drain_results(cursor)
-            except pyodbc.Error:
-                pass
+            except pyodbc.Error as exc:
+                # Should never fail; surface it rather than masking a real load
+                # statement that was misclassified as preamble.
+                _log("WARN", f"    Preamble batch failed (continuing): {exc.args}")
             continue
         if grouped and grouped[-1][0] == table_name:
             grouped[-1][1].append(sql_stmt)
@@ -923,6 +931,16 @@ def import_sql_server(
     _log("INFO", "SQL Server Import")
     _log("INFO", f"  Server: {server}")
 
+    # Concurrent BULK INSERT with TABLOCK only parallelizes into a table with
+    # NO indexes. Constraints (including a nonclustered PK) are applied in the
+    # schema phase below, so unless they are dropped first the per-table chunk
+    # loads serialize on an exclusive table lock (the workers buy nothing).
+    if load_workers > 1 and not drop_pk_before_load and constraint_files:
+        _log("WARN", "  --load-workers > 1 but constraints are not dropped before load.")
+        _log("WARN", "    Parallel BULK INSERT (TABLOCK) only scales into pure heaps;")
+        _log("WARN", "    with a PK present, chunk loads into the same table serialize.")
+        _log("WARN", "    Add --drop-pk-before-load --restore-pk-after-load for full speed.")
+
     # Step 1: ensure DB exists
     try:
         with pyodbc.connect(connection_string, autocommit=True) as conn:
@@ -1062,8 +1080,6 @@ def import_sql_server(
                     _execute_load_with_progress(
                         cursor,
                         load_file,
-                        base=run_dir,
-                        label=section,
                         db_conn_str=db_conn_str,
                         load_workers=file_workers,
                     )

@@ -43,9 +43,11 @@ def _log(level: str, msg: str) -> None:
 
 # Identifier in either [brackets], "double quotes", or bare form. Each
 # variant gets its own named group; the extractor picks whichever matched.
+# Bracketed/quoted forms allow embedded spaces (e.g. [My Table]) to match the
+# identifier charset accepted by _validate_sql_identifier; bare names can't.
 _IDENT = (
-    r"(?:\[\s*(?P<bracket>\w+)\s*\]"
-    r"|\"\s*(?P<quoted>\w+)\s*\""
+    r"(?:\[(?P<bracket>[\w ]+?)\]"
+    r"|\"(?P<quoted>[\w ]+?)\""
     r"|(?P<bare>\w+))"
 )
 # Schema-qualified form: "schema.table" — capture only the table half;
@@ -87,7 +89,7 @@ def _extract_tables_from_create_sql(sql_file: Path) -> list[str]:
         if not m:
             continue
 
-        table = m.group("bracket") or m.group("quoted") or m.group("bare")
+        table = (m.group("bracket") or m.group("quoted") or m.group("bare") or "").strip()
         if not table:
             continue
 

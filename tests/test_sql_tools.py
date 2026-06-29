@@ -356,8 +356,9 @@ class TestCreateTableFromSchema:
         assert "[staging].[Foo]" in ddl
 
     def test_empty_cols(self):
-        ddl = create_table_from_schema("Empty", [])
-        assert "CREATE TABLE [dbo].[Empty]" in ddl
+        # A column-less CREATE TABLE is invalid SQL: the generator rejects it.
+        with pytest.raises(ValueError, match="no columns"):
+            create_table_from_schema("Empty", [])
 
     def test_multiple_columns(self):
         cols = [
