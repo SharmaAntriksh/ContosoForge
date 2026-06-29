@@ -27,12 +27,6 @@ from src.facts.sales.sales_logic import bind_globals, State
 # Helpers
 # =========================================================
 
-def _require_key(d: Dict[str, Any], key: str, ctx: str) -> Any:
-    if key not in d:
-        raise ConfigError(f"Missing required config key: {ctx}.{key}")
-    return d[key]
-
-
 def _normalize_file_format(sales_cfg) -> str:
     fmt = str(sales_cfg.file_format).strip().lower()
     if fmt not in {"csv", "parquet", "deltaparquet"}:

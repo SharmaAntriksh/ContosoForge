@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
+from src.exceptions import ConfigError
 from src.tools.sql.dialect import DEFAULT_DIALECT, REGISTRY
 from src.tools.sql.generate_bulk_insert_sql import (
     _allowed_fact_tables_from_cfg,
@@ -11,6 +13,23 @@ from src.tools.sql.generate_bulk_insert_sql import (
 from src.tools.sql.generate_create_table_scripts import generate_all_create_tables
 from src.tools.sql.sql_helpers import sql_escape_literal
 from src.utils.logging_utils import stage, skip, done
+
+
+# A schema name is embedded into bracketed ([x]) and double-quoted ("x")
+# identifiers in generated SQL. Restrict it to a safe identifier so it cannot
+# inject closing brackets/quotes (mirrors _validate_sql_identifier in the SQL
+# tools layer). Default schemas ("dbo"/"public") pass trivially.
+_SAFE_SCHEMA_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_ ]*$")
+
+
+def _validate_view_schema(name: str) -> str:
+    """Reject view-schema names that aren't safe to embed in SQL identifiers."""
+    if not _SAFE_SCHEMA_RE.match(name):
+        raise ConfigError(
+            f"Unsafe defaults.view_schema {name!r}: must start with a letter or "
+            "underscore and contain only letters, digits, spaces, and underscores."
+        )
+    return name
 
 
 # ------------------------------------------------------------
@@ -131,6 +150,8 @@ def copy_views_sql(*, sql_root: Path, view_schema: str = "dbo") -> None:
 
     legacy = views_dir / "create_views.sql"
     use_custom_schema = view_schema.lower() != "dbo"
+    if use_custom_schema:
+        _validate_view_schema(view_schema)
 
     # Use modular scripts if present; exclude legacy file to avoid double inclusion.
     parts = sorted(
@@ -298,7 +319,7 @@ def _resolve_postgres_view_schema(cfg) -> str:
     raw = str(getattr(getattr(cfg, "defaults", None), "view_schema", "") or "").strip()
     if not raw or raw.lower() in {"dbo", "public"}:
         return "public"
-    return raw
+    return _validate_view_schema(raw)
 
 
 def _rewrite_postgres_view_schema(sql: str, view_schema: str) -> str:

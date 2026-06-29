@@ -1,12 +1,9 @@
-import re
 import shutil
 from pathlib import Path
 from typing import Optional
 
 from src.utils.logging_utils import info, done
 from src.facts.sales.output_paths import TABLE_SALES
-
-from src.engine.config.config_schema import SalesConfig
 
 from .paths import table_dir_name, to_snake
 

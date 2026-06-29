@@ -47,22 +47,22 @@ def _get_defaults_dates(cfg):
     return getattr(defaults_section, "dates", None)
 
 
-def _cfg_with_global_dates(cfg, dim_key: str, global_dates):
-    """
-    Return a deep-copied cfg where the dim section has global_dates injected.
+def _cfg_for_dimension(cfg, dim_key: str):
+    """Return a deep-copied cfg (mutations won't affect the original)."""
+    return cfg.model_copy(deep=True) if hasattr(cfg, "model_copy") else dict(cfg)
+
+
+def _inject_global_dates(cfg_copy, dim_key: str, global_dates) -> None:
+    """Inject ``global_dates`` into the dim section of an already-copied cfg, in place.
+
+    Operates on the per-dimension copy from :func:`_cfg_for_dimension` so we
+    take a single deep copy per dimension rather than two.
     """
     if global_dates is None:
-        return cfg
-    cfg_for = cfg.model_copy(deep=True) if hasattr(cfg, "model_copy") else dict(cfg)
-    dim_section = getattr(cfg_for, dim_key, None)
+        return
+    dim_section = getattr(cfg_copy, dim_key, None)
     if dim_section is not None:
         object.__setattr__(dim_section, "global_dates", global_dates)
-    return cfg_for
-
-
-def _cfg_for_dimension(cfg, dim_key: str):
-    """Return a deep-copied cfg (mutations won't affect original)."""
-    return cfg.model_copy(deep=True) if hasattr(cfg, "model_copy") else dict(cfg)
 
 
 def _returns_enabled(cfg) -> bool:
@@ -452,7 +452,6 @@ def generate_dimensions(
 
     # Delete version files for forced dims — each dimension's
     # should_regenerate() will return True when the file is missing.
-    random_mode = _is_random_mode(cfg)
     if force_set:
         # When all dims are forced, clean the output folder to remove
         # orphaned files from prior runs (e.g. moved or renamed outputs).
@@ -474,10 +473,9 @@ def generate_dimensions(
                 regenerated[spec.name] = False
                 continue
 
-            cfg_run = cfg
+            cfg_run = _cfg_for_dimension(cfg, spec.cfg_key)
             if spec.inject_global_dates:
-                cfg_run = _cfg_with_global_dates(cfg_run, spec.cfg_key, global_dates)
-            cfg_run = _cfg_for_dimension(cfg_run, spec.cfg_key)
+                _inject_global_dates(cfg_run, spec.cfg_key, global_dates)
 
             before = _snapshot(parquet_dims_folder, spec)
             out = spec.run_fn(cfg_run, parquet_dims_folder)
@@ -508,10 +506,9 @@ def generate_dimensions(
                 continue
             info(f"{spec.name} re-running: an upstream dependency regenerated")
             delete_version(spec.name)
-            cfg_run = cfg
+            cfg_run = _cfg_for_dimension(cfg, spec.cfg_key)
             if spec.inject_global_dates:
-                cfg_run = _cfg_with_global_dates(cfg_run, spec.cfg_key, global_dates)
-            cfg_run = _cfg_for_dimension(cfg_run, spec.cfg_key)
+                _inject_global_dates(cfg_run, spec.cfg_key, global_dates)
             spec.run_fn(cfg_run, parquet_dims_folder)
             regenerated[spec.name] = True
 
