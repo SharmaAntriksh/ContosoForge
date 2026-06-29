@@ -613,41 +613,62 @@ def _available_phys_bytes() -> int | None:
         return None
 
 
-def _inflight_bytes_per_order(bytes_per_order: int = 512, safety: float = 3.0) -> float:
-    """Per-order resident bytes assumed in flight per worker.
+def _sales_memory_model_bytes() -> tuple[int, int, int]:
+    """Return (parent_base, worker_base, bytes_per_row) of the sales RAM model.
 
-    ``bytes_per_order`` ≈ avg_lines_per_order × row_width; ``safety`` covers the
-    derived-column + group-by + returns transients; the ``2×`` is the ``2×
-    processes`` submission window (up to two chunks per worker in flight).
-    Shared by the projection and the cap so they stay exact inverses.
+    Single source of the calibrated constants (in ``src.defaults``) so the peak
+    projection and the tune-path cap below stay exact inverses by construction:
+    the tree peak is modeled as
+    ``parent_base + workers * (worker_base + chunk_size * bytes_per_row)``.
+    See ``scripts/measure_sales_memory.py`` for how the constants were measured.
     """
-    return float(bytes_per_order) * safety * 2.0
+    from src.defaults import (
+        SALES_PARENT_BASE_MB, SALES_WORKER_BASE_MB, SALES_INFLIGHT_BYTES_PER_ROW,
+    )
+    return (
+        SALES_PARENT_BASE_MB * 1024 * 1024,
+        SALES_WORKER_BASE_MB * 1024 * 1024,
+        SALES_INFLIGHT_BYTES_PER_ROW,
+    )
 
 
-def _projected_peak_chunk_bytes(chunk_size: int, n_workers: int,
-                                *, bytes_per_order: int = 512,
-                                safety: float = 3.0) -> int:
-    """Estimate peak resident bytes from in-flight chunks across all workers."""
-    per_worker = _inflight_bytes_per_order(bytes_per_order, safety)
-    return int(chunk_size * per_worker * max(1, n_workers))
+def _projected_peak_chunk_bytes(chunk_size: int, n_workers: int) -> int:
+    """Estimate peak resident bytes of the whole process tree during sales.
+
+    Calibrated against measured peak RSS of real runs (see
+    ``scripts/measure_sales_memory.py``). The tree peak is a fixed coordinator
+    baseline plus, per worker, an import/shared-dimension baseline and one
+    in-flight chunk's row-level Arrow table (with pricing/returns transients):
+
+        parent_base + workers * (worker_base + chunk_size * bytes_per_row)
+    """
+    parent, worker_base, bytes_per_row = _sales_memory_model_bytes()
+    w = max(1, int(n_workers))
+    inflight = int(chunk_size) * bytes_per_row
+    return int(parent + w * (worker_base + inflight))
 
 
-def _cap_chunk_size_by_ram(chunk_size: int, n_workers: int,
-                           *, bytes_per_order: int = 512,
-                           safety: float = 3.0) -> int:
-    """Shrink chunk_size so n_workers can each hold their in-flight chunks.
+def _cap_chunk_size_by_ram(chunk_size: int, n_workers: int) -> int:
+    """Shrink chunk_size so the projected process-tree peak fits in RAM.
 
-    Only used on the auto-tune path (``tune_chunk=True``), where chunk_size is
-    already derived from the machine's worker count; pinned chunk_size values
-    are never silently changed (determinism), only warned about.
+    Inverts :func:`_projected_peak_chunk_bytes` for a target budget of 75% of
+    available physical memory. Only used on the auto-tune path
+    (``tune_chunk=True``), where chunk_size is already derived from the
+    machine's worker count; pinned chunk_size values are never silently changed
+    (determinism), only warned about.
     """
     avail = _available_phys_bytes()
     if not avail:
         return int(chunk_size)
+    parent, worker_base, bytes_per_row = _sales_memory_model_bytes()
     budget = avail * 0.75  # leave headroom for OS + page cache
-    per_worker = budget / max(1, n_workers)
-    max_orders = int(per_worker / _inflight_bytes_per_order(bytes_per_order, safety))
-    return max(50_000, min(int(chunk_size), max_orders))
+    w = max(1, int(n_workers))
+    # Memory left for in-flight chunks after fixed baselines.
+    room = budget - parent - w * worker_base
+    if room <= 0:
+        return 50_000  # baselines alone exhaust the budget; use the floor
+    max_rows = int(room / (w * bytes_per_row))
+    return max(50_000, min(int(chunk_size), max_rows))
 
 
 def _merge_parquet_job(job: tuple) -> None:
@@ -2358,7 +2379,7 @@ def generate_sales_fact(
 
     # When chunk_size is pinned (not auto-tuned), we never silently shrink it
     # (that would change output and break reproducibility) — but warn if the
-    # projected in-flight memory across all workers looks likely to exhaust RAM,
+    # projected peak memory across all workers looks likely to exhaust RAM,
     # so the user can lower chunk_size or enable tune_chunk deliberately.
     if not tune_chunk:
         _avail = _available_phys_bytes()
@@ -2366,7 +2387,7 @@ def generate_sales_fact(
             _peak = _projected_peak_chunk_bytes(chunk_size, n_workers)
             if _peak > _avail * 0.75:
                 warn(
-                    f"Memory risk: ~{_peak / (1024 ** 3):.1f} GB in-flight "
+                    f"Memory risk: ~{_peak / (1024 ** 3):.1f} GB projected peak "
                     f"(chunk_size={chunk_size:,} × {n_workers} workers) vs "
                     f"~{_avail / (1024 ** 3):.1f} GB available."
                 )

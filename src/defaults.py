@@ -695,6 +695,19 @@ FACT_MAX_PARALLEL_CHUNKS = 32
 WORKER_OS_RESERVE_MB = 4_000   # MB reserved for OS + main process
 WORKER_ESTIMATE_MB = 500       # MB estimated per sales worker process
 
+# Sales peak-memory model (used by the in-flight RAM warning and the tune-path
+# chunk cap in sales.py). Calibrated by measuring peak RSS of the whole process
+# tree across real runs (chunk_size 0.5M-4M, workers 1-6); see
+# scripts/measure_sales_memory.py. The tree peak is modeled as:
+#     parent_base + workers * (worker_base + chunk_size * bytes_per_row)
+# Measured values were ~290 MB parent intercept, ~383 MB per-worker base, and
+# ~145 bytes/row in-flight; bytes/row carries a ~2x safety margin, the bases are
+# rounded up modestly. The old model (chunk * 3072 bytes * workers, no bases)
+# over-predicted the tree peak by 4-6x and produced spurious OOM warnings.
+SALES_PARENT_BASE_MB = 350           # coordinator + final parquet/delta merge headroom
+SALES_WORKER_BASE_MB = 400           # numpy/pandas/pyarrow imports + shared dimension pages, per worker
+SALES_INFLIGHT_BYTES_PER_ROW = 300   # one in-flight chunk's row-level Arrow table + pricing/returns transients
+
 
 # =================================================================
 #  MODULE-LEVEL VALIDATION
