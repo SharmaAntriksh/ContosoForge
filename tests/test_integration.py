@@ -225,6 +225,24 @@ class TestPipelineOverrides:
         cfg, sales_cfg = _apply_overrides(cfg, sales_cfg, overrides)
         assert cfg.customers.total_customers == 500
 
+    def test_promotions_total_override_distributes_to_buckets(self, base_cfg):
+        """--promotions N must distribute across the eight buckets even when
+        the config leaves them unset (previously the total was ignored)."""
+        cfg = base_cfg.model_copy(deep=True)
+        for k in ("num_seasonal", "num_clearance", "num_limited", "num_flash",
+                  "num_volume", "num_loyalty", "num_bundle", "num_new_customer"):
+            object.__setattr__(cfg.promotions, k, None)
+        sales_cfg = cfg.sales
+        overrides = PipelineOverrides(promotions=40)
+        cfg, sales_cfg = _apply_overrides(cfg, sales_cfg, overrides)
+        bucket_sum = sum(
+            int(getattr(cfg.promotions, k))
+            for k in ("num_seasonal", "num_clearance", "num_limited", "num_flash",
+                      "num_volume", "num_loyalty", "num_bundle", "num_new_customer")
+        )
+        assert bucket_sum == 40
+        assert cfg.promotions.total_promotions == 40
+
     def test_start_date_override(self, base_cfg):
         cfg = base_cfg.model_copy(deep=True)
         sales_cfg = cfg.sales

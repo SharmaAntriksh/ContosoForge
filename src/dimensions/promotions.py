@@ -25,7 +25,24 @@ from src.defaults import (
     PROMOTION_CATEGORIES as CATEGORIES,
     PROMOTION_HOLIDAYS as HOLIDAYS,
     PROMOTION_SEASON_WINDOWS as SEASON_WINDOWS,
+    PROMOTION_DEFAULT_NUM_SEASONAL,
+    PROMOTION_DEFAULT_NUM_CLEARANCE,
+    PROMOTION_DEFAULT_NUM_LIMITED,
+    PROMOTION_DEFAULT_NUM_FLASH,
+    PROMOTION_DEFAULT_NUM_VOLUME,
+    PROMOTION_DEFAULT_NUM_LOYALTY,
+    PROMOTION_DEFAULT_NUM_BUNDLE,
+    PROMOTION_DEFAULT_NUM_NEW_CUSTOMER,
 )
+
+
+def _bucket_count(value, default: int) -> int:
+    """Resolve a configured promotion-bucket count.
+
+    Unlike ``value or default``, this honors an explicit ``0`` (disable the
+    bucket) and only falls back to *default* when the value is unset (None).
+    """
+    return int(default) if value is None else int(value)
 
 
 # ---------------------------------------------------------
@@ -91,7 +108,17 @@ def _clamp_to_year_window(
 ) -> Optional[pd.Timestamp]:
     ws_we = year_windows.get(int(dt.year))
     if not ws_we:
-        return None
+        # Year outside the generated range: e.g. a holiday/season that wraps
+        # into year+1 (New Year, Winter Event) past the last in-range year.
+        # Clamp to the overall [start, end] span instead of dropping the row,
+        # so the final year's wrapping promotions survive.
+        gstart = min(w[0] for w in year_windows.values())
+        gend = max(w[1] for w in year_windows.values())
+        if dt < gstart:
+            return gstart
+        if dt > gend:
+            return gend
+        return dt
     ws, we = ws_we
     if dt < ws:
         return ws
@@ -152,14 +179,14 @@ def generate_promotions_catalog(
     *,
     years: List[int],
     year_windows: Dict[int, Tuple[pd.Timestamp, pd.Timestamp]],
-    num_seasonal: int = 20,
-    num_clearance: int = 8,
-    num_limited: int = 12,
-    num_flash: int = 6,
-    num_volume: int = 4,
-    num_loyalty: int = 3,
-    num_bundle: int = 3,
-    num_new_customer: int = 3,
+    num_seasonal: int = PROMOTION_DEFAULT_NUM_SEASONAL,
+    num_clearance: int = PROMOTION_DEFAULT_NUM_CLEARANCE,
+    num_limited: int = PROMOTION_DEFAULT_NUM_LIMITED,
+    num_flash: int = PROMOTION_DEFAULT_NUM_FLASH,
+    num_volume: int = PROMOTION_DEFAULT_NUM_VOLUME,
+    num_loyalty: int = PROMOTION_DEFAULT_NUM_LOYALTY,
+    num_bundle: int = PROMOTION_DEFAULT_NUM_BUNDLE,
+    num_new_customer: int = PROMOTION_DEFAULT_NUM_NEW_CUSTOMER,
     seed: int = 42,
 ) -> pd.DataFrame:
     """
@@ -167,6 +194,9 @@ def generate_promotions_catalog(
       PromotionKey, PromotionLabel, PromotionName, PromotionDescription,
       DiscountPct, PromotionType, PromotionCategory, PromotionYear,
       PromotionSequence, StartDate, EndDate
+
+    DiscountPct is a fraction in [0, 1) (e.g. 0.20 means 20% off), not a
+    whole-number percentage.
 
     PromotionKey=1 is always the "No Discount" sentinel row.
     """
@@ -530,6 +560,10 @@ def run_promotions(cfg: Dict, parquet_folder: Path) -> None:
         raise DimensionError("Promotions: missing defaults.dates.start/end (or _defaults.dates.start/end)")
 
     version_cfg = as_dict(promo_cfg)
+    # new_customer_window_months only affects sales-time promo assignment, not
+    # the promotions dimension itself, so exclude it: editing it should not
+    # force a needless promotions regeneration.
+    version_cfg.pop("new_customer_window_months", None)
     version_cfg["global_dates"] = as_dict(defaults_dates) if defaults_dates else {}
 
     if not should_regenerate("promotions", version_cfg, out_path):
@@ -557,14 +591,14 @@ def run_promotions(cfg: Dict, parquet_folder: Path) -> None:
         df = generate_promotions_catalog(
             years=years,
             year_windows=windows,
-            num_seasonal=int(promo_cfg.num_seasonal or 20),
-            num_clearance=int(promo_cfg.num_clearance or 8),
-            num_limited=int(promo_cfg.num_limited or 12),
-            num_flash=int(promo_cfg.num_flash or 6),
-            num_volume=int(promo_cfg.num_volume or 4),
-            num_loyalty=int(promo_cfg.num_loyalty or 3),
-            num_bundle=int(promo_cfg.num_bundle or 3),
-            num_new_customer=int(promo_cfg.num_new_customer or 3),
+            num_seasonal=_bucket_count(promo_cfg.num_seasonal, PROMOTION_DEFAULT_NUM_SEASONAL),
+            num_clearance=_bucket_count(promo_cfg.num_clearance, PROMOTION_DEFAULT_NUM_CLEARANCE),
+            num_limited=_bucket_count(promo_cfg.num_limited, PROMOTION_DEFAULT_NUM_LIMITED),
+            num_flash=_bucket_count(promo_cfg.num_flash, PROMOTION_DEFAULT_NUM_FLASH),
+            num_volume=_bucket_count(promo_cfg.num_volume, PROMOTION_DEFAULT_NUM_VOLUME),
+            num_loyalty=_bucket_count(promo_cfg.num_loyalty, PROMOTION_DEFAULT_NUM_LOYALTY),
+            num_bundle=_bucket_count(promo_cfg.num_bundle, PROMOTION_DEFAULT_NUM_BUNDLE),
+            num_new_customer=_bucket_count(promo_cfg.num_new_customer, PROMOTION_DEFAULT_NUM_NEW_CUSTOMER),
             seed=seed,
         )
 

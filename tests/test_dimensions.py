@@ -504,6 +504,28 @@ class TestGeneratePromotionsCatalog:
         )
         assert len(df) >= 1
 
+    def test_bucket_count_honors_explicit_zero(self):
+        """_bucket_count: explicit 0 disables a bucket; None falls back."""
+        from src.dimensions.promotions import _bucket_count
+        assert _bucket_count(0, 20) == 0
+        assert _bucket_count(None, 20) == 20
+        assert _bucket_count(7, 20) == 7
+
+    def test_last_year_wrapping_holiday_survives(self):
+        """New Year wraps into year+1; on the final year it is clamped to the
+        range end rather than silently dropped (regression)."""
+        years, windows = self._windows("2023-01-01", "2023-12-31")
+        df = generate_promotions_catalog(
+            years=years, year_windows=windows,
+            num_seasonal=0, num_clearance=0, num_limited=0, num_flash=0,
+            num_volume=0, num_loyalty=0, num_bundle=0, num_new_customer=0,
+            seed=42,
+        )
+        ny = df[df["PromotionName"] == "New Year"]
+        assert len(ny) == 1
+        assert (ny["StartDate"] < ny["EndDate"]).all()
+        assert ny["EndDate"].iloc[0] <= pd.Timestamp("2023-12-31")
+
 
 # ===================================================================
 # PRODUCT PRICING

@@ -18,6 +18,8 @@ from typing import Any, Dict, Optional
 import yaml
 from pydantic import BaseModel
 
+from src.utils.promotion_buckets import PROMOTION_BUCKET_KEYS, distribute_total
+
 
 class ConfigUpdate(BaseModel):
     """Partial config update payload used by config and models form endpoints."""
@@ -140,10 +142,7 @@ def _g(d, *keys, default=None):
     return cur if cur is not None else default
 
 
-_PROMO_KEYS = (
-    "num_seasonal", "num_clearance", "num_limited", "num_flash",
-    "num_volume", "num_loyalty", "num_bundle", "num_new_customer",
-)
+_PROMO_KEYS = PROMOTION_BUCKET_KEYS
 
 
 def _promo_total(promos) -> int:
@@ -160,37 +159,20 @@ def _promo_total(promos) -> int:
 def _set_promotions_total(promos, total: int):
     """Distribute total across all promo buckets proportionally."""
     total = max(0, int(total))
-    keys = list(_PROMO_KEYS)
-    n = len(keys)
+    keys = _PROMO_KEYS
     if isinstance(promos, dict):
         if any(k in promos for k in keys):
-            cur = [int(promos.get(k, 0) or 0) for k in keys]
-            s = sum(cur) or n
-            base = cur if sum(cur) > 0 else [1] * n
-            scaled = [b * total / s for b in base]
-            floors = [int(x) for x in scaled]
-            remainder = total - sum(floors)
-            fracs = sorted(range(n), key=lambda i: scaled[i] - floors[i], reverse=True)
-            for i in range(min(remainder, len(fracs))):
-                floors[fracs[i]] += 1
-            for i, k in enumerate(keys):
-                promos[k] = floors[i]
+            weights = [int(promos.get(k, 0) or 0) for k in keys]
+            for k, c in zip(keys, distribute_total(weights, total)):
+                promos[k] = c
         else:
             promos["total_promotions"] = total
     else:
         # Pydantic model path
         if any(hasattr(promos, k) for k in keys):
-            cur = [int(getattr(promos, k, 0) or 0) for k in keys]
-            s = sum(cur) or n
-            base = cur if sum(cur) > 0 else [1] * n
-            scaled = [b * total / s for b in base]
-            floors = [int(x) for x in scaled]
-            remainder = total - sum(floors)
-            fracs = sorted(range(n), key=lambda i: scaled[i] - floors[i], reverse=True)
-            for i in range(min(remainder, len(fracs))):
-                floors[fracs[i]] += 1
-            for i, k in enumerate(keys):
-                setattr(promos, k, floors[i])
+            weights = [int(getattr(promos, k, 0) or 0) for k in keys]
+            for k, c in zip(keys, distribute_total(weights, total)):
+                setattr(promos, k, c)
         else:
             setattr(promos, "total_promotions", total)
 

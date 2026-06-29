@@ -19,6 +19,7 @@ from src.engine.runners.dimensions_runner import generate_dimensions
 from src.engine.runners.sales_runner import run_sales_pipeline
 from src.exceptions import ConfigError, PipelineError
 from src.utils.logging_utils import info, fail, fmt_sec
+from src.utils.promotion_buckets import PROMOTION_BUCKET_KEYS, distribute_total
 
 
 # ----------------------------
@@ -460,42 +461,29 @@ def _ensure_defaults_dates(cfg) -> None:
 
 def _apply_promotions_total(promotions_cfg, total: int) -> None:
     """
-    Config has eight promotion buckets (num_seasonal, num_clearance,
-    num_limited, num_flash, num_volume, num_loyalty, num_bundle,
-    num_new_customer).
+    Distribute a requested total across the eight promotion buckets
+    (num_seasonal, num_clearance, num_limited, num_flash, num_volume,
+    num_loyalty, num_bundle, num_new_customer), proportionally to their
+    configured values.  Buckets left unset (None) carry 0 weight; when no
+    bucket carries weight the total is split evenly.
 
-    If those exist, scale them proportionally to match `total`.
-    Otherwise, store a back-compat 'total_promotions' key.
+    The buckets are always written with concrete counts so ``--promotions N``
+    is honored even on a config that does not enumerate every bucket
+    (previously the total was stored but silently ignored by the generator).
+
+    Per-year holiday promotions are generated separately and are not counted
+    toward ``total``.
     """
     total = max(0, int(total))
 
-    keys = ("num_seasonal", "num_clearance", "num_limited", "num_flash", "num_volume", "num_loyalty", "num_bundle", "num_new_customer")
-    for k in keys:
+    for k in PROMOTION_BUCKET_KEYS:
         val = getattr(promotions_cfg, k, None)
         if val is not None and int(val) < 0:
             raise ConfigError(f"promotions.{k} must be non-negative, got {val}")
-    if all(getattr(promotions_cfg, k, None) is not None and isinstance(getattr(promotions_cfg, k), (int, float)) for k in keys):
-        current = sum(int(getattr(promotions_cfg, k)) for k in keys)
-        if current <= 0:
-            base = [1] * len(keys)
-            current = len(keys)
-        else:
-            base = [int(getattr(promotions_cfg, k)) for k in keys]
 
-        scaled = [b * total / current for b in base]
-        floors = [int(x) for x in scaled]
-        remainder = total - sum(floors)
+    weights = [int(getattr(promotions_cfg, k, 0) or 0) for k in PROMOTION_BUCKET_KEYS]
+    counts = distribute_total(weights, total)
 
-        fracs = [(i, scaled[i] - floors[i]) for i in range(len(keys))]
-        fracs.sort(key=lambda t: t[1], reverse=True)
-
-        # Each bucket can receive at most +1 from rounding; cap to len(fracs)
-        # to prevent any bucket from getting +2 due to modulo wrap-around.
-        for i in range(min(remainder, len(fracs))):
-            floors[fracs[i][0]] += 1
-
-        for i, k in enumerate(keys):
-            object.__setattr__(promotions_cfg, k, floors[i])
-        promotions_cfg.total_promotions = total
-    else:
-        promotions_cfg.total_promotions = total
+    for k, c in zip(PROMOTION_BUCKET_KEYS, counts):
+        object.__setattr__(promotions_cfg, k, c)
+    promotions_cfg.total_promotions = total
