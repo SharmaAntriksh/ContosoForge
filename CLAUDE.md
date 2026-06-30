@@ -4,7 +4,7 @@ Analytics-ready retail data generator (dimensional model, inspired by ContosoRet
 
 ## Tech Stack
 
-- **Language:** Python 3.x
+- **Language:** Python 3.13+ (`requires-python = ">=3.13"` in `pyproject.toml`)
 - **Web UI:** FastAPI backend (`web/api.py` + `web/routes/`) + React SPA (`web/frontend/`)
 - **Data:** pandas, numpy, pyarrow, deltalake
 - **Config:** PyYAML, pydantic
@@ -68,7 +68,13 @@ src/
       org_profile.py             # OrganizationProfile constants + generate_org_profile()
       households.py              # Household assignment (spouse/dependent matching)
       scd2.py                    # SCD2 life event engine (career, marriage, relocation, etc.)
-      subscriptions.py           # Plans + CustomerSubscriptions (many-to-many bridge)
+      subscriptions/             # Plans + CustomerSubscriptions (many-to-many bridge) package
+        __init__.py              # Re-exports run_subscriptions
+        runner.py                # run_subscriptions() entry point
+        catalog.py               # Plan catalog definitions
+        helpers.py               # Subscription assignment helpers
+        bridge_serial.py         # Serial bridge builder
+        bridge_parallel.py       # Parallel (multiprocessing) bridge builder
       worker.py                  # Multiprocessing chunk worker for parallel customer generation
     dates/                       # Date dimension package — one module per calendar system
       __init__.py                # Re-exports run_dates, generate_date_table, resolve_date_columns, WeeklyFiscalConfig, run_time_table
@@ -118,22 +124,27 @@ src/
     sales/                       # Core sales fact generation
       sales.py                   # Entry point, orchestrates worker pool
       sales_logic/               # Business logic (orders, pricing, promos, allocation)
-        globals.py               # State class (per-worker, sealed after bind) + SalesContext dataclass
+        globals.py               # State class (per-worker, immutable by convention) + SalesContext dataclass
+        chunk_builder.py         # Per-chunk row assembly (CDF sampling, ID arithmetic)
+        columns.py               # Sales column derivation (channel cache, etc.)
         core/                    # customer_sampling, orders, promotions, allocation, pricing, delivery
       sales_models/              # quantity model (Poisson), pricing pipeline (inflation+markdown+snap)
       sales_worker/              # Multiprocessing pool, task definitions, schemas
       sales_writer/              # Output writers (parquet merge, delta, CSV), encoding
-    budget/                      # Budget fact (accumulator + engine, Low/Medium/High scenarios)
-    inventory/                   # Inventory snapshots (monthly grain, ABC classification, shrinkage)
-    wishlists/                   # Customer wishlists (streamed from sales worker accumulators)
-    complaints/                  # Customer complaints (streamed from sales worker accumulators)
+      coverage_preflight.py      # Pre-run coverage/feasibility checks
+      output_paths.py            # Scratch/output path resolution
+      worker_cfg_schema.py       # Worker config dict schema
+    budget/                      # Budget fact (Low/Medium/High scenarios): accumulator, engine, lookups, micro_agg, runner
+    inventory/                   # Inventory snapshots (monthly grain, ABC class, shrinkage): accumulator, engine, micro_agg, runner, worker
+    wishlists/                   # Customer wishlists (streamed): accumulator, constants, micro_agg, runner, scd2, selection, worker
+    complaints/                  # Customer complaints (streamed): accumulator, micro_agg, runner
     shared/                      # Shared fact utilities
       base_accumulator.py        # Base class for streamed fact accumulators
       micro_agg_helpers.py       # Micro-aggregation helpers for fact generation
       writers.py                 # Shared output writers for fact tables
   engine/
     config/                      # config_loader.py, config.py (normalizer registry), config_schema.py (Pydantic models)
-    packaging/                   # csv_packager, parquet_packager, delta_packager, SQL script gen
+    packaging/                   # package_output (orchestrator), csv/parquet/delta packagers, paths, SQL script gen
     runners/
       pipeline_runner.py         # Main orchestrator (override precedence, config injection)
       dimensions_runner.py       # Dependency-aware dim generation with version tracking
@@ -143,7 +154,11 @@ src/
     powerbi_packaging.py         # Auto-generates .pbip project
   integrations/
     fx_yahoo.py                  # Yahoo Finance FX rate downloader
-  tools/sql/                     # SQL Server script generators (CREATE TABLE, BULK INSERT)
+  tools/sql/                     # Multi-dialect SQL script generators (CREATE TABLE, BULK INSERT/COPY)
+    dialect/                     # Pluggable SQL dialects: base.py, sqlserver.py, postgres.py
+    generate_create_table_scripts.py, generate_bulk_insert_sql.py  # DDL + bulk-load script gen
+    sql_server_import.py, postgres_import.py  # Live DB import runners (SQL Server + PostgreSQL)
+    sql_helpers.py, _import_common.py          # Shared escaping / import utilities
   utils/
     shared_arrays.py             # Numpy shared memory for dimension broadcasting to workers
     static_schemas.py            # Column definitions for all output tables
@@ -151,9 +166,11 @@ src/
     config_helpers.py            # Canonical type coercion helpers (bool_or, int_or, float_or, etc.)
     config_precedence.py         # Standardized config resolution (resolve_seed, resolve_dates)
     pool.py                      # Generic multiprocessing pool (PoolRunSpec, iter_imap_unordered)
+    config_merge.py              # Deep-merge helpers for config layering
+    promotion_buckets.py         # Promotion bucketing helpers
     name_pools.py, output_utils.py, logging_utils.py
   versioning/
-    version_checker.py           # Hash-based dimension version tracking (.version files)
+    version_store.py             # Hash-based dimension version tracking (writes data/versioning/<name>.version.json)
 web/
   api.py                         # FastAPI app entry point (includes routers, serves frontend)
   shared_state.py                # Shared mutable state and helpers for web layer
@@ -256,11 +273,11 @@ CLI flags > config.yaml values (one-time, not persisted).
 
 1. **Pricing injection:** At pipeline startup, `models.yaml` pricing appearance rules are injected into config's product section. Both product dimension generation and sales-time pricing use the same price grid. If you edit pricing bands in models.yaml, run `--regen-dimensions products` to sync.
 
-2. **Dimension versioning:** Each dim has a `.version` file (JSON hash of its config section). Dims only regenerate if the hash changes or `--regen-dimensions` forces it. Stale outputs usually mean the version hash didn't change.
+2. **Dimension versioning:** Each dim has a `data/versioning/<name>.version.json` file storing a SHA-256 `config_hash` of its config section (`version_store.py`). Dims only regenerate if that hash changes, the parquet/version file is missing, or `--regen-dimensions` forces it (force deletes the version file). Stale outputs usually mean the version hash didn't change.
 
 3. **State is per-worker, immutable by convention (not sealed in prod):** `State` in `sales_logic/globals.py` is a module-global populated once per worker process by `bind_globals()`. It defines a `_SealableMeta` metaclass + `seal()` that *would* reject any post-seal `setattr(State, ...)`, but **`seal()` is never called in production** — it exists only as a test-time safety net. Immutability of the bound dimension/config fields rests on (a) convention (bind once, never reassign) and (b) process isolation: each worker has its own `State`. Per-worker scratch *is* reassigned after bind during chunk processing (lazy caches like `_sales_channels_cache`, and the discovery `seen_customers` set), so calling `seal()` in prod would actually break the pipeline. Treat the bound fields as read-only after `bind_globals`; don't rely on a runtime seal to enforce it. For new code, prefer `SalesContext.from_state()` (immutable dataclass snapshot) over accessing `State` directly. In tests, call `State.reset()` to reset State between cases.
 
-4. **Returns conditional skip:** Returns are auto-disabled at config load time if `returns.enabled=true` AND `sales_output='sales'` AND `skip_order_cols=true` (returns need OrderNumber to link back). A warning is logged by `apply_cross_section_rules()` in `config.py`.
+4. **Returns/complaints conditional skip:** Returns *and* complaints are auto-disabled at config load time if `enabled=true` AND `sales_output='sales'` AND `skip_order_cols=true` (both need OrderNumber to link back). `apply_cross_section_rules()` in `config.py` loops over `("returns", "complaints")` and logs a warning for each section it disables.
 
 5. **FX dates are coupled:** exchange_rates date range is overridden at runtime to match `defaults.dates.start/end`. You cannot set FX dates independently.
 
@@ -290,11 +307,11 @@ CLI flags > config.yaml values (one-time, not persisted).
 
 18. **TMDL expression injection:** File paths embedded in Power BI M expressions must have `"` escaped to `\"`. Unescaped quotes in paths break the generated `.tmdl` files.
 
-19. **CORS allowlist:** `web/api.py` restricts origins to `localhost:8502` and `localhost:3000` (not `*`). A `SecurityHeadersMiddleware` adds `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, and `Referrer-Policy` to all responses.
+19. **CORS allowlist:** `web/api.py` restricts origins to `localhost`/`127.0.0.1` on ports `8502` and `3000` by default (not `*`); the allowlist is overridable via the `CORS_ORIGINS` env var. A `SecurityHeadersMiddleware` adds `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, and `Referrer-Policy` to all responses.
 
 20. **Web payload size limits:** YAML and models endpoints reject bodies > 1 MB (HTTP 413). This prevents memory exhaustion from oversized payloads.
 
-21. **Weekly fiscal column guard:** `dates/weekly_fiscal.py` only computes `FWYearWeekOffset` / `FWYearMonthOffset` / `FWYearQuarterOffset` when `FWYearWeekNumber` exists in the DataFrame. Previously, accessing these columns when `include_weekly_fiscal=false` caused a `KeyError`.
+21. **Weekly fiscal column guard:** `dates/weekly_fiscal.py`'s `add_weekly_fiscal_columns()` early-returns (`if not cfg.enabled: return df`) before computing any 4-4-5 columns, including the `FWWeekOffset` / `FWMonthOffset` / `FWQuarterOffset` offsets and `FWWeekNumber` / `FWWeekIndex`. Without this guard, accessing those columns when weekly fiscal is disabled caused a `KeyError`.
 
 22. **Nested probability validation:** `defaults.py` now validates probability arrays inside nested dicts (`CUSTOMER_HOME_OWNERSHIP_PROBS_BY_INCOME`, `CUSTOMER_OCCUPATION_PROBS_BY_EDUCATION`) and lists (`CUSTOMER_MARITAL_PROBS_BY_AGE`, `CUSTOMER_EDUCATION_PROBS_BY_AGE`) at import time, not just top-level arrays.
 
@@ -346,14 +363,14 @@ pytest --lf            # rerun only last-failed tests
 pytest --co            # list tests without running
 ```
 
-Test files: `tests/test_config_loader.py`, `test_pricing_pipeline.py`, `test_quantity_model.py`, `test_geography.py`, `test_customer_profiles.py`, `test_version_store.py`, `test_state.py`, `test_determinism.py`, `test_integration.py`, `test_web_api.py`, `test_dimensions.py`, `test_packaging.py`, `test_sales_logic.py`, `test_utils.py`, `test_web_routes.py`, `test_schema.py`, `test_gotchas_and_guards.py`, `test_products.py`, `test_sales_writer.py`, `test_sql_tools.py`, `test_dates.py`. Web API/route tests require `httpx` and are skipped without it.
+Test files (`tests/`, 40 total): `test_chunk_id_integrity.py`, `test_complaints.py`, `test_config_loader.py`, `test_coverage_preflight.py`, `test_customer_profiles.py`, `test_dates.py`, `test_determinism.py`, `test_dialect.py`, `test_dialect_postgres.py`, `test_dimension_loader.py`, `test_dimensions.py`, `test_fact_writers.py`, `test_geography.py`, `test_gotchas_and_guards.py`, `test_integration.py`, `test_multi_event_returns.py`, `test_packaging.py`, `test_postgres_constraints.py`, `test_postgres_import.py`, `test_postgres_indexes.py`, `test_postgres_views_and_admin.py`, `test_pricing_pipeline.py`, `test_product_scd2.py`, `test_products.py`, `test_quality_report.py`, `test_quantity_model.py`, `test_salesperson_performance.py`, `test_sales_logic.py`, `test_sales_writer.py`, `test_schema.py`, `test_sql_tools.py`, `test_state.py`, `test_store_demand_weight.py`, `test_subscriptions.py`, `test_transfers.py`, `test_utils.py`, `test_version_store.py`, `test_warehouses.py`, `test_web_api.py`, `test_web_routes.py`, `test_wishlists.py`. Web API/route tests require `httpx` and are skipped without it; the Postgres tests (`test_postgres_*`, `test_dialect_postgres`) exercise the PostgreSQL dialect/import path.
 
 ## Output Formats
 
-- **CSV:** chunked files + auto-generated SQL Server scripts (DDL, BULK INSERT, constraints, views)
+- **CSV:** chunked files + auto-generated SQL scripts (DDL, BULK INSERT/COPY, constraints, views) for SQL Server and PostgreSQL dialects
 - **Parquet:** merged single file (configurable) + compression/row_group tuning
-- **Delta Lake (deltaparquet):** partitioned by Year/Month, ACID transactions via delta-rs
-- **All formats:** auto-generate Power BI `.pbip` project with pre-configured relationships
+- **Delta Lake (`deltaparquet`, also `delta`):** partitioned by Year/Month, ACID transactions via delta-rs
+- **Power BI `.pbip` project:** auto-generated for `csv` and `parquet` only — `deltaparquet` **intentionally skips** PBIP generation (`powerbi_packaging.py`)
 
 ## Workflow Tips
 
