@@ -70,21 +70,38 @@ installs. Install it once if you don't have it:
 
 uv then provisions the correct Python itself - no separate Python install needed.
 
-**Windows (PowerShell):**
+> **Just installed uv and still see "uv is required but was not found on PATH"?**
+> The installer adds uv to your PATH, but already-running shells don't pick that
+> up. Opening a *new tab* isn't enough; Windows Terminal / VS Code give new tabs
+> the old environment. Fully quit and reopen the terminal app, or just set it in
+> the current session and re-run:
+>
+> ```powershell
+> $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+> .\scripts\create_venv.ps1
+> ```
+
+**Windows (PowerShell), first-time setup:**
+
+**Step 1: allow local scripts (one time only).** Windows blocks unsigned `.ps1`
+files by default, so the setup scripts won't run until you permit them for your
+user account. This needs no admin rights and you only ever do it once:
 
 ```powershell
-# Create virtual environment and install locked dependencies (via uv)
-.\scripts\create_venv.ps1
-
-# Activate
-. .\scripts\activate_venv.ps1
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 
-To update dependencies later:
+(If you'd rather not change the policy, skip this step and prefix each script
+with a one-off bypass, e.g. `powershell -ExecutionPolicy Bypass -File .\scripts\create_venv.ps1`.)
+
+**Step 2: create the environment and activate it:**
 
 ```powershell
-.\scripts\sync_venv.ps1
+.\scripts\create_venv.ps1        # creates .venv + installs locked deps via uv
+. .\scripts\activate_venv.ps1    # activate it
 ```
+
+To update dependencies later: `.\scripts\sync_venv.ps1`
 
 **macOS / Linux:**
 
