@@ -120,6 +120,19 @@ uv sync
 
 ### 2. Generate data
 
+> **Activate the venv first** (your prompt should show `(.venv)`), otherwise
+> `python main.py ...` runs against your system Python and fails with
+> `ModuleNotFoundError: No module named 'pyarrow'`. The dependencies live in the
+> venv, not globally. Use `. .\scripts\activate_venv.ps1`, or skip activation
+> entirely with `uv run python main.py ...` (uv picks the right interpreter).
+> Note: if VS Code's terminal was already open when you created the venv, reopen
+> the window so its Python extension auto-activates `.venv`.
+
+> **First run feels slow (~10-20s to start)?** That's a one-time cold start, not
+> a hang: Windows Defender scans the freshly installed package DLLs, Python
+> compiles bytecode (`.pyc`) for the large libraries (pyarrow, pandas, numpy,
+> deltalake), and the OS warms its file cache. Subsequent runs start in ~1-2s.
+
 The fastest way to get started - run with default settings from `config.yaml`:
 
 ```powershell
