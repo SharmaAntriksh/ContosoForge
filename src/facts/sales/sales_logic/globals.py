@@ -2,24 +2,12 @@
 
 This module is imported by worker processes; keep it lightweight and deterministic.
 
-The ``State`` class remains the canonical process-local singleton for
-multiprocessing workers.  ``SalesContext`` is the new dependency-injection
-friendly dataclass that makes dependencies explicit.  Use
-``SalesContext.from_state()`` to snapshot the current ``State`` into a
-context object, which can then be passed through function parameters
-instead of relying on the global.
-
-Migration path:
-    1. New/refactored functions accept ``ctx: SalesContext`` as their
-       first parameter.
-    2. Legacy code continues to read from ``State`` directly.
-    3. Over time, functions are converted to use ``ctx`` and ``State``
-       access is phased out.
+The ``State`` class is the canonical process-local singleton for the sales
+workers: it is populated once per worker by ``bind_globals`` and then read (never
+reassigned) during chunk processing. Each worker process has its own ``State``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -73,117 +61,6 @@ def _logical_to_arrow_schema(logical_schema):
 
 _SQL_TO_PA = _build_sql_to_pa_map() if PA_AVAILABLE else {}
 
-
-# ===============================================================
-# Dependency-injection context (explicit alternative to State)
-# ===============================================================
-
-@dataclass
-class SalesContext:
-    """Explicit, testable container for all sales worker dependencies.
-
-    Every field that ``State`` exposes as a class variable is represented
-    here as a typed dataclass field.  Use ``SalesContext.from_state()``
-    to snapshot the current global ``State`` into a portable context.
-    """
-
-    # -- Dimension data --
-    product_np: Any = None
-    active_product_np: Any = None
-    customer_keys: Any = None
-    customer_is_active_in_sales: Any = None
-    customer_start_month: Any = None
-    customer_end_month: Any = None
-    customer_base_weight: Any = None
-    customer_discovery_month: Any = None   # int64 pool-aligned: month each customer first enters sales
-    # -- Global per-month plan: computed once in the coordinator,
-    #    broadcast read-only, and sliced per chunk so the per-month row curve and
-    #    distinct-customer curve are independent of chunk_size / worker count. --
-    sales_rows_per_month: Any = None       # int64[T]: global rows per month
-    sales_orders_per_month: Any = None     # int64[T]: global orders per month
-    sales_distinct_target: Any = None      # int64[T]: distinct-customer target per month
-    sales_plan_seed: Optional[int] = None  # run seed for month-pool + repeat draws
-    total_chunks: Optional[int] = None     # chunk count (for index-space sharding)
-    date_pool: Any = None
-    date_prob: Any = None
-    store_keys: Any = None
-    store_eligible_by_month: Any = None
-    store_open_day: Any = None   # np.ndarray[datetime64[D]] dense by StoreKey
-    store_close_day: Any = None  # np.ndarray[datetime64[D]] dense by StoreKey
-    store_reno_start_day: Any = None  # dense by StoreKey; far-future sentinel where no renovation
-    store_reno_end_day: Any = None    # dense by StoreKey; far-past sentinel where no renovation
-    store_demand_weight: Any = None   # dense float by StoreKey (all-ones = uniform); bound at worker init
-
-    # -- Promotions --
-    promo_keys_all: Any = None
-    promo_start_all: Any = None
-    promo_end_all: Any = None
-    new_customer_promo_keys: Any = None
-    new_customer_window_months: int = 3
-
-    # -- Mappings --
-    store_to_product_rows: Any = None
-    store_to_geo_arr: Any = None
-    geo_to_currency_arr: Any = None
-    models_cfg: Optional[Dict[str, Any]] = None
-
-    # -- Column correlations --
-    customer_geo_key: Any = None
-    geo_to_country_id: Any = None
-    store_to_country_id: Any = None
-    country_to_store_keys: Any = None
-    store_channel_keys: Any = None
-    channel_prob_by_store: Any = None
-    product_channel_eligible: Any = None
-    promo_channel_group: Any = None
-    channel_fulfillment_days: Any = None
-
-    # -- SCD2 version lookup tables (per-entity, per-row resolution) --
-    product_scd2_active: bool = False
-    product_scd2_starts: Any = None     # (N_pool, max_ver) int64: version start epoch days
-    product_scd2_data: Any = None       # (N_pool, max_ver, 3) float64: ProductKey/ListPrice/UnitCost
-    customer_scd2_active: bool = False
-    customer_scd2_starts: Any = None    # (N_pool, max_ver) int64: version start epoch days
-    customer_scd2_keys: Any = None      # (N_pool, max_ver) int32: CustomerKey per version
-    cust_key_to_pool_idx: Any = None    # dense int32: IsCurrent CustomerKey → pool index
-    customer_first_eff_start_by_key: Any = None  # dense int64: CustomerKey → first EffectiveStartDate epoch days; INT64_MIN for unknown keys
-
-    # -- Output config --
-    file_format: Optional[str] = None
-    out_folder: Optional[str] = None
-    chunk_size: Optional[int] = None
-    row_group_size: Optional[int] = None
-    compression: Optional[str] = None
-    order_id_stride_orders: Optional[int] = None
-    skip_order_cols: Optional[bool] = None
-    skip_order_cols_requested: Optional[bool] = None
-    max_lines_per_order: int = 6
-
-    # -- Delta / partitioning --
-    no_discount_key: Any = None
-    delta_output_folder: Optional[str] = None
-    write_delta: Optional[bool] = None
-    partition_enabled: Optional[bool] = None
-    partition_cols: Optional[List[str]] = None
-
-    # -- Budget --
-    budget_enabled: Optional[bool] = None
-    budget_store_to_country: Any = None
-    budget_product_to_cat: Any = None
-
-    # -- Schema --
-    sales_schema: Any = None
-
-    @classmethod
-    def from_state(cls) -> "SalesContext":
-        """Snapshot the current ``State`` singleton into a ``SalesContext``."""
-        fields = {f.name for f in cls.__dataclass_fields__.values()}
-        kwargs = {}
-        for name in fields:
-            val = getattr(State, name, None)
-            if val is not None:
-                kwargs[name] = val
-        return cls(**kwargs)
 
 
 # ===============================================================
@@ -439,7 +316,6 @@ def fmt(dt):
 
 
 __all__ = [
-    "SalesContext",
     "State",
     "bind_globals",
     "fmt",
