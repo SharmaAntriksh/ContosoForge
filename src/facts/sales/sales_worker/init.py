@@ -682,6 +682,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         returns_full_line_probability = float(worker_cfg.get("returns_full_line_probability", 0.85))
         returns_split_return_rate = float(worker_cfg.get("returns_split_return_rate", 0.0))
         returns_max_splits = int(worker_cfg.get("returns_max_splits", 3))
+        returns_reconcile_cents = bool(worker_cfg.get("returns_reconcile_cents", False))
         returns_split_min_gap = int(worker_cfg.get("returns_split_min_gap", 3))
         returns_split_max_gap = int(worker_cfg.get("returns_split_max_gap", 20))
         returns_lag_distribution = str(worker_cfg.get("returns_lag_distribution", "uniform") or "uniform")
@@ -1166,6 +1167,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "returns_full_line_probability": returns_full_line_probability,
             "returns_split_return_rate": returns_split_return_rate,
             "returns_max_splits": returns_max_splits,
+            "returns_reconcile_cents": returns_reconcile_cents,
             "returns_split_min_gap": returns_split_min_gap,
             "returns_split_max_gap": returns_split_max_gap,
             "returns_lag_distribution": returns_lag_distribution,

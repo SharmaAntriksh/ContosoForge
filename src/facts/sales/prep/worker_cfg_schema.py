@@ -126,6 +126,7 @@ class SalesWorkerCfg(TypedDict, total=False):
     returns_full_line_probability: float
     returns_split_return_rate: float
     returns_max_splits: int
+    returns_reconcile_cents: bool
     returns_split_min_gap: int
     returns_split_max_gap: int
     returns_lag_distribution: str

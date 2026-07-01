@@ -304,6 +304,7 @@ def generate_sales_fact(
     returns_full_line_prob = _float_or(getattr(_ret_qty_cfg, "full_line_probability", 0.85), 0.85)
     returns_split_rate = _float_or(getattr(_ret_qty_cfg, "split_return_rate", 0.0), 0.0)
     returns_max_splits = _int_or(getattr(_ret_qty_cfg, "max_splits", 3), 3)
+    returns_reconcile_cents = _bool_or(getattr(_ret_qty_cfg, "reconcile_cents", False), False)
     returns_split_min_gap = _int_or(getattr(_ret_lag_cfg, "split_min_gap", 3), 3)
     returns_split_max_gap = _int_or(getattr(_ret_lag_cfg, "split_max_gap", 20), 20)
     returns_lag_distribution = _str_or(getattr(_ret_lag_cfg, "distribution", "triangular"), "triangular")
@@ -720,6 +721,7 @@ def generate_sales_fact(
         returns_logistics_keys, returns_event_key_capacity,
         month_stride=_day_stride, per_chunk_alloc=_per_chunk_alloc,
         order_id_int64=_order_id_int64, total_chunks=total_chunks,
+        returns_reconcile_cents=returns_reconcile_cents,
     )
 
     # Streaming accumulators (budget, inventory, wishlists, complaints)

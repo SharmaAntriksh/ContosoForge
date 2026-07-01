@@ -57,6 +57,9 @@ class ReturnsConfig:
     max_splits: int = 3
     split_min_gap: int = 3
     split_max_gap: int = 20
+    # Integer-cent (largest-remainder) proration for multi-event returns. Default
+    # off reproduces the legacy per-event rounding byte-for-byte.
+    reconcile_cents: bool = False
     event_key_offset: int = 0
     logistics_keys: frozenset = frozenset()
     # Fulfillment-friction coupling (recomputed per line from
@@ -465,6 +468,31 @@ def build_sales_returns_from_detail(
     # --- ReturnNetPrice: pro-rated by event quantity ---
     unit_price = net_price_exp / np.maximum(qty_exp.astype(np.float64), 1.0)
     return_net_price = np.round(unit_price * event_qty.astype(np.float64), 2)
+    if cfg.reconcile_cents and multi_idx.size:
+        # Integer-cent largest-remainder apportionment: a line's multi-event
+        # ReturnNetPrice values sum EXACTLY to its single-event equivalent
+        # (round(unit_price * ret_qty, 2)) instead of drifting by per-event
+        # rounding. Pure arithmetic — no RNG draw — so the flag-on path leaves the
+        # rest of the returns table (dates, reasons, qty, keys) byte-identical to
+        # the flag-off path; only multi-event ReturnNetPrice values change.
+        for i in multi_idx:
+            k = int(num_events[i])
+            p = int(offsets[i])
+            ev = event_qty[p:p + k].astype(np.int64)
+            rq_line = int(ev.sum())                      # == ret_qty[i]
+            if rq_line <= 0:
+                continue
+            up_line = float(net_price[i]) / max(float(qty[i]), 1.0)
+            total_cents = int(np.round(up_line * rq_line * 100.0))
+            ideal = total_cents * ev
+            base = ideal // rq_line                       # floor cents per event
+            leftover = int(total_cents - int(base.sum()))
+            if leftover > 0:
+                rem = ideal - base * rq_line              # Hamilton remainders
+                # +1 cent to the largest remainders; ties broken by event order.
+                order = np.lexsort((np.arange(k), -rem))
+                base[order[:leftover]] += 1
+            return_net_price[p:p + k] = base.astype(np.float64) / 100.0
 
     # --- ReturnEventKey: sequential, globally unique via offset ---
     return_event_key = cfg.event_key_offset + np.arange(1, total_events + 1, dtype=np.int64)

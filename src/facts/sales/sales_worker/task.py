@@ -293,6 +293,7 @@ def _build_returns_config() -> Optional[ReturnsConfig]:
         full_line_probability=float(getattr(State, "returns_full_line_probability", 0.85)),
         split_return_rate=float(getattr(State, "returns_split_return_rate", 0.0)),
         max_splits=int(getattr(State, "returns_max_splits", 3)),
+        reconcile_cents=bool(getattr(State, "returns_reconcile_cents", False)),
         split_min_gap=int(getattr(State, "returns_split_min_gap", 3)),
         split_max_gap=int(getattr(State, "returns_split_max_gap", 20)),
         lag_distribution=str(getattr(State, "returns_lag_distribution", "uniform") or "uniform"),

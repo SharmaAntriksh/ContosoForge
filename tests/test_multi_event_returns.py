@@ -48,6 +48,70 @@ def _make_detail(n: int = 100) -> pa.Table:
     })
 
 
+def _ugly_detail(n: int = 60) -> pa.Table:
+    """Lines whose unit price (100/3 = 33.333…) can't split into whole cents,
+    so multi-event returns drift by a penny unless reconciled."""
+    return pa.table({
+        "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
+        "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
+        "DeliveryDate": pa.array(
+            np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32(),
+        ),
+        "Quantity": pa.array(np.full(n, 3, dtype=np.int32)),
+        "NetPrice": pa.array(np.full(n, 100.0)),
+        "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
+    })
+
+
+class TestReconcileCents:
+    """6.8 SP4 — integer-cent (largest-remainder) return proration, default off."""
+
+    _CFG = dict(enabled=True, return_rate=1.0, split_return_rate=1.0,
+                max_splits=3, full_line_probability=1.0)
+
+    def test_off_by_default_matches_legacy_rounding(self):
+        # Default (reconcile_cents=False): every event is the legacy
+        # round(unit_price * event_qty, 2).
+        detail = _ugly_detail()
+        cfg = ReturnsConfig(**self._CFG)
+        assert cfg.reconcile_cents is False
+        out = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+        rq = out.column("ReturnQuantity").to_numpy()
+        rnp = out.column("ReturnNetPrice").to_numpy()
+        expected = np.round((100.0 / 3.0) * rq, 2)
+        np.testing.assert_allclose(rnp, expected, atol=1e-9)
+
+    def test_on_reconciles_each_line_to_the_penny(self):
+        # reconcile_cents=True: each line's events sum EXACTLY to the single-event
+        # equivalent — here round(unit_price * qty, 2) = round(100.00, 2) = 100.00.
+        detail = _ugly_detail()
+        cfg = ReturnsConfig(**self._CFG, reconcile_cents=True)
+        out = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+        so = out.column("OrderNumber").to_numpy()
+        rnp = out.column("ReturnNetPrice").to_numpy()
+        for order_num in np.unique(so):
+            total = rnp[so == order_num].sum()
+            assert abs(total - 100.00) < 1e-9, f"order {order_num}: {total} != 100.00"
+
+    def test_on_changes_only_net_price_not_the_rng_stream(self):
+        # Pure arithmetic, no RNG: everything except ReturnNetPrice is byte-identical
+        # between flag-off and flag-on, and at least one drifting line actually changes.
+        detail = _ugly_detail()
+        off = build_sales_returns_from_detail(
+            detail, chunk_seed=42, cfg=ReturnsConfig(**self._CFG))
+        on = build_sales_returns_from_detail(
+            detail, chunk_seed=42, cfg=ReturnsConfig(**self._CFG, reconcile_cents=True))
+        for col in ("OrderNumber", "OrderLineNumber", "ReturnDate", "ReturnReasonKey",
+                    "ReturnQuantity", "ReturnSequence", "ReturnEventKey"):
+            np.testing.assert_array_equal(
+                off.column(col).to_numpy(), on.column(col).to_numpy(),
+                err_msg=f"{col} changed — reconcile must not touch the RNG stream")
+        # A 3-way even split of 100/3 drifts (99.99) off but reconciles (100.00) on.
+        assert not np.array_equal(
+            off.column("ReturnNetPrice").to_numpy(),
+            on.column("ReturnNetPrice").to_numpy())
+
+
 class TestBackwardCompat:
     def test_no_splits_when_rate_zero(self):
         detail = _make_detail()

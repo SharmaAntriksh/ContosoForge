@@ -1000,6 +1000,11 @@ class ReturnQuantityConfig(_Base):
     full_line_probability: float = 0.85
     split_return_rate: float = 0.0
     max_splits: int = 3
+    # When true, a multi-event return's per-event ReturnNetPrice is apportioned in
+    # integer cents (largest-remainder) so the events sum EXACTLY to the line's
+    # single-event equivalent instead of drifting by per-event rounding. Default
+    # off: reproduces the historical per-event rounding byte-for-byte.
+    reconcile_cents: bool = False
 
 
 class ReturnsModelsConfig(_Base):

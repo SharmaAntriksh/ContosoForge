@@ -68,7 +68,7 @@ def _build_worker_cfg(
     returns_lag_distribution, returns_lag_mode,
     returns_logistics_keys, returns_event_key_capacity,
     month_stride=0, per_chunk_alloc=0, order_id_int64=False,
-    total_chunks=1,
+    total_chunks=1, returns_reconcile_cents=False,
 ):
     """Build the worker_cfg dict from typed containers."""
     # Salesperson performance spread (Part 2): resolved once here so both the
@@ -171,6 +171,7 @@ def _build_worker_cfg(
         returns_full_line_probability=float(returns_full_line_prob),
         returns_split_return_rate=float(returns_split_rate),
         returns_max_splits=int(returns_max_splits),
+        returns_reconcile_cents=bool(returns_reconcile_cents),
         returns_split_min_gap=int(returns_split_min_gap),
         returns_split_max_gap=int(returns_split_max_gap),
         returns_lag_distribution=str(returns_lag_distribution),
