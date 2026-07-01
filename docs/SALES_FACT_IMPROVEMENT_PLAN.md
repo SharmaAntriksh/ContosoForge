@@ -539,10 +539,39 @@ them into a few PRs.
   - *Scoping verdict (deferred):* the declarative table is fine, but the fail-open→fail-closed
     flip is a real **sales-digest behavior change** for unknown channels — needs a deliberate
     decision + acceptance, not a silent hygiene commit.
-- [ ] **6.7 Coverage-preflight upgrades** — `Finding #20 #38 #39 #40` · `E:M R:lo`
-  Interval-union month coverage (catch mid-month gaps); deterministic principled greedy
-  repair (longest-gap-first, fewest-days-added, balance) + tag synthetic extensions;
-  evidence-driven tips; weight gaps by expected lost rows for a proportional abort/skip.
+- [x] **6.7 Coverage-preflight upgrades** — `Finding #20 #38 #39 #40` · `E:M R:lo` — **DONE (#38 #39) / CUT (#20 #40)**
+  A read-only scoping Workflow established (and I verified in code) that the preflight is a
+  **report/policy-only** layer: the only data-mutating path is `repair` with `n_changes>0`,
+  which the shipped config (default `coverage_policy: abort`, zero gaps) never enters — so
+  every change here is digest-safe for the baselines as long as no zero-gap/boundary config
+  gets reclassified as avoidable-loss. **User chose the lean scope** (the preflight is a
+  rarely-firing net; on real dims it never gaps).
+  - **#38 interval-union (`7f15264`):** `analyze_coverage`'s first/last-day test marks a
+    store-month "covered" when one assignment spans the 1st and a *different* one the last day,
+    missing an **interior mid-month hole** (rep A days 1-10, rep B days 20-31, days 11-19 empty).
+    Since the per-line `EmployeeKey` is assigned **day-exact** (init.py's first/last month filter
+    is only a coarse store-sampling pre-filter; unstaffed days drop to `-1` at chunk end), those
+    interior days are real, silently-unreported loss. Added `_uncovered_days_in_span` (union of
+    clipped intervals) + additive interior-hole detection + `CoverageReport.interior_hole_gaps`.
+    **Empirically 0 interior holes on `small_config`** (6 stores / 42 assignments), so realistic
+    data reports identically → both digests match. +2 tests.
+  - **#39 principled + tagged repair (`4046c65`):** `repair_bridge` is now a deterministic
+    principled greedy invariant to `gap_cells` order (longest-run-first; candidate ranked by
+    fewest-days-added → least-loaded employee → EmployeeKey → row), and tags extended rows
+    `TransferReason='Coverage Gap Repair'` (free VARCHAR(50), no CHECK/enum — verified no SQL/
+    quality consumer rejects it). Preserves no-double-book, key/sequence rebuild, and the
+    zero-gap no-rewrite fast-path. +2 tests (order-independence, tagging). Digest-safe (shipped
+    never repairs). Note: the *old* repair was already deterministic (single-threaded on
+    deterministic inputs); #39's value is principled **quality** + an audit tag, not a
+    nondeterminism fix.
+  - *Cut (scoping verdicts):* **#20 expected-lost-rows** — the preflight runs BEFORE the sales
+    plan and has only dims+dates: no `R[m]`, no per-store customer data (customers aren't sampled
+    per-store; orders are). An honest absolute lost-rows count needs the sales allocation stage;
+    the only computable proxy (`uncovered_days/month_days × store_demand_share`) would duplicate
+    the `store_demand_weight` formula into the preflight for a marginal urgency-ordering gain, and
+    proportional abort risks flipping the shipped decision. Low value / infeasible-to-honest.
+    **#40 evidence-driven tips** — pure diagnostic-string polish the shipped config never even
+    reaches; cosmetic. Both cut as low-ROI (consistent with the 6.1 lean decision).
 - [ ] **6.8 Writer single-source-of-truth** — `Finding #34 #35 #36 #37` · `E:M R:lo`
   Thread the authoritative pyarrow schema into both parquet-merge and delta writers
   (union only for untrusted external files); hoist the per-batch `equals()` to per-part;
