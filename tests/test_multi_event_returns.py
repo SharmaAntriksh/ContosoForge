@@ -8,8 +8,26 @@ import pytest
 from src.facts.sales.sales_worker.returns_builder import (
     ReturnsConfig,
     RETURNS_SCHEMA,
+    _validate_cfg,
     build_sales_returns_from_detail,
 )
+from src.exceptions import SalesError
+
+
+class TestReturnsConfigValidationRaisesSalesError:
+    """Config-shape validation routes through the domain SalesError, not a bare
+    RuntimeError (Finding #42 / gotcha #9)."""
+
+    @pytest.mark.parametrize("kwargs", [
+        {"enabled": "yes", "return_rate": 0.1},           # enabled not a bool
+        {"enabled": True, "return_rate": 1.5},            # rate out of [0,1]
+        {"enabled": True, "return_rate": float("nan")},   # rate not finite
+        {"enabled": True, "return_rate": 0.1, "min_lag_days": -1},
+        {"enabled": True, "return_rate": 0.1, "max_lag_days": -3},
+    ])
+    def test_bad_config_raises_saleserror(self, kwargs):
+        with pytest.raises(SalesError):
+            _validate_cfg(ReturnsConfig(**kwargs))
 
 
 def _rng():

@@ -171,24 +171,24 @@ def _validate_cfg(cfg: ReturnsConfig) -> tuple[float, int, int, np.ndarray, np.n
       (return_rate, min_lag_days, max_lag_days, reason_keys_i64, reason_probs_f64_normalized)
     """
     if not isinstance(cfg.enabled, bool):
-        raise RuntimeError("ReturnsConfig.enabled must be a bool.")
+        raise SalesError("ReturnsConfig.enabled must be a bool.")
 
     # return_rate validation
     rr = float(cfg.return_rate)
     if not np.isfinite(rr):
-        raise RuntimeError("ReturnsConfig.return_rate must be finite.")
+        raise SalesError("ReturnsConfig.return_rate must be finite.")
     if rr < 0.0 or rr > 1.0:
-        raise RuntimeError("ReturnsConfig.return_rate must be in [0, 1].")
+        raise SalesError("ReturnsConfig.return_rate must be in [0, 1].")
 
     # min_lag_days validation (allow 0)
     min_lag = int(getattr(cfg, 'min_lag_days', 0))
     if min_lag < 0:
-        raise RuntimeError('ReturnsConfig.min_lag_days must be >= 0.')
+        raise SalesError('ReturnsConfig.min_lag_days must be >= 0.')
 
     # max_lag_days validation (allow 0)
     max_lag = int(cfg.max_lag_days)
     if max_lag < 0:
-        raise RuntimeError("ReturnsConfig.max_lag_days must be >= 0.")
+        raise SalesError("ReturnsConfig.max_lag_days must be >= 0.")
 
     if min_lag > max_lag:
         raise SalesError('ReturnsConfig.min_lag_days must be <= max_lag_days.')
@@ -205,9 +205,9 @@ def _validate_cfg(cfg: ReturnsConfig) -> tuple[float, int, int, np.ndarray, np.n
         raise SalesError("ReturnsConfig.reason_probs must match reason_keys length.")
 
     if not np.all(np.isfinite(rp)):
-        raise RuntimeError("ReturnsConfig.reason_probs must be finite.")
+        raise SalesError("ReturnsConfig.reason_probs must be finite.")
     if np.any(rp < 0):
-        raise RuntimeError("ReturnsConfig.reason_probs must be >= 0.")
+        raise SalesError("ReturnsConfig.reason_probs must be >= 0.")
 
     s = float(rp.sum())
     if s <= 0.0:
