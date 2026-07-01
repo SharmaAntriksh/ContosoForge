@@ -294,6 +294,7 @@ def _load_appearance_cfg() -> dict:
     p = models.get("pricing", {}) or {}
     appearance = p.get("appearance", {}) or {}
     enabled = bool(appearance.get("enabled", False))
+    deterministic = bool(appearance.get("deterministic", True))
 
     # --- Unit price ---
     up_cfg = appearance.get("unit_price", {}) or {}
@@ -333,6 +334,7 @@ def _load_appearance_cfg() -> dict:
 
     out = {
         "enabled": enabled,
+        "deterministic": deterministic,
         # unit price
         "up_round": up_round,
         "up_band_max": up_max, "up_band_step": up_step,
@@ -352,10 +354,60 @@ def _load_appearance_cfg() -> dict:
 
 
 # ===============================================================
+# Deterministic posted-price hashing (Phase 4.1)
+# ===============================================================
+# SplitMix64 keyed by (product_id, month): same key -> same uniform, so the
+# stochastic snap resolves to the same UnitPrice for every line of a
+# (product, month). Distinct salts give independent draws for the round vs the
+# price/cost endings.
+_HC1 = np.uint64(0x9E3779B97F4A7C15)
+_HC2 = np.uint64(0xBF58476D1CE4E5B9)
+_HC3 = np.uint64(0x94D049BB133111EB)
+_UP_ROUND_SALT = np.uint64(0x50A1C0DE00000001)
+_UP_END_SALT = np.uint64(0x50A1C0DE00000002)
+_UC_END_SALT = np.uint64(0x50A1C0DE00000003)
+_TWO_POW_53 = np.float64(9007199254740992.0)  # 2**53
+
+
+def _price_mix(x: np.ndarray) -> np.ndarray:
+    x = x ^ (x >> np.uint64(30))
+    x = x * _HC2
+    x = x ^ (x >> np.uint64(27))
+    x = x * _HC3
+    x = x ^ (x >> np.uint64(31))
+    return x
+
+
+def _price_hash_u01(product_ids, months, salt) -> np.ndarray:
+    """Uniform double in [0, 1) keyed by (product_id, month)."""
+    p = np.asarray(product_ids).astype(np.int64, copy=False).astype(np.uint64, copy=False)
+    m = np.asarray(months).astype(np.int64, copy=False).astype(np.uint64, copy=False)
+    x = _price_mix(p * _HC1 ^ (m + np.uint64(salt)))
+    return (x >> np.uint64(11)).astype(np.float64) / _TWO_POW_53
+
+
+def _pick_ending(rng, end_vals: np.ndarray, end_w: np.ndarray, n: int, hash_u):
+    """Choose a per-row price ending. ``hash_u`` (uniform [0,1), when supplied)
+    drives a deterministic inverse-CDF pick; otherwise draw from ``rng``."""
+    if hash_u is not None:
+        cdf = np.cumsum(np.asarray(end_w, dtype=np.float64))
+        total = float(cdf[-1]) if cdf.size else 0.0
+        if total <= 0.0:
+            return end_vals[np.zeros(n, dtype=np.int64)]
+        cdf = cdf / total
+        cdf[-1] = 1.0  # guard fp drift so searchsorted stays in-bounds
+        idx = np.minimum(np.searchsorted(cdf, hash_u, side="right"), end_vals.size - 1)
+    else:
+        idx = rng.choice(end_vals.size, size=n, p=end_w)
+    return end_vals[idx]
+
+
+# ===============================================================
 # Snapping functions
 # ===============================================================
 
-def _snap_unit_price(rng, up: np.ndarray, acfg: dict) -> np.ndarray:
+def _snap_unit_price(rng, up: np.ndarray, acfg: dict, *,
+                     hash_round=None, hash_end=None) -> np.ndarray:
     """Snap unit prices to banded increments with configurable endings.
 
     Uses stochastic rounding when mode is 'floor': the probability of
@@ -363,12 +415,11 @@ def _snap_unit_price(rng, up: np.ndarray, acfg: dict) -> np.ndarray:
     transition gradually as inflation pushes them through a band rather
     than jumping all at once after a multi-year plateau.
 
-    SM-2 (by design): the stochastic round and the random ending are drawn
-    *per row*, so two sales lines for the same product in the same month can
-    get slightly different UnitPrices. UnitPrice is a fact measure, not a
-    dimension attribute — this models realistic per-transaction price
-    variation. (Product SCD2 mode bypasses this and preserves catalog prices.)
-    See CLAUDE.md gotcha #26.
+    Phase 4.1: when ``hash_round`` / ``hash_end`` (uniforms keyed by
+    (product, month)) are supplied, the stochastic round and the ending are
+    resolved deterministically per (product, month), so every line of a
+    (product, month) gets the same UnitPrice. Without them the draws come from
+    ``rng`` per row (legacy behavior). See CLAUDE.md gotcha #26.
     """
     if not acfg.get("enabled", False):
         return up
@@ -381,22 +432,24 @@ def _snap_unit_price(rng, up: np.ndarray, acfg: dict) -> np.ndarray:
         ratio = up / step
         floor_val = np.floor(ratio)
         frac = ratio - floor_val
-        anchor = np.where(
-            rng.random(up.shape[0]) < frac,
-            (floor_val + 1) * step,
-            floor_val * step,
-        )
+        u = hash_round if hash_round is not None else rng.random(up.shape[0])
+        anchor = np.where(u < frac, (floor_val + 1) * step, floor_val * step)
     else:
         anchor = _quantize(up, step, acfg["up_round"])
 
-    idx = rng.choice(acfg["up_end_vals"].size, size=up.shape[0], p=acfg["up_end_w"])
-    ending = acfg["up_end_vals"][idx]
+    ending = _pick_ending(
+        rng, acfg["up_end_vals"], acfg["up_end_w"], up.shape[0], hash_end)
 
     return np.maximum(anchor + ending, 0.01)
 
 
-def _snap_cost(rng, uc: np.ndarray, acfg: dict) -> np.ndarray:
-    """Snap unit costs to banded increments."""
+def _snap_cost(rng, uc: np.ndarray, acfg: dict, *, hash_end=None) -> np.ndarray:
+    """Snap unit costs to banded increments.
+
+    The anchor is a deterministic quantize; only the (optional) ending is
+    stochastic. ``hash_end`` (Phase 4.1) makes that pick deterministic per
+    (product, month) instead of per-row off ``rng``.
+    """
     if not acfg.get("enabled", False):
         return uc
 
@@ -408,8 +461,7 @@ def _snap_cost(rng, uc: np.ndarray, acfg: dict) -> np.ndarray:
     end_w = acfg.get("uc_end_w")
 
     if end_vals is not None and end_w is not None and end_vals.size > 0:
-        idx = rng.choice(end_vals.size, size=uc.shape[0], p=end_w)
-        ending = end_vals[idx]
+        ending = _pick_ending(rng, end_vals, end_w, uc.shape[0], hash_end)
         snapped = anchor.copy()
         mask = step >= 1.0
         if mask.any():
@@ -556,7 +608,8 @@ def _global_start_month_int() -> int:
 # Public API
 # ===============================================================
 
-def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_key=1):
+def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_key=1,
+                 product_ids=None):
     """
     Single-pass sales pricing pipeline.
 
@@ -584,6 +637,12 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
         markdown lottery is used.
     no_discount_key : int
         The "no promotion" sentinel PromotionKey (default 1).
+    product_ids : array-like of int or None
+        Per-line product identity (ProductKey, == ProductID under non-SCD2). When
+        supplied and ``models.pricing.appearance.deterministic`` is on (Phase
+        4.1), the posted price/cost snap is hash-seeded on (product_id, month) so
+        every line for a product-month shares one UnitPrice. None => legacy
+        per-row stochastic snap.
 
     Returns
     -------
@@ -613,11 +672,13 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
         up = np.maximum(base_up, 0.0)
         uc = np.clip(base_uc, 0.0, up)
     else:
-        # No SCD2: apply runtime inflation + appearance snapping
+        # No SCD2: apply runtime inflation + appearance snapping.
+        # Per-line absolute month — the inflation key AND, in deterministic mode,
+        # the posted-price hash key.
+        order_month_i = order_dates.astype("datetime64[M]").astype("int64")
         if _skip_inflation:
             factor = np.ones(n, dtype=np.float64)
         else:
-            order_month_i = order_dates.astype("datetime64[M]").astype("int64")
             uniq_months, inv = np.unique(order_month_i, return_inverse=True)
 
             start_m = _global_start_month_int()
@@ -635,10 +696,22 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
 
             factor = np.clip(infl * noises, clip_lo, clip_hi)[inv]
 
+        # Phase 4.1: deterministic posted price/cost per (product, month). Hash
+        # the stochastic snap on (product_id, month) instead of the per-row chunk
+        # rng, so every line for a (product, month) carries the same UnitPrice.
+        if bool(appearance.get("deterministic", True)) and product_ids is not None:
+            _pid = np.asarray(product_ids)
+            _h_up_round = _price_hash_u01(_pid, order_month_i, _UP_ROUND_SALT)
+            _h_up_end = _price_hash_u01(_pid, order_month_i, _UP_END_SALT)
+            _h_uc_end = _price_hash_u01(_pid, order_month_i, _UC_END_SALT)
+        else:
+            _h_up_round = _h_up_end = _h_uc_end = None
+
         up = np.maximum(base_up * factor, 0.0)
-        up = _snap_unit_price(rng, up, appearance)
+        up = _snap_unit_price(rng, up, appearance,
+                              hash_round=_h_up_round, hash_end=_h_up_end)
         uc = np.minimum(np.maximum(base_uc * factor, 0.0), up)
-        uc = _snap_cost(rng, uc, appearance)
+        uc = _snap_cost(rng, uc, appearance, hash_end=_h_uc_end)
         uc = np.minimum(uc, up)
 
     # ---- 4. Draw markdown discount from ladder ----

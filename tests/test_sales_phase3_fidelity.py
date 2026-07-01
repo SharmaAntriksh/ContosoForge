@@ -315,3 +315,26 @@ class TestBasketCorrelation:
             f"basket-theme not recoverable: match_rate={match_rate:.3f} "
             f"(chance baseline 1/{K}={1/K:.3f})"
         )
+
+
+# ===================================================================
+# 4.1 — deterministic posted price per (product, month)
+# ===================================================================
+
+class TestDeterministicPostedPrice:
+    def test_unit_price_constant_within_product_month(self, sales_df):
+        """Every sales line for the same (ProductKey, month) carries the same
+        posted UnitPrice — a (product, month) self-join on the fact recovers a
+        single list price (dissolves gotcha #26)."""
+        import pandas as pd
+        month = pd.to_datetime(sales_df["OrderDate"].astype(str)).dt.to_period("M").astype(str)
+        g = pd.DataFrame({
+            "ProductKey": sales_df["ProductKey"].to_numpy(),
+            "month": month.to_numpy(),
+            "UnitPrice": sales_df["UnitPrice"].round(2).to_numpy(),
+        })
+        nun = g.groupby(["ProductKey", "month"])["UnitPrice"].nunique()
+        bad = int((nun > 1).sum())
+        assert bad == 0, f"{bad} (product, month) groups carry >1 posted UnitPrice"
+        # sanity: the fact still has real price variation across product-months
+        assert g["UnitPrice"].nunique() > 5

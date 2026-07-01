@@ -37,7 +37,7 @@ changes are protected by tests written first.
 | **1** ✅ | Determinism & correctness | Make "same settings → same data" actually true | **Done** |
 | **2** ✅ | Decouple knobs from chunking | Business knobs stop depending on `chunk_size`/worker count | **Done** |
 | **3** ✅ | Statistical fidelity (the joint model) | Connected, realistic facts an analyst can actually mine | **Done** |
-| **4** | Pricing model | Separate shelf price from realized price | After 3 |
+| **4** ✅ | Pricing model | Separate shelf price from realized price | **Done** (4.1; 4.2 optional) |
 | **5** | Architecture cleanup | Kill god-modules, dead abstractions, duplication | Anytime after 1 |
 | **6** | Plumbing & hygiene | The minor/cosmetic single-source-of-truth cleanups | Anytime |
 
@@ -320,23 +320,30 @@ return-by-delivery) return real, discoverable structure instead of noise. **Phas
 **Goal:** stop fusing two different concepts into `UnitPrice`. (Dissolves gotcha #26
 rather than documenting around it.)
 
-- [ ] **4.1 Deterministic posted price** — `Finding #10` · `E:M R:med`
-  Snap the shelf price **once per (ProductID, month)** with a hash-seeded RNG instead of
-  per-row off the chunk RNG. Per-line variation lives only in the existing
-  `DiscountAmount`/`NetPrice` columns. Naturally reduces to catalog price under SCD2 (no
-  special-case branch).
-  - *Files:* `sales_models/pricing_pipeline.py:328-365/559-588`.
-  - *Acceptance:* every sales line for the same product-month carries the same posted
-    `UnitPrice`; a (product, month) self-join on the *fact* recovers list price.
-- [ ] **4.2 (Optional) Category-structured inflation** — `Finding #11` · `E:L R:med`
+- [x] **4.1 Deterministic posted price** — `Finding #10` · `E:M R:med` — **DONE**
+  The posted `UnitPrice`/`UnitCost` snap is now hash-seeded on `(ProductID, month)` instead
+  of the per-row chunk RNG, so every sales line for a product-month carries the same posted
+  price; per-line variation lives only in `DiscountAmount`/`NetPrice`. Gated by
+  `models.pricing.appearance.deterministic` (default on); `product_ids` are threaded into
+  `build_prices`. The SCD2 branch (already catalog-price-preserving) is unchanged, so both
+  modes now yield a deterministic posted price.
+  - *Files:* `sales_models/pricing_pipeline.py` (`_price_hash_u01`, `_pick_ending`,
+    `_snap_unit_price`/`_snap_cost` hash params, `build_prices` product_ids),
+    `sales_logic/chunk_builder.py`, `config_schema.py` (`AppearanceConfig.deterministic`).
+  - *Acceptance — met:* end-to-end, `UnitPrice` is single-valued within every
+    `(ProductKey, month)`; the OFF path (`deterministic=false` / `product_ids=None`)
+    reproduces the legacy per-row stochastic snap. Determinism guardrails still green
+    (removing the snap's RNG draws shifts the downstream stream identically across workers).
+- [ ] **4.2 (Optional) Category-structured inflation** — `Finding #11` · `E:L R:med` — deferred
   Replace the single global drift with a small factor model (macro + category +
   idiosyncratic). Pair with 3.1's elasticity so markdowns actually cause volume lifts.
   - *Acceptance:* electronics-deflate / groceries-inflate style heterogeneity is visible;
     no determinism/picklability regression.
-  - *Note:* lower priority; the elasticity coupling (3.1) delivers most of the value.
+  - *Note:* lower priority; the elasticity coupling (3.1) already delivers most of the
+    value. Deferred as an optional follow-up.
 
-**Exit criteria:** gotcha #26 can be rewritten as "posted price is deterministic per
-(product, month); discounts vary per line."
+**Exit criteria:** ✅ gotcha #26 rewritten as "posted price is deterministic per
+(product, month); discounts vary per line." **Phase 4 core (4.1) complete;** 4.2 optional.
 
 ---
 

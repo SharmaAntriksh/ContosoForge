@@ -500,3 +500,101 @@ class TestPromotionReconciliation:
         # Full ladder includes nonzero entries, so some rows get a discount
         # regardless of any (absent) promotion assignment.
         assert (disc > 0.0).any()
+
+
+# ===================================================================
+# Phase 4.1 — deterministic posted price per (product, month)
+# ===================================================================
+
+class TestDeterministicPostedPrice:
+    def setup_method(self):
+        State.reset()
+        _reset_caches()
+
+    def teardown_method(self):
+        State.reset()
+        _reset_caches()
+
+    def _bind(self, *, deterministic=True):
+        State.models_cfg = {
+            "pricing": {
+                "inflation": {"annual_rate": 0.10, "month_volatility_sigma": 0.0,
+                              "apply_with_scd2": True},
+                "appearance": {
+                    "enabled": True,
+                    "deterministic": deterministic,
+                    "unit_price": {
+                        "rounding": "floor",
+                        "endings": [{"value": 0.99, "weight": 1.0}],
+                        "bands": [{"max": 100, "step": 1}, {"max": 1e18, "step": 5}],
+                    },
+                    "unit_cost": {
+                        "rounding": "nearest",
+                        "endings": [{"value": 0.0, "weight": 1.0}],
+                        "bands": [{"max": 1e18, "step": 1}],
+                    },
+                    "discount": {"bands": [{"max": 1e18, "step": 1}]},
+                },
+                "markdown": {"enabled": False},
+            }
+        }
+        State.product_scd2_active = False
+        State.date_pool = np.array(["2022-01-01"], dtype="datetime64[D]")
+
+    def _run(self, product_ids, base_prices, dates, *, deterministic=True, pass_ids=True):
+        self._bind(deterministic=deterministic)
+        base = np.asarray(base_prices, dtype=np.float64)
+        n = base.size
+        price = {
+            "final_unit_price": base.copy(),
+            "final_unit_cost": base * 0.4,
+            "discount_amt": np.zeros(n),
+            "final_net_price": base.copy(),
+        }
+        out = build_prices(
+            np.random.default_rng(1),
+            np.asarray(dates, dtype="datetime64[D]"),
+            np.ones(n, dtype=np.int64), price,
+            product_ids=(np.asarray(product_ids, dtype=np.int32) if pass_ids else None),
+        )
+        return out["final_unit_price"]
+
+    def test_same_product_month_single_posted_price(self):
+        n = 500
+        pid = np.full(n, 7, dtype=np.int32)
+        base = np.full(n, 53.0)             # a product's list price is fixed
+        dates = np.array(["2022-06-15"] * n, dtype="datetime64[D]")
+        up = self._run(pid, base, dates, deterministic=True)
+        assert np.unique(np.round(up, 2)).size == 1, "posted price varies within (product, month)"
+
+    def test_legacy_snap_varies_per_row(self):
+        n = 500
+        pid = np.full(n, 7, dtype=np.int32)
+        base = np.full(n, 53.0)
+        dates = np.array(["2022-06-15"] * n, dtype="datetime64[D]")
+        up = self._run(pid, base, dates, deterministic=False)
+        # stochastic per-row rounding straddles the step boundary -> >1 value
+        assert np.unique(np.round(up, 2)).size > 1
+
+    def test_product_ids_none_uses_legacy(self):
+        n = 500
+        pid = np.full(n, 7, dtype=np.int32)
+        base = np.full(n, 53.0)
+        dates = np.array(["2022-06-15"] * n, dtype="datetime64[D]")
+        up = self._run(pid, base, dates, deterministic=True, pass_ids=False)
+        assert np.unique(np.round(up, 2)).size > 1
+
+    def test_distinct_products_can_differ(self):
+        # Two products at the same base price / month can snap to different posted
+        # prices (independent (product, month) hashes) — structure, not a bug.
+        n = 2000
+        pid = (np.arange(n) % 40).astype(np.int32)
+        base = np.full(n, 53.0)
+        dates = np.array(["2022-06-15"] * n, dtype="datetime64[D]")
+        up = self._run(pid, base, dates, deterministic=True)
+        # each product-month is internally single-valued...
+        import pandas as pd
+        g = pd.DataFrame({"pid": pid, "up": np.round(up, 2)}).groupby("pid")["up"].nunique()
+        assert (g == 1).all()
+        # ...but across products there is more than one posted price
+        assert np.unique(np.round(up, 2)).size > 1

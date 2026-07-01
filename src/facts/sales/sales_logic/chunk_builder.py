@@ -1965,6 +1965,7 @@ def build_chunk_table(
             price=price,
             promo_keys=promo_keys,
             no_discount_key=no_discount_key,
+            product_ids=product_keys,
         )
 
         # --------------------------------------------------------

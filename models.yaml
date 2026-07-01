@@ -87,6 +87,8 @@ models:
 
     appearance:
       enabled: true
+      deterministic: true    # posted UnitPrice/UnitCost fixed per (product, month)
+                             # (Phase 4.1); false = legacy per-row stochastic snap
 
       unit_price:
         rounding: floor

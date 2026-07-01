@@ -941,6 +941,12 @@ class DiscountAppearanceConfig(_Base):
 
 class AppearanceConfig(_Base):
     enabled: bool = True
+    # Phase 4.1: snap the posted UnitPrice/UnitCost deterministically per
+    # (ProductID, month) — the stochastic round + ending are hash-seeded on
+    # (product, month) instead of the per-row chunk RNG, so every sales line for
+    # the same product-month carries the same posted price (per-line variation
+    # lives only in DiscountAmount). False = legacy per-row stochastic snap.
+    deterministic: bool = True
     unit_price: PriceAppearanceUnitConfig = PriceAppearanceUnitConfig()
     unit_cost: PriceAppearanceUnitConfig = PriceAppearanceUnitConfig()
     discount: DiscountAppearanceConfig = DiscountAppearanceConfig()
