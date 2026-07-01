@@ -144,13 +144,20 @@ def _to_dict(obj):
 
 
 def _md_cfg_hash(models) -> int:
-    """Content-based hash of the pricing config subset (handles nested structures)."""
+    """Content-based, process-stable hash of the pricing config subset.
+
+    Stable SHA-256 digest (not builtin ``hash()``, which is PYTHONHASHSEED-salted
+    per process) so the version is comparable across processes. Handles nested
+    structures.
+    """
     import json
+    import hashlib
     raw = _to_dict(models.get("pricing", {}) or {})
     try:
-        return hash(json.dumps(raw, sort_keys=True, default=str))
+        blob = json.dumps(raw, sort_keys=True, default=str).encode("utf-8")
     except (TypeError, ValueError):
         return id(raw)
+    return int.from_bytes(hashlib.sha256(blob).digest()[:8], "big")
 
 
 def _load_markdown_cfg():

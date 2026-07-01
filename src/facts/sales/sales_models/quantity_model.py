@@ -48,17 +48,21 @@ def _to_dict(obj):
 
 
 def _cfg_hash(models) -> int:
-    """Content-based hash of the quantity-relevant config subset.
+    """Content-based, process-stable hash of the quantity-relevant config subset.
 
     Uses a JSON dump so nested structures (the ``elasticity`` sub-model) hash
-    cleanly — a plain ``hash(tuple(items))`` chokes on nested dicts/models.
+    cleanly — a plain ``hash(tuple(items))`` chokes on nested dicts/models. A
+    stable SHA-256 digest (not builtin ``hash()``, which is PYTHONHASHSEED-salted
+    per process) keeps the version comparable across processes.
     """
     import json
+    import hashlib
     raw = _to_dict(models.get("quantity", {}) or {})
     try:
-        return hash(json.dumps(raw, sort_keys=True, default=str))
+        blob = json.dumps(raw, sort_keys=True, default=str).encode("utf-8")
     except (TypeError, ValueError):
         return id(raw)
+    return int.from_bytes(hashlib.sha256(blob).digest()[:8], "big")
 
 
 def _load_cfg() -> dict:
