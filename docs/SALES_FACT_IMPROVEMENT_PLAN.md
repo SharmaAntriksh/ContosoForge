@@ -478,8 +478,19 @@ them into a few PRs.
   and removed the dead `hasattr('to_dict')` guard in `worker_cfg_builder`. Byte-preserving:
   a direct old-vs-new `OutputPaths` comparison over delta/parquet/csv × rel/abs is identical;
   full suite 1942 green.
-- [ ] **6.4 Normalize `end_month` at the boundary** — `Finding #32` · `E:S R:lo`
-  Coerce to int64/-1 once in `bind_globals`; delete the 70-line per-chunk coercion tree.
+- [x] **6.4 Normalize `end_month` at the boundary** — `Finding #32` · `E:S R:lo` — **DONE**
+  `bind_globals` now derives `State.customer_end_month_norm` ONCE per (re)bind (pure
+  function of `customer_end_month`, already int64/-1 upstream) and broadcasts it read-only;
+  the chunk hot path (`chunk_builder.build_chunk_table`) reads that array instead of calling
+  `_normalize_end_month` every chunk, with a fallback recompute for partial-dict test binds.
+  The `_normalize_end_month` import in `bind_globals` is function-local (top-level would cycle:
+  `core/__init__ -> delivery -> ..globals.fmt`). Guarded to (re)compute only when the bind
+  touches `customer_end_month`/`customer_keys`, so the early runner-level bind
+  (`sales_runner._bind_runner_globals`) is a no-op. An Explore audit confirmed **zero in-place
+  mutations** of `end_month_norm` in any live consumer (fancy-index reads are copies), so a
+  shared broadcast is safe. Coordinator plan-side `_normalize_end_month` (sales.py, once per
+  run) left as-is. Byte-identical: both baselines match (`e07d871918…` workers=2/chunk=1000,
+  `cb2aa781…` workers=1/chunk=4000); determinism guardrails + full suite (1951) green.
 - [x] **6.5 Consistent exceptions** — `Finding #42` · `E:S R:lo` — **DONE (returns path)** (`ac6ff3c`)
   `_validate_cfg` in `returns_builder.py` mixed bare `RuntimeError` with `SalesError` for
   the same config-shape checks; routed the 7 `ReturnsConfig.*` validation raises through

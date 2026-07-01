@@ -129,10 +129,10 @@ _worker_cdf_cache: dict = {}
 # for every chunk the worker processes.  The discovery schedule
 # (customer_discovery_month) is likewise static and does NOT enter the
 # eligibility predicate, so caching the eligible index set is safe.  Keyed on
-# the month count T alone: the lifecycle
-# arrays are invariant within a worker and this cache is cleared at each worker
-# init, so no per-chunk array key is needed (and end_month_norm is reallocated
-# every chunk, so an id()-based key would never hit).
+# the month count T alone: the lifecycle arrays are invariant within a worker
+# and this cache is cleared at each worker init, so no per-chunk array key is
+# needed (end_month_norm is now the once-per-bind State.customer_end_month_norm
+# broadcast, not a per-chunk allocation).
 _worker_eligible_cache: dict = {}
 
 # Worker-lifetime cache of per-calendar-month product weights (12 distinct).
@@ -1344,8 +1344,13 @@ def build_chunk_table(
     else:
         start_month = np.asarray(start_month, dtype="int64")
 
-    end_month = getattr(State, "customer_end_month", None)
-    end_month_norm = _normalize_end_month(end_month, customer_keys.shape[0])
+    # Prefer the once-per-bind normalized broadcast (bind_globals); fall back to
+    # computing it here for binders that didn't precompute it (e.g. partial-dict
+    # test binds). Same pure function + inputs, so both paths are byte-identical.
+    end_month_norm = getattr(State, "customer_end_month_norm", None)
+    if end_month_norm is None:
+        end_month = getattr(State, "customer_end_month", None)
+        end_month_norm = _normalize_end_month(end_month, customer_keys.shape[0])
 
     base_weight = getattr(State, "customer_base_weight", None)
     if base_weight is not None:

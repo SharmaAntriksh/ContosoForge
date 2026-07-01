@@ -97,6 +97,10 @@ class State:
     customer_is_active_in_sales = None
     customer_start_month = None
     customer_end_month = None  # int64 with -1 meaning "no end"
+    # Normalized end-month broadcast (int64, -1 == "no end"): a pure function of
+    # customer_end_month, derived ONCE in bind_globals and read read-only by the
+    # chunk hot path so it isn't reallocated every chunk.
+    customer_end_month_norm = None
     customer_base_weight = None  # optional float64
 
     # Closed-form discovery schedule (optional): int64 array aligned with
@@ -277,6 +281,19 @@ def bind_globals(gdict: dict):
     # Bind raw values (allow injecting additional attrs for debugging)
     for k, v in gdict.items():
         setattr(State, k, v)
+
+    # --------------------------------------------------------------
+    # Derive the normalized end-month broadcast ONCE per (re)bind so the chunk
+    # hot path reads it instead of reallocating it every chunk. It is a pure
+    # function of customer_end_month (already int64/-1 upstream), so this is
+    # byte-identical to the old per-chunk _normalize_end_month call. Only
+    # (re)compute when this bind actually touches the customer arrays; the
+    # import is function-local to avoid the core -> ..globals.fmt import cycle.
+    # --------------------------------------------------------------
+    if ("customer_end_month" in gdict or "customer_keys" in gdict) and State.customer_keys is not None:
+        from .core.customer_sampling import _normalize_end_month
+        _n_cust = int(np.asarray(State.customer_keys).shape[0])
+        State.customer_end_month_norm = _normalize_end_month(State.customer_end_month, _n_cust)
 
     # --------------------------------------------------------------
     # Bind Sales schema ONCE, respecting skip_order_cols
