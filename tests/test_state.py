@@ -26,25 +26,15 @@ class TestState:
 
         assert State.skip_order_cols is None
         assert State.file_format is None
-        assert State._sealed is False
 
-    def test_seal_prevents_bind(self):
-        State.skip_order_cols = False
-        State.sales_schema = "fake"  # avoid schema validation
-        State.seal()
+    def test_bind_after_reset_is_allowed(self):
+        # State is per-worker and read-only by convention (no seal machinery);
+        # reset + rebind must always work (tests rebind State between cases).
+        bind_globals({"skip_order_cols": False})
+        State.reset()
+        bind_globals({"skip_order_cols": True})
 
-        with pytest.raises(RuntimeError, match="sealed"):
-            bind_globals({"skip_order_cols": True})
-
-    def test_validate_missing_fields(self):
-        with pytest.raises(RuntimeError, match="Missing State fields"):
-            State.validate(["skip_order_cols", "file_format"])
-
-    def test_validate_passes_when_set(self):
-        State.skip_order_cols = False
-        State.file_format = "parquet"
-
-        State.validate(["skip_order_cols", "file_format"])
+        assert State.skip_order_cols is True
 
 
 # ===================================================================

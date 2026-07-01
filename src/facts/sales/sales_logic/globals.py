@@ -190,36 +190,19 @@ class SalesContext:
 # Global Sales runtime state (process-local)
 # ===============================================================
 
-class _SealableMeta(type):
-    """Metaclass that enforces immutability once ``_sealed`` is True."""
-
-    def __setattr__(cls, name, value):
-        if name == "_sealed" or not getattr(cls, "_sealed", False):
-            super().__setattr__(name, value)
-        else:
-            raise RuntimeError(
-                f"State is sealed; cannot set '{name}'. "
-                "Call State.reset() first (tests only) or pass values before seal()."
-            )
-
-
-class State(metaclass=_SealableMeta):
+class State:
     """
     Shared global state for Sales runtime only.
 
     Holds cached dimension data, promotion context, and output configuration.
 
     Notes:
-    - Process-local (safe with multiprocessing)
-    - Sealed after initialization (bind_globals refuses mutation once sealed)
-    - Uses ``_SealableMeta`` so that ``setattr(State, k, v)`` is blocked
-      after ``seal()`` is called.
+    - Process-local (safe with multiprocessing): each worker process has its own
+      ``State``, populated once by ``bind_globals`` and treated as read-only
+      afterward by convention. The bound dimension/config fields must not be
+      reassigned after binding; per-worker scratch (lazy caches) is the only thing
+      that mutates during chunk processing.
     """
-
-    # --------------------------------------------------------------
-    # Internal control
-    # --------------------------------------------------------------
-    _sealed = False
 
     # --------------------------------------------------------------
     # Core runtime flags / data
@@ -392,37 +375,13 @@ class State(metaclass=_SealableMeta):
         Reset all State fields.
         Intended for tests / development only.
         """
-        # Unseal first so setattr calls below are allowed by _SealableMeta
-        State._sealed = False
         for key in list(vars(State).keys()):
-            if key.startswith("__") or key == "_sealed":
+            if key.startswith("__"):
                 continue
             attr = getattr(State, key)
             if callable(attr):
                 continue
             setattr(State, key, None)
-
-    @staticmethod
-    def validate(required):
-        """
-        Validate required state fields exist (not None).
-        """
-        missing = [r for r in required if getattr(State, r, None) is None]
-        if missing:
-            raise RuntimeError(f"Missing State fields: {missing}")
-
-    @staticmethod
-    def seal():
-        """
-        Prevent further mutation of State via bind_globals().
-        Called once during worker initialization.
-
-        After sealing, ``_SealableMeta.__setattr__`` rejects any
-        ``setattr(State, ...)`` calls so that sealed state is truly immutable.
-        """
-        if PA_AVAILABLE and State.sales_schema is None:
-            raise RuntimeError("State.sales_schema was not bound before sealing")
-        State._sealed = True
 
 
 # ===============================================================
@@ -435,9 +394,6 @@ def bind_globals(gdict: dict):
 
     Must be called before workers start (per-process).
     """
-    if State._sealed:
-        raise RuntimeError("State is sealed and cannot be modified")
-
     if not isinstance(gdict, dict):
         raise TypeError("bind_globals expects a dict")
 

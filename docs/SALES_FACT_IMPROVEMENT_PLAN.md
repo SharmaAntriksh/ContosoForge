@@ -365,10 +365,15 @@ intended behavior change** (use Phase 0 tests as the safety net).
   `SalesMemoryModel`, `OutputAssembler`. `generate_sales_fact` shrinks to a readable
   sequence of named calls.
   - *Acceptance:* each unit unit-testable with a small fixture (no full parquet dim set).
-- [ ] **5.3 Dedupe the two SCD2 grid builders** — `Finding #26` · `E:M R:lo`
-  One `build_scd2_version_grid(df, id_col, payload_cols, pad)`; callers pass payload.
-  Removes the already-divergent dead `breaks` array.
-  - *Files:* `sales.py:241-405`.
+- [x] **5.3 Dedupe the two SCD2 grid builders** — `Finding #26` · `E:M R:lo` — **DONE**
+  Extracted the shared index machinery into `_scd2_version_index(source, id_col,
+  pool_ids, payload_cols)` → `(starts, _Scd2VersionCtx)`; `_build_scd2_product_versions`
+  and `_build_scd2_customer_versions` are now thin wrappers that allocate their own
+  payload grid (product `(N,V,3)` float64; customer `(N,V)` int32 keys + reverse map)
+  and scatter. Removed the dead `breaks` array the product copy carried.
+  - *Files:* `sales.py`.
+  - *Acceptance — met:* output byte-identical (direct grid-boundary/payload check on a
+    crafted SCD2 dim + determinism/integration/product-scd2 + full suite 1950 passed).
 - [ ] **5.4 Turn the per-month loop into a named transform pipeline** — `Finding #8 #25` · `E:L R:med`
   Model the chunk as a mutable frame; each stage declares `requires`/`produces` so
   ordering is a checked precondition, not a comment. Extract `OrderIdAllocator`, a shared

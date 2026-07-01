@@ -1229,5 +1229,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     )
 
     # Validate critical State attributes once at worker init instead of per-task
-    State.validate(["chunk_size"])
+    if State.chunk_size is None:
+        raise SalesError("Missing State fields: ['chunk_size']")
 

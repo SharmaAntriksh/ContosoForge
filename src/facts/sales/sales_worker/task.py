@@ -605,8 +605,8 @@ def _worker_task(args):
     tasks, single = normalize_tasks(args)
     results = []
 
-    # State.validate(["chunk_size"]) is now called once in init_sales_worker
-    # instead of per-task, eliminating ~100-1000 redundant validation calls.
+    # The chunk_size presence check runs once in init_sales_worker instead of
+    # per-task, eliminating ~100-1000 redundant checks.
 
     # --- Hoist loop-invariant reads from State ---
     validate_header = bool(getattr(State, "validate_header_invariants", False))
