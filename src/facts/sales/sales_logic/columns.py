@@ -127,17 +127,31 @@ def _build_channel_hour_weights(
     return _normalize_prob(base)
 
 
+# Worker-lifetime cache of the parsed sales-channel sampling data (keys, probs,
+# per-channel hour LUT). Process-global like the other worker caches (CDF/month
+# pool/dir/task); reset at worker init (init_sales_worker) so a reused process
+# never serves stale per-run channel data. Kept OFF State so State stays
+# bound-only (read-only) after bind_globals.
+_sales_channels_cache: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+
+
+def reset_sales_channels_cache() -> None:
+    """Clear the worker-lifetime sales-channels cache (called at worker init)."""
+    global _sales_channels_cache
+    _sales_channels_cache = None
+
+
 def _load_sales_channels(State: Any) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
     Returns (keys:int16[], p:float64[], channel_hour_lut:ndarray[max_key+1, 24]).
 
     channel_hour_lut[key] is a 24-element normalized hour-weight array
     that respects the channel's OpenTime/CloseTime operating window.
-    Cached on State.
+    Cached process-globally (cleared at worker init via reset_sales_channels_cache).
     """
-    cached = getattr(State, "_sales_channels_cache", None)
-    if cached is not None:
-        return cached
+    global _sales_channels_cache
+    if _sales_channels_cache is not None:
+        return _sales_channels_cache
 
     folder = _dims_parquet_folder(State)
     if folder is None:
@@ -186,8 +200,8 @@ def _load_sales_channels(State: Any) -> Optional[Tuple[np.ndarray, np.ndarray, n
         ch = _parse_time_str(close_times[i]) if close_times is not None else -1
         channel_hour_lut[k] = _build_channel_hour_weights(profile_code, oh, ch)
 
-    State._sales_channels_cache = (keys, p, channel_hour_lut)
-    return State._sales_channels_cache
+    _sales_channels_cache = (keys, p, channel_hour_lut)
+    return _sales_channels_cache
 
 
 def _sample_hour_weighted_minute(rng: np.random.Generator, size: int, hour_w: np.ndarray) -> np.ndarray:
