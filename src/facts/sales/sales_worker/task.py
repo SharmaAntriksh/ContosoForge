@@ -276,6 +276,13 @@ def _build_returns_config() -> Optional[ReturnsConfig]:
         return None
     if TABLE_SALES_RETURN is None:
         raise RuntimeError("returns_enabled=True but TABLE_SALES_RETURN is not defined in output_paths.py")
+    # Phase 3.4: fulfillment-friction coupling params (read from
+    # models.fulfillment; 0.0 when the feature is off => legacy returns behavior).
+    _mdl = getattr(State, "models_cfg", None)
+    _ff = _mdl.get("fulfillment", None) if _mdl is not None else None
+    _ff_on = bool(_ff.get("enabled", False)) if _ff is not None else False
+    _friction_boost = float(_ff.get("return_prob_boost", 0.0)) if _ff_on else 0.0
+    _friction_shorten = float(_ff.get("return_lag_shorten", 0.0)) if _ff_on else 0.0
     return ReturnsConfig(
         enabled=True,
         return_rate=float(getattr(State, "returns_rate", 0.0) or 0.0),
@@ -292,6 +299,8 @@ def _build_returns_config() -> Optional[ReturnsConfig]:
         lag_mode=int(getattr(State, "returns_lag_mode", 7)),
         event_key_offset=0,
         logistics_keys=frozenset(getattr(State, "returns_logistics_keys", ())),
+        friction_return_boost=_friction_boost,
+        friction_lag_shorten=_friction_shorten,
     )
 
 

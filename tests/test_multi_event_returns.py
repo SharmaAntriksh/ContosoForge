@@ -306,6 +306,58 @@ class TestEdgeCases:
             assert (ret_qty <= 1).all()
 
 
+class TestFrictionCoupling:
+    """Phase 3.4: the fulfillment friction latent (keyed on OrderNumber+line)
+    couples returns to delivery — higher friction => more / faster returns."""
+
+    def _detail(self, n):
+        return pa.table({
+            "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
+            "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
+            "DeliveryDate": pa.array(
+                np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32()),
+            "Quantity": pa.array(np.full(n, 4, dtype=np.int32)),
+            "NetPrice": pa.array(np.full(n, 100.0)),
+            "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
+        })
+
+    def test_high_friction_lines_returned_more(self):
+        from src.facts.sales.sales_logic.core.delivery import line_friction
+        n = 6000
+        cfg = ReturnsConfig(enabled=True, return_rate=0.3, friction_return_boost=2.0)
+        result = build_sales_returns_from_detail(self._detail(n), chunk_seed=42, cfg=cfg)
+        returned = set(int(x) for x in result.column("OrderNumber").to_numpy().tolist())
+        o = np.arange(1, n + 1, dtype=np.int64)
+        fr = line_friction(o, np.ones(n, dtype=np.int32))
+        is_ret = np.array([int(x) in returned for x in o])
+        assert fr[is_ret].mean() > fr[~is_ret].mean() + 0.05
+
+    def test_high_friction_shorter_lag(self):
+        from src.facts.sales.sales_logic.core.delivery import line_friction
+        n = 6000
+        cfg = ReturnsConfig(
+            enabled=True, return_rate=1.0, min_lag_days=1, max_lag_days=30,
+            lag_distribution="uniform", friction_lag_shorten=0.8,
+        )
+        result = build_sales_returns_from_detail(self._detail(n), chunk_seed=42, cfg=cfg)
+        ords = result.column("OrderNumber").to_numpy().astype(np.int64)
+        rdate = result.column("ReturnDate").to_numpy().astype("datetime64[D]")
+        lag = (rdate - np.datetime64("2024-03-15")).astype("timedelta64[D]").astype(int)
+        fr = line_friction(ords, np.ones(ords.size, dtype=np.int32))
+        hi = fr >= np.median(fr)
+        assert lag[hi].mean() < lag[~hi].mean()
+
+    def test_boost_and_shorten_zero_is_byte_identical(self):
+        detail = self._detail(500)
+        r0 = build_sales_returns_from_detail(
+            detail, chunk_seed=7, cfg=ReturnsConfig(enabled=True, return_rate=0.4))
+        rf = build_sales_returns_from_detail(
+            detail, chunk_seed=7,
+            cfg=ReturnsConfig(enabled=True, return_rate=0.4,
+                              friction_return_boost=0.0, friction_lag_shorten=0.0))
+        assert r0.equals(rf)
+
+
 class TestDefaultsConsistency:
     def test_dimension_matches_defaults(self):
         from src.defaults import RETURN_REASONS as canonical

@@ -63,12 +63,112 @@ def _stable_row_hash(order_dates: np.ndarray, product_keys: np.ndarray) -> np.nd
 
 
 # ----------------------------------------------------------------
+# Fulfillment friction latent (Phase 3.4)
+# ----------------------------------------------------------------
+
+_FRICTION_C = np.uint64(0xD1B54A32D192ED03)
+_TWO_POW_53 = np.float64(9007199254740992.0)  # 2**53
+
+
+def line_friction(order_numbers: np.ndarray, line_numbers: np.ndarray) -> np.ndarray:
+    """Per-line fulfillment-friction latent in [0, 1).
+
+    A pure, stateless SplitMix64 hash of the globally-unique
+    ``(OrderNumber, OrderLineNumber)`` pair, so the *same* line gets the *same*
+    friction whether it is computed in the delivery pass (chunk builder) or
+    recomputed later in the separate returns pass — independent of chunk_size,
+    worker count, or RNG state. High friction => late delivery + more/faster
+    returns.
+    """
+    o = np.asarray(order_numbers).astype(np.int64, copy=False).astype(np.uint64, copy=False)
+    ln = np.asarray(line_numbers).astype(np.int64, copy=False).astype(np.uint64, copy=False)
+    x = o * _C1
+    x ^= (ln + _FRICTION_C)
+    x = _mix_u64(x)
+    # Top 53 bits -> uniform double in [0, 1)
+    return (x >> np.uint64(11)).astype(np.float64) / _TWO_POW_53
+
+
+def _delay_from_quantile(t: np.ndarray, dmin: int, dmax: int, mode: int,
+                         distribution: str) -> np.ndarray:
+    """Map a per-line quantile ``t`` in [0,1) to an integer delay in [dmin, dmax].
+
+    ``distribution`` is the inverse-CDF shape (``"uniform"`` or ``"triangular"``
+    peaked at ``mode``), so the delay magnitude is a deterministic function of the
+    friction latent — no RNG consumed.
+    """
+    dmin = int(dmin)
+    dmax = int(dmax)
+    if dmax <= dmin:
+        return np.full(t.shape, dmin, dtype=np.int64)
+    if str(distribution).strip().lower() == "triangular":
+        c = float(min(max(int(mode), dmin), dmax))
+        span = float(dmax - dmin)
+        fc = (c - dmin) / span if span > 0 else 0.0
+        left = t < fc
+        val = np.empty(t.shape, dtype=np.float64)
+        # inverse CDF of the triangular distribution
+        if fc > 0:
+            val[left] = dmin + np.sqrt(t[left] * span * (c - dmin))
+        else:
+            val[left] = dmin
+        if fc < 1:
+            val[~left] = dmax - np.sqrt((1.0 - t[~left]) * span * (dmax - c))
+        else:
+            val[~left] = dmax
+        return np.clip(np.rint(val), dmin, dmax).astype(np.int64)
+    # uniform
+    return np.clip(dmin + np.floor(t * (dmax - dmin + 1)), dmin, dmax).astype(np.int64)
+
+
+_TWO_POW_63 = np.float64(9223372036854775808.0)  # 2**63
+
+
+def _friction_delivery_offset(n, has_orders, order_ids_int, line_numbers,
+                              hash_vals, cfg):
+    """Friction-driven delivery offset (Phase 3.4), relative to the due date.
+
+    Deterministic (no RNG): the per-line friction latent buckets a line into
+    early (offset < 0), on-time (0), or delayed (offset > 0) via (p_early,
+    p_delayed), and the delay magnitude is the inverse-CDF of the configured
+    distribution at the friction sub-quantile.
+    """
+    if has_orders and line_numbers is not None:
+        friction = line_friction(order_ids_int, np.asarray(line_numbers))
+    else:
+        # skip_order_cols: no OrderNumber/line, so reuse the per-row stable hash.
+        # Returns are disabled in this mode, so cross-pass consistency is moot.
+        friction = np.asarray(hash_vals, dtype=np.float64) / _TWO_POW_63
+
+    p_early = min(max(float(cfg.get("p_early", 0.10)), 0.0), 1.0)
+    p_delayed = min(max(float(cfg.get("p_delayed", 0.20)), 0.0), 1.0 - p_early)
+    dmin = int(cfg.get("delay_min", 1))
+    dmax = int(cfg.get("delay_max", 10))
+    mode = int(cfg.get("delay_mode", 3))
+    dist = str(cfg.get("delay_distribution", "triangular"))
+
+    offset = np.zeros(n, dtype=np.int64)
+    if p_early > 0.0:
+        early = friction < p_early
+        te = np.clip(friction / p_early, 0.0, 1.0)
+        early_days = np.where(te < 0.5, 1, 2).astype(np.int64)
+        offset[early] = -early_days[early]
+    if p_delayed > 0.0:
+        delayed = friction >= (1.0 - p_delayed)
+        td = np.clip((friction - (1.0 - p_delayed)) / p_delayed, 0.0, 1.0)
+        delay_days = _delay_from_quantile(td, dmin, dmax, mode, dist)
+        offset[delayed] = delay_days[delayed]
+    return offset
+
+
+# ----------------------------------------------------------------
 # compute_dates
 # ----------------------------------------------------------------
 
 def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
                    *, channel_keys=None, channel_fulfillment_days=None,
-                   unique_orders=None, inv_idx=None):
+                   unique_orders=None, inv_idx=None,
+                   line_numbers=None, fulfillment_cfg=None):
     """
     Compute due dates, delivery dates, delivery status, and order delay flag.
 
@@ -76,6 +176,10 @@ def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
     - order_ids_int present  → order-level coherent behavior
     - order_ids_int is None → row-level fallback (skip_order_cols=True)
     - channel_keys + channel_fulfillment_days → channel-aware due date offsets
+    - fulfillment_cfg (Phase 3.4) → friction-driven early/on-time/delayed
+      bucketing with an explicit named delay-magnitude distribution, replacing
+      the legacy mod-100 ladder + RNG early draws. Deterministic (no RNG). When
+      None/disabled, the legacy path is used unchanged.
 
     Returns dict of numpy arrays:
       due_date: datetime64[D]
@@ -139,62 +243,52 @@ def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
     due_date = order_dates + due_offset.astype("timedelta64[D]")
 
     # ------------------------------------------------------------
-    # Seeds (vectorized) - reuse modular reductions
+    # Delivery offset (relative to due date)
     # ------------------------------------------------------------
-    # Keep semantics equivalent to original:
-    # order_seed = hash % 100
-    # product_seed = (hash + product_keys) % 100
-    # line_seed = (product_keys + (hash % 100)) % 100
-    # Note: product_seed == line_seed under mod 100; compute once.
-    hs = hash_vals % 100
-    pk = product_keys % 100
-    order_seed = hs
-    product_seed = (hs + pk) % 100
-    line_seed = product_seed  # same under mod 100
+    _ff_on = bool(fulfillment_cfg) and bool(fulfillment_cfg.get("enabled", False))
 
-    # ------------------------------------------------------------
-    # Base delivery offset (relative to due date)
-    # ------------------------------------------------------------
-    delivery_offset = np.zeros(n, dtype=np.int64)
-
-    # Condition C: small delay (1..4)
-    mask_c = (order_seed >= 60) & (order_seed < 85) & (product_seed >= 60)
-    if mask_c.any():
-        delivery_offset[mask_c] = (line_seed[mask_c] % 4) + 1
-
-    # Condition D: larger delay (2..6) – filter by product_seed so some
-    # lines stay non-delayed, allowing all 3 statuses within one order.
-    mask_d = (order_seed >= 85) & (product_seed >= 40)
-    if mask_d.any():
-        delivery_offset[mask_d] = (product_seed[mask_d] % 5) + 2
-
-    # ------------------------------------------------------------
-    # Early deliveries (line-item mixed even when has order ids)
-    # NOTE: keep RNG draw shapes consistent (still draw per-order),
-    # but only a subset of lines in an "early" order become early.
-    # ------------------------------------------------------------
-    if has_orders:
-        n_orders = len(unique_orders)
-
-        # One early flag per order (10%)
-        early_order = rng.random(n_orders) < 0.10
-        # Early days per order: 1..2
-        early_days_per_order = rng.integers(1, 3, size=n_orders, dtype=np.int64)
-
-        # Only some lines in an early order are early (~35%).
-        # Use an independent RNG draw so early-delivery is not coupled to
-        # product key (line_seed depends on product via hash).
-        early_mask = early_order[inv_idx] & (rng.random(n) < 0.35)
-
-        if early_mask.any():
-            early_days_rows = early_days_per_order[inv_idx]
-            # Early overrides delay for those *lines* only
-            delivery_offset[early_mask] = -early_days_rows[early_mask]
+    if _ff_on:
+        # Phase 3.4: friction-driven bucketing (deterministic, no RNG).
+        delivery_offset = _friction_delivery_offset(
+            n, has_orders, order_ids_int, line_numbers, hash_vals, fulfillment_cfg
+        )
     else:
-        early_mask = rng.random(n) < 0.10
-        if early_mask.any():
-            early_days = rng.integers(1, 3, size=n, dtype=np.int64)
-            delivery_offset[early_mask] = -early_days[early_mask]
+        # Legacy mod-100 ladder + per-order RNG early draws.
+        # order_seed = hash % 100; product_seed = (hash + product_keys) % 100;
+        # line_seed == product_seed under mod 100.
+        hs = hash_vals % 100
+        pk = product_keys % 100
+        order_seed = hs
+        product_seed = (hs + pk) % 100
+        line_seed = product_seed
+
+        delivery_offset = np.zeros(n, dtype=np.int64)
+
+        # Condition C: small delay (1..4)
+        mask_c = (order_seed >= 60) & (order_seed < 85) & (product_seed >= 60)
+        if mask_c.any():
+            delivery_offset[mask_c] = (line_seed[mask_c] % 4) + 1
+
+        # Condition D: larger delay (2..6) – filter by product_seed so some
+        # lines stay non-delayed, allowing all 3 statuses within one order.
+        mask_d = (order_seed >= 85) & (product_seed >= 40)
+        if mask_d.any():
+            delivery_offset[mask_d] = (product_seed[mask_d] % 5) + 2
+
+        # Early deliveries (line-item mixed even when has order ids).
+        if has_orders:
+            n_orders = len(unique_orders)
+            early_order = rng.random(n_orders) < 0.10
+            early_days_per_order = rng.integers(1, 3, size=n_orders, dtype=np.int64)
+            early_mask = early_order[inv_idx] & (rng.random(n) < 0.35)
+            if early_mask.any():
+                early_days_rows = early_days_per_order[inv_idx]
+                delivery_offset[early_mask] = -early_days_rows[early_mask]
+        else:
+            early_mask = rng.random(n) < 0.10
+            if early_mask.any():
+                early_days = rng.integers(1, 3, size=n, dtype=np.int64)
+                delivery_offset[early_mask] = -early_days[early_mask]
 
     # Final delivery date (never before order date)
     delivery_date = due_date + delivery_offset.astype("timedelta64[D]")

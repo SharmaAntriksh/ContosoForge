@@ -43,7 +43,31 @@ def phase3_env(tmp_path_factory):
     sales_gen.run_pipeline_stage(base, cfg, only="dimensions")
     sales_gen.run_pipeline_stage(base, cfg, only="sales")
     df = sales_gen.load_sales(base / "final", base / "scratch")
-    return SimpleNamespace(base=base, dims_dir=dims_dir, sales=df)
+    returns = _load_returns(base / "final", base / "scratch")
+    return SimpleNamespace(base=base, dims_dir=dims_dir, sales=df, returns=returns)
+
+
+_RETURNS_MARKER = {"ReturnReasonKey", "ReturnDate", "ReturnEventKey"}
+
+
+def _load_returns(*roots):
+    """Concatenate every returns-fact parquet found under *roots*."""
+    import pandas as pd
+    import pyarrow.parquet as pq
+    files = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.parquet"):
+            try:
+                cols = set(pq.read_schema(path).names)
+            except Exception:
+                continue
+            if _RETURNS_MARKER <= cols:
+                files.append(path)
+    if not files:
+        return None
+    return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
 
 
 @pytest.fixture(scope="module")
@@ -180,4 +204,51 @@ class TestPromotionSalience:
         assert depth_on > depth_off, (
             f"salience did not deepen redeemed promos: on={depth_on:.4f} "
             f"off={depth_off:.4f}"
+        )
+
+
+# ===================================================================
+# 3.4 — shared fulfillment-friction latent (delivery ↔ returns)
+# ===================================================================
+
+class TestFulfillmentFriction:
+    def _joined(self, phase3_env):
+        """Sales lines annotated with whether/when they were returned."""
+        import pandas as pd
+        assert phase3_env.returns is not None and len(phase3_env.returns) > 0
+        sales = phase3_env.sales[
+            ["OrderNumber", "OrderLineNumber", "DeliveryStatus", "DeliveryDate"]
+        ].copy()
+        # First return event per line (min ReturnDate).
+        ret = (phase3_env.returns.groupby(["OrderNumber", "OrderLineNumber"])["ReturnDate"]
+               .min().reset_index().rename(columns={"ReturnDate": "FirstReturnDate"}))
+        j = sales.merge(ret, on=["OrderNumber", "OrderLineNumber"], how="left")
+        j["returned"] = j["FirstReturnDate"].notna()
+        return j
+
+    def test_delivery_status_shares_are_configured(self, phase3_env):
+        """Delivery status shares track the configured (p_early, p_delayed)."""
+        shares = phase3_env.sales["DeliveryStatus"].value_counts(normalize=True)
+        # models.yaml ships p_early=0.10, p_delayed=0.20.
+        assert abs(shares.get("Delayed", 0.0) - 0.20) < 0.04
+        assert abs(shares.get("Early Delivery", 0.0) - 0.10) < 0.04
+
+    def test_late_deliveries_are_returned_more(self, phase3_env):
+        j = self._joined(phase3_env)
+        rate_delayed = j.loc[j["DeliveryStatus"] == "Delayed", "returned"].mean()
+        rate_ontime = j.loc[j["DeliveryStatus"] == "On Time", "returned"].mean()
+        assert rate_delayed > rate_ontime, (
+            f"late not returned more: delayed={rate_delayed:.4f} ontime={rate_ontime:.4f}"
+        )
+
+    def test_late_deliveries_are_returned_faster(self, phase3_env):
+        import pandas as pd
+        j = self._joined(phase3_env)
+        ret = j[j["returned"]].copy()
+        lag = (pd.to_datetime(ret["FirstReturnDate"]) - pd.to_datetime(ret["DeliveryDate"])).dt.days
+        ret = ret.assign(lag=lag)
+        lag_delayed = ret.loc[ret["DeliveryStatus"] == "Delayed", "lag"].mean()
+        lag_ontime = ret.loc[ret["DeliveryStatus"] == "On Time", "lag"].mean()
+        assert lag_delayed < lag_ontime, (
+            f"late not returned faster: delayed={lag_delayed:.2f} ontime={lag_ontime:.2f}"
         )

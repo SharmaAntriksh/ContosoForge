@@ -1070,6 +1070,40 @@ class PromoSalienceConfig(_Base):
     max_weight_ratio: float = 12.0
 
 
+class FulfillmentConfig(_Base):
+    """Phase 3.4: a shared per-line fulfillment-friction latent (hash-seeded on
+    OrderNumber+OrderLineNumber) drives delivery timing AND return behavior, so
+    late deliveries yield more / faster returns.
+
+    Delivery: friction buckets a line into early / on-time / delayed via
+    (p_early, p_delayed) with an explicit named delay-magnitude distribution,
+    replacing the opaque mod-100 ladder. Returns (recomputing the same friction):
+    higher friction => higher return probability and shorter return lag.
+    """
+    enabled: bool = True
+    p_early: float = 0.10       # share of lines delivered early
+    p_delayed: float = 0.20     # share of lines delivered late (p_ontime = 1 - both)
+    delay_distribution: Literal["uniform", "triangular"] = "triangular"
+    delay_min: int = 1
+    delay_max: int = 10
+    delay_mode: int = 3         # peak (days) for the triangular delay magnitude
+    # Return coupling: p_return_i = base_rate * (1 + return_prob_boost * friction_i);
+    # lag_i *= (1 - return_lag_shorten * friction_i).
+    return_prob_boost: float = 1.0
+    return_lag_shorten: float = 0.5
+
+    @model_validator(mode="after")
+    def _validate_shares(self) -> "FulfillmentConfig":
+        pe = max(0.0, float(self.p_early))
+        pd = max(0.0, float(self.p_delayed))
+        if pe + pd > 1.0:
+            raise ValueError(
+                f"models.fulfillment: p_early + p_delayed must be <= 1.0 "
+                f"(got {pe} + {pd} = {pe + pd})"
+            )
+        return self
+
+
 class ModelsInnerConfig(_Base):
     """The ``models`` section inside models.yaml."""
     macro_demand: MacroDemandConfig = MacroDemandConfig()
@@ -1077,6 +1111,7 @@ class ModelsInnerConfig(_Base):
     pricing: PricingModelsConfig = PricingModelsConfig()
     brand_popularity: BrandPopularityConfig = BrandPopularityConfig()
     promotions: PromoSalienceConfig = PromoSalienceConfig()
+    fulfillment: FulfillmentConfig = FulfillmentConfig()
     returns: ReturnsModelsConfig = ReturnsModelsConfig()
     # Injected at runtime by resolve_trend_preset
     customers: Optional[CustomersDemandConfig] = None

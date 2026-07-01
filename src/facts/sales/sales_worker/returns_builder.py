@@ -8,6 +8,7 @@ import pyarrow as pa
 
 from src.defaults import RETURN_REASON_KEYS, RETURN_REASON_DEFAULT_WEIGHTS
 from src.exceptions import SalesError
+from src.facts.sales.sales_logic.core.delivery import line_friction
 
 
 # Columns required from OrderDetail to produce a returns fact table.
@@ -58,6 +59,11 @@ class ReturnsConfig:
     split_max_gap: int = 20
     event_key_offset: int = 0
     logistics_keys: frozenset = frozenset()
+    # Phase 3.4 — fulfillment-friction coupling (recomputed per line from
+    # OrderNumber+OrderLineNumber). Defaults 0.0 => no effect (byte-identical to
+    # the pre-3.4 behavior for direct/unit construction).
+    friction_return_boost: float = 0.0   # p_return_i = rate * (1 + boost*friction_i)
+    friction_lag_shorten: float = 0.0    # lag_i *= (1 - shorten*friction_i)
 
 
 def _returns_schema_for(so_type: pa.DataType) -> pa.Schema:
@@ -295,20 +301,36 @@ def build_sales_returns_from_detail(
     if qty_all.size != n:
         raise RuntimeError("Returns builder: unexpected Quantity length mismatch.")
 
+    # OrderNumber/line for all rows — the friction latent keys on them, and the
+    # masked subset feeds the returns output. Read as int64 so large order
+    # numbers aren't truncated; the output is built back to _so_type below.
+    so_all = _as_np_i64(_col_np(detail_cc, "OrderNumber"))
+    line_all = _as_np_i32(_col_np(detail_cc, "OrderLineNumber"))
+
+    # Phase 3.4: shared fulfillment friction couples returns to delivery — the
+    # SAME per-line friction the delivery pass used (recomputed here from
+    # OrderNumber+line) makes late-delivered lines both more likely to be
+    # returned and returned sooner.
+    use_friction = (cfg.friction_return_boost > 0.0) or (cfg.friction_lag_shorten > 0.0)
+    friction_all = line_friction(so_all, line_all) if use_friction else None
+
     # Select candidate return lines (only positive-quantity lines can be returned).
-    mask = (rng.random(n) < rr) & (qty_all > 0)
+    if cfg.friction_return_boost > 0.0 and friction_all is not None:
+        p_return = np.clip(rr * (1.0 + cfg.friction_return_boost * friction_all), 0.0, 1.0)
+    else:
+        p_return = rr
+    mask = (rng.random(n) < p_return) & (qty_all > 0)
     if not bool(mask.any()):
         return _empty_returns_table(_so_type)
 
-    # Read as int64 to avoid truncating large order numbers; the output array is
-    # built back to _so_type below.
-    so = _as_np_i64(_col_np(detail_cc, "OrderNumber"))[mask]
-    line = _as_np_i32(_col_np(detail_cc, "OrderLineNumber"))[mask]
+    so = so_all[mask]
+    line = line_all[mask]
     delivery_raw = _col_np(detail_cc, "DeliveryDate")[mask]
     delivery = _to_np_date_days(delivery_raw)
     qty = qty_all[mask]
     net_price = _as_np_f64(_col_np(detail_cc, "NetPrice"))[mask]
     is_delayed = _as_np_i32(_col_np(detail_cc, "IsOrderDelayed"))[mask]
+    friction = friction_all[mask] if friction_all is not None else None
 
     m = int(qty.size)
     if m == 0:
@@ -388,6 +410,11 @@ def build_sales_returns_from_detail(
     # shape (uniform/triangular/normal) + peak come from models.yaml ->
     # returns.lag_days.{distribution,mode}.
     per_line_lag = _draw_base_lag(rng, m, lo, hi, cfg.lag_distribution, cfg.lag_mode)
+    # Phase 3.4: shorten the lag for high-friction (late-delivered) lines so they
+    # are returned sooner. Deterministic scale, no extra RNG draw.
+    if cfg.friction_lag_shorten > 0.0 and friction is not None:
+        _scale = 1.0 - cfg.friction_lag_shorten * friction
+        per_line_lag = np.clip(np.rint(per_line_lag * _scale), lo, hi).astype(np.int32)
     base_lag = np.repeat(per_line_lag, num_events)
 
     # For split events (seq > 1), add cumulative incremental gaps

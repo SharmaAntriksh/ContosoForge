@@ -141,6 +141,24 @@ models:
 
 
   # ================================================================
+  # FULFILLMENT FRICTION — delivery timing ↔ returns (Phase 3.4)
+  # ================================================================
+  # One per-line friction latent (hash-seeded on OrderNumber+OrderLineNumber)
+  # drives delivery bucketing AND return behavior, so late deliveries yield
+  # more / faster returns.
+  fulfillment:
+    enabled: true
+    p_early: 0.10               # share delivered early
+    p_delayed: 0.20             # share delivered late (on-time = remainder)
+    delay_distribution: triangular   # uniform | triangular
+    delay_min: 1
+    delay_max: 10
+    delay_mode: 3               # peak days for triangular delay magnitude
+    return_prob_boost: 1.0      # p_return = base * (1 + boost * friction)
+    return_lag_shorten: 0.5     # lag *= (1 - shorten * friction)
+
+
+  # ================================================================
   # RETURNS
   # ================================================================
   returns:

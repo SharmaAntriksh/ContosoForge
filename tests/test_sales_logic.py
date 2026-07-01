@@ -35,6 +35,7 @@ from src.facts.sales.sales_logic.core.delivery import (
     _yyyymmdd_from_days,
     compute_dates,
     fmt,
+    line_friction,
 )
 from src.facts.sales.sales_logic.core.allocation import (
     _remove_rows_stochastic,
@@ -532,6 +533,70 @@ class TestComputeDates:
         dates = np.array(["2023-03-15"] * n, dtype="datetime64[D]")
         result = compute_dates(rng, n, pk, oids, dates)
         assert result["is_order_delayed"].dtype == bool
+
+
+class TestLineFriction:
+    """Phase 3.4: the shared per-line fulfillment friction latent."""
+
+    def test_deterministic_and_in_range(self):
+        o = np.arange(1, 5000, dtype=np.int64)
+        ln = np.ones(o.size, dtype=np.int32)
+        f1 = line_friction(o, ln)
+        f2 = line_friction(o, ln)
+        np.testing.assert_array_equal(f1, f2)  # pure function of the keys
+        assert f1.min() >= 0.0 and f1.max() < 1.0
+        # roughly uniform
+        assert 0.4 < float(f1.mean()) < 0.6
+
+    def test_line_number_varies_friction(self):
+        # Same order, different line numbers -> different friction.
+        o = np.full(500, 42, dtype=np.int64)
+        f_l1 = line_friction(o, np.ones(500, dtype=np.int32))
+        f_l2 = line_friction(o, np.full(500, 2, dtype=np.int32))
+        assert not np.allclose(f_l1, f_l2)
+
+
+class TestFrictionDelivery:
+    """Phase 3.4: friction-driven delivery bucketing hits the configured shares."""
+
+    def _cfg(self, **over):
+        base = dict(enabled=True, p_early=0.10, p_delayed=0.25,
+                    delay_distribution="triangular", delay_min=1, delay_max=10,
+                    delay_mode=3, return_prob_boost=1.0, return_lag_shorten=0.5)
+        base.update(over)
+        return base
+
+    def test_delivery_status_shares_match_config(self):
+        n = 40_000
+        rng = _rng()
+        pk = np.ones(n, dtype=np.int32)
+        oids = np.arange(1, n + 1, dtype=np.int64)  # one line per order
+        line = np.ones(n, dtype=np.int32)
+        dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
+        res = compute_dates(
+            rng, n, pk, oids, dates,
+            line_numbers=line, fulfillment_cfg=self._cfg(p_early=0.10, p_delayed=0.25),
+        )
+        status = res["delivery_status"]
+        delayed_share = float((status == "Delayed").mean())
+        early_share = float((status == "Early Delivery").mean())
+        assert abs(delayed_share - 0.25) < 0.02, f"delayed={delayed_share:.3f}"
+        assert abs(early_share - 0.10) < 0.02, f"early={early_share:.3f}"
+
+    def test_disabled_uses_legacy_ladder(self):
+        # Without fulfillment_cfg, the (rng-driven) legacy path is used, so the
+        # result differs from the deterministic friction path for the same input.
+        n = 2000
+        pk = np.ones(n, dtype=np.int32)
+        oids = np.arange(1, n + 1, dtype=np.int64)
+        line = np.ones(n, dtype=np.int32)
+        dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
+        legacy = compute_dates(_rng(), n, pk, oids, dates)
+        friction = compute_dates(
+            _rng(), n, pk, oids, dates,
+            line_numbers=line, fulfillment_cfg=self._cfg(),
+        )
+        assert not np.array_equal(legacy["delivery_status"], friction["delivery_status"])
 
 
 # ===================================================================

@@ -1374,6 +1374,11 @@ def build_chunk_table(
     promo_keys_all = State.promo_keys_all
     promo_start_all = State.promo_start_all
     promo_salience_all = getattr(State, "promo_salience_all", None)
+    # Phase 3.4: fulfillment-friction config (drives delivery bucketing here and
+    # return prob/lag in the separate returns pass). Pydantic model or None; both
+    # compute_dates and the returns builder read it via .get().
+    _mdl_cfg = getattr(State, "models_cfg", None)
+    fulfillment_cfg = _mdl_cfg.get("fulfillment", None) if _mdl_cfg is not None else None
     promo_end_all = State.promo_end_all
 
     nc_promo_keys = State.new_customer_promo_keys
@@ -1809,6 +1814,8 @@ def build_chunk_table(
             channel_fulfillment_days=_ch_fulfill,
             unique_orders=_uniq_for_dates,
             inv_idx=_inv_for_dates,
+            line_numbers=line_num,
+            fulfillment_cfg=fulfillment_cfg,
         )
         
         # --------------------------------------------------------
