@@ -50,7 +50,6 @@ from src.facts.sales.sales_logic.core.customer_sampling import (
     _hash_uniform_positions,
     _normalize_end_month,
     _normalize_weights,
-    _sample_customers,
     _urgency_pick,
     assign_orders_to_customers,
     build_month_customer_pool,
@@ -868,59 +867,8 @@ class TestHashUniform:
         assert abs(float(u1.mean()) - 0.5) < 0.05
 
 
-class TestSampleCustomers:
-    def test_returns_correct_length(self):
-        keys = np.arange(1, 11, dtype=np.int32)
-        eligible = np.ones(10, dtype=bool)
-        result = _sample_customers(
-            _rng(), keys, eligible, None, 20, use_discovery=False,
-        )
-        assert result.shape == (20,)
-
-    def test_zero_n(self):
-        keys = np.arange(1, 6, dtype=np.int32)
-        eligible = np.ones(5, dtype=bool)
-        result = _sample_customers(
-            _rng(), keys, eligible, None, 0, use_discovery=False,
-        )
-        assert result.shape == (0,)
-
-    def test_no_eligible_returns_empty(self):
-        keys = np.arange(1, 6, dtype=np.int32)
-        eligible = np.zeros(5, dtype=bool)
-        result = _sample_customers(
-            _rng(), keys, eligible, None, 10, use_discovery=False,
-        )
-        assert result.shape == (0,)
-
-    def test_discovery_forces_debut_cohort(self):
-        # discovery_month is pool-aligned; customers scheduled to debut in the
-        # current month must appear, and not-yet-introduced ones must not.
-        keys = np.arange(1, 21, dtype=np.int32)
-        eligible = np.ones(20, dtype=bool)
-        discovery_month = np.full(20, 5, dtype=np.int64)   # everyone future by default
-        discovery_month[:3] = 0        # customers 1,2,3 introduced earlier
-        discovery_month[3:6] = 2       # customers 4,5,6 debut this month
-        result = _sample_customers(
-            _rng(), keys, eligible, discovery_month, 50, use_discovery=True,
-            m_offset=2,
-        )
-        got = set(int(x) for x in result)
-        assert {4, 5, 6} <= got                       # debut cohort forced in
-        assert got <= {1, 2, 3, 4, 5, 6}              # future customers excluded
-
-    def test_target_distinct_limits_unique(self):
-        keys = np.arange(1, 101, dtype=np.int32)
-        eligible = np.ones(100, dtype=bool)
-        result = _sample_customers(
-            _rng(), keys, eligible, None, 50, use_discovery=False,
-            target_distinct=5,
-        )
-        assert len(np.unique(result)) <= 5
-
-
 # ===================================================================
-# Phase 2 — global per-month plan (plan globally, shard the index space)
+# Global per-month plan (plan globally, shard the index space)
 # ===================================================================
 
 class TestChunkMonthBand:
