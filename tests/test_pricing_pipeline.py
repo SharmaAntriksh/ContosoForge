@@ -17,6 +17,7 @@ from src.facts.sales.sales_models.pricing_pipeline import (
     _reset_caches,
     _safe_prob,
     _snap_discount,
+    build_prices,
 )
 from src.exceptions import SalesError
 from src.facts.sales.sales_logic.globals import State
@@ -395,3 +396,107 @@ class TestSnapDiscount:
         assert np.all(snapped <= safe + 1e-9)
         # thin-margin row (ceiling 0.19 < step 1.0) collapses to 0 discount
         assert snapped[2] == 0.0
+
+
+# ===================================================================
+# Phase 3.5 — markdown ↔ PromotionKey reconciliation
+# ===================================================================
+
+class TestPromotionReconciliation:
+    """A discount is a consequence of a promotion: with reconciliation on, a
+    "no promotion" row (PromotionKey == no_discount_key) never carries a markdown,
+    and every promoted row draws from the *nonzero* ladder (so it does). With it
+    off, the legacy independent markdown lottery is unchanged."""
+
+    NO_DISCOUNT_KEY = 1
+
+    def setup_method(self):
+        State.reset()
+        _reset_caches()
+
+    def teardown_method(self):
+        State.reset()
+        _reset_caches()
+
+    def _bind_state(self, *, reconcile: bool):
+        # Plain-dict models_cfg (build_prices reads via .get); appearance off so
+        # a nonzero drawn discount is not snapped away, inflation off (factor 1).
+        State.models_cfg = {
+            "pricing": {
+                "inflation": {
+                    "annual_rate": 0.0,
+                    "month_volatility_sigma": 0.0,
+                    "apply_with_scd2": True,
+                },
+                "appearance": {"enabled": False},
+                "markdown": {
+                    "enabled": True,
+                    "max_pct_of_price": 0.50,
+                    "min_net_price": 0.01,
+                    "allow_negative_margin": False,
+                    "reconcile_promotions": reconcile,
+                    "ladder": [
+                        {"kind": "none", "value": 0.0, "weight": 0.5},
+                        {"kind": "pct", "value": 0.20, "weight": 0.5},
+                    ],
+                },
+            }
+        }
+        State.product_scd2_active = False
+        State.date_pool = np.array(["2022-01-01"], dtype="datetime64[D]")
+
+    def _price_dict(self, n, up=100.0, uc=40.0):
+        up_arr = np.full(n, up, dtype=np.float64)
+        uc_arr = np.full(n, uc, dtype=np.float64)
+        return {
+            "final_unit_price": up_arr,
+            "final_unit_cost": uc_arr,
+            "discount_amt": np.zeros(n, dtype=np.float64),
+            "final_net_price": up_arr.copy(),
+        }
+
+    def _run(self, *, reconcile, promo_keys, n=None):
+        self._bind_state(reconcile=reconcile)
+        n = int(n if n is not None else len(promo_keys))
+        order_dates = np.full(n, np.datetime64("2022-06-15"), dtype="datetime64[D]")
+        rng = np.random.default_rng(20260701)
+        price = build_prices(
+            rng, order_dates, np.ones(n, dtype=np.int64), self._price_dict(n),
+            promo_keys=promo_keys, no_discount_key=self.NO_DISCOUNT_KEY,
+        )
+        return price["discount_amt"], price["final_net_price"]
+
+    def test_reconcile_forward_and_converse(self):
+        # Alternating no-promo / promo rows.
+        n = 400
+        promo_keys = np.where(np.arange(n) % 2 == 0, self.NO_DISCOUNT_KEY, 5).astype(np.int32)
+        disc, net = self._run(reconcile=True, promo_keys=promo_keys)
+
+        no_promo = promo_keys == self.NO_DISCOUNT_KEY
+        promo = ~no_promo
+
+        # Forward: no promotion -> exactly zero discount.
+        assert np.all(disc[no_promo] == 0.0)
+        # Converse: promoted lines all carry a real discount (nonzero ladder is
+        # only pct=0.20, so up*0.20 = 20.0 on a $100 line, appearance off).
+        assert np.all(disc[promo] > 0.0)
+        np.testing.assert_allclose(disc[promo], 20.0)
+        # NetPrice stays consistent with the reconciled discount.
+        np.testing.assert_allclose(net, np.round(100.0 - disc, 2))
+
+    def test_reconcile_off_is_promo_independent(self):
+        # Legacy behavior: markdown is drawn independently of PromotionKey, so
+        # some no-promotion rows still receive a discount (the pre-3.5 bug).
+        n = 400
+        promo_keys = np.full(n, self.NO_DISCOUNT_KEY, dtype=np.int32)
+        disc, _ = self._run(reconcile=False, promo_keys=promo_keys)
+        assert (disc > 0.0).any()
+
+    def test_promo_keys_none_uses_legacy_path(self):
+        # No promo_keys supplied (unit-test / non-pipeline callers) -> legacy
+        # lottery even when reconcile defaults on.
+        n = 400
+        disc, _ = self._run(reconcile=True, promo_keys=None, n=n)
+        # Full ladder includes nonzero entries, so some rows get a discount
+        # regardless of any (absent) promotion assignment.
+        assert (disc > 0.0).any()

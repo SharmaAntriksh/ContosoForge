@@ -162,10 +162,16 @@ def _load_markdown_cfg():
 
     Returns
     -------
-    tuple: (enabled, kind_codes, values, probs, max_pct, min_net, allow_neg)
+    tuple: (enabled, kind_codes, values, probs, max_pct, min_net, allow_neg,
+            reconcile, nz_kind_codes, nz_values, nz_probs)
       kind_codes : int8 array (0=none, 1=pct, 2=amt)
       values     : float64 array (pct in [0,1], amt >= 0)
       probs      : float64 array (normalized weights)
+      reconcile  : bool — gate the markdown draw on PromotionKey (Phase 3.5)
+      nz_*       : the ladder restricted to the nonzero kinds (pct/amt) with
+                   probs renormalized, or (None, None, None) when the ladder has
+                   no nonzero entry. Used by the reconcile path so a promoted
+                   line always draws a real (nonzero) discount.
     """
     global _MD_CFG_VERSION, _MD_CFG_CACHE
 
@@ -188,6 +194,7 @@ def _load_markdown_cfg():
         min_net = 0.01
 
     allow_neg = bool(md.get("allow_negative_margin", False))
+    reconcile = bool(md.get("reconcile_promotions", True))
 
     # Parse full ladder: kind/value/weight triples
     ladder = md.get("ladder", []) or []
@@ -231,14 +238,36 @@ def _load_markdown_cfg():
     s = float(probs.sum())
     probs = probs / s if s > 0 else np.ones(1, dtype=np.float64)
 
+    kind_codes_arr = np.asarray(kind_codes, dtype=np.int8)
+    values_arr = np.asarray(values, dtype=np.float64)
+
+    # Nonzero (pct/amt) subset of the ladder for the reconcile path, so a
+    # promoted line always draws a real discount. Renormalize the weights.
+    nz_mask = kind_codes_arr != 0
+    if nz_mask.any():
+        nz_probs = probs[nz_mask]
+        nz_sum = float(nz_probs.sum())
+        nz_probs = nz_probs / nz_sum if nz_sum > 0 else None
+        if nz_probs is None:
+            nz_kind_codes = nz_values = None
+        else:
+            nz_kind_codes = kind_codes_arr[nz_mask]
+            nz_values = values_arr[nz_mask]
+    else:
+        nz_kind_codes = nz_values = nz_probs = None
+
     result = (
         enabled,
-        np.asarray(kind_codes, dtype=np.int8),
-        np.asarray(values, dtype=np.float64),
+        kind_codes_arr,
+        values_arr,
         probs,
         max_pct,
         min_net,
         allow_neg,
+        reconcile,
+        nz_kind_codes,
+        nz_values,
+        nz_probs,
     )
     _MD_CFG_VERSION = version
     _MD_CFG_CACHE = result
@@ -527,7 +556,7 @@ def _global_start_month_int() -> int:
 # Public API
 # ===============================================================
 
-def build_prices(rng, order_dates, qty, price):
+def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_key=1):
     """
     Single-pass sales pricing pipeline.
 
@@ -546,6 +575,15 @@ def build_prices(rng, order_dates, qty, price):
     qty : array-like of int (reserved for future basket-size pricing)
     price : dict with keys:
         final_unit_price, final_unit_cost, discount_amt, final_net_price
+    promo_keys : array-like of int or None
+        The per-row assigned PromotionKey. When supplied and
+        ``models.pricing.markdown.reconcile_promotions`` is on (Phase 3.5), the
+        markdown is reconciled with the promotion: only promoted lines
+        (``PromotionKey != no_discount_key``) receive a discount, drawn from the
+        nonzero ladder. When None (e.g. unit tests), the legacy independent
+        markdown lottery is used.
+    no_discount_key : int
+        The "no promotion" sentinel PromotionKey (default 1).
 
     Returns
     -------
@@ -605,11 +643,29 @@ def build_prices(rng, order_dates, qty, price):
 
     # ---- 4. Draw markdown discount from ladder ----
     (md_enabled, kind_codes, values, probs,
-     max_pct, min_net, allow_neg) = _load_markdown_cfg()
+     max_pct, min_net, allow_neg,
+     reconcile, nz_kind_codes, nz_values, nz_probs) = _load_markdown_cfg()
 
     disc = np.zeros(n, dtype=np.float64)
 
-    if md_enabled and kind_codes.size > 0:
+    # Phase 3.5: when reconciling, a discount is a consequence of a promotion —
+    # only promoted lines draw one, and they draw from the *nonzero* ladder so a
+    # promoted line always carries a real markdown while a "no promotion" line
+    # never does. Consumes the same one rng.choice(size=n) as the legacy path,
+    # so the RNG stream position afterward is unchanged.
+    _reconcile = (
+        reconcile and md_enabled and promo_keys is not None
+        and nz_kind_codes is not None and nz_kind_codes.size > 0
+    )
+    if _reconcile:
+        promo_mask = np.asarray(promo_keys, dtype=np.int64) != int(no_discount_key)
+        idx = rng.choice(nz_kind_codes.size, size=n, replace=True, p=nz_probs)
+        kc = nz_kind_codes[idx]
+        v = nz_values[idx]
+        disc = np.where(kc == 1, up * v, disc)   # pct of snapped price
+        disc = np.where(kc == 2, v,      disc)   # flat amt
+        disc = np.where(promo_mask, disc, 0.0)   # no promotion -> no discount
+    elif md_enabled and kind_codes.size > 0:
         idx = rng.choice(kind_codes.size, size=n, replace=True, p=probs)
         kc = kind_codes[idx]
         v = values[idx]

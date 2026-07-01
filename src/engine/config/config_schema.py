@@ -885,6 +885,13 @@ class MarkdownConfig(_Base):
     min_net_price: float = 0.01
     allow_negative_margin: bool = False
     ladder: List[MarkdownLadderEntry] = []
+    # Phase 3.5: reconcile the per-row DiscountAmount with the assigned
+    # PromotionKey. When True (default), a discount is a consequence of a
+    # promotion — only promoted lines (PromotionKey != no_discount_key) carry a
+    # discount and each draws from the *nonzero* ladder, so a "no promotion" row
+    # never shows a markdown and vice versa. When False, the legacy independent
+    # markdown lottery is used (discount unrelated to PromotionKey).
+    reconcile_promotions: bool = True
 
 
 class PriceBandEntry(_Base):

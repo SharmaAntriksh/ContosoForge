@@ -1931,6 +1931,8 @@ def build_chunk_table(
             order_dates=order_dates,
             qty=qty,
             price=price,
+            promo_keys=promo_keys,
+            no_discount_key=no_discount_key,
         )
 
         # --------------------------------------------------------

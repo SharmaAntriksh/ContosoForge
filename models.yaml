@@ -63,6 +63,8 @@ models:
       max_pct_of_price: 0.40
       min_net_price: 0.01
       allow_negative_margin: false
+      reconcile_promotions: true    # discounts only on promoted lines (Phase 3.5);
+                                    # false = legacy independent markdown lottery
 
       ladder:
         - { kind: none, value: 0.0,   weight: 0.55 }
