@@ -155,6 +155,45 @@ class TestRepair:
                 assert ed[i] < sd[i + 1], f"employee {ek} double-booked by repair"
 
 
+    def test_repair_is_deterministic_and_order_independent(self):
+        # Principled repair must produce identical output regardless of the order
+        # gap_cells arrive in (the core #39 determinism guarantee).
+        import random
+
+        b = _bridge([("2020-06-01", "2021-02-28"), ("2021-05-01", "2021-12-31")])
+        rep_a = analyze_coverage(_stores(), b, *WIN, ROLES)
+        repaired_a, n_a = repair_bridge(b, rep_a, ROLES)
+
+        rep_b = analyze_coverage(_stores(), b, *WIN, ROLES)
+        random.Random(20260701).shuffle(rep_b.gap_cells)
+        repaired_b, n_b = repair_bridge(b, rep_b, ROLES)
+
+        assert n_a == n_b > 0
+        cols = ["EmployeeKey", "StoreKey", "StartDate", "EndDate", "TransferReason"]
+        a = repaired_a.sort_values(["EmployeeKey", "StartDate"]).reset_index(drop=True)[cols]
+        c = repaired_b.sort_values(["EmployeeKey", "StartDate"]).reset_index(drop=True)[cols]
+        pd.testing.assert_frame_equal(a, c)
+
+    def test_repair_tags_synthetic_extensions(self):
+        # Extended assignments are stamped 'Coverage Gap Repair'; untouched rows
+        # keep their original reason.
+        b = _bridge([("2020-06-01", "2021-02-28"), ("2021-05-01", "2021-12-31")])
+        rep = analyze_coverage(_stores(), b, *WIN, ROLES)
+        repaired, n = repair_bridge(b, rep, ROLES)
+        assert n > 0
+        reasons = set(repaired["TransferReason"])
+        assert "Coverage Gap Repair" in reasons
+        # One assignment may absorb several adjacent gap-months, so distinct
+        # tagged rows are >= 1 and <= the number of gap store-months closed.
+        assert 1 <= (repaired["TransferReason"] == "Coverage Gap Repair").sum() <= n
+        # A clean bridge is returned untouched (no tag, original object).
+        clean = _bridge([("2020-06-01", "2021-12-31")])
+        clean_rep = analyze_coverage(_stores(), clean, *WIN, ROLES)
+        out, n0 = repair_bridge(clean, clean_rep, ROLES)
+        assert n0 == 0
+        assert "Coverage Gap Repair" not in set(out["TransferReason"])
+
+
 class TestPolicies:
     def _cfg(self, policy):
         return SimpleNamespace(

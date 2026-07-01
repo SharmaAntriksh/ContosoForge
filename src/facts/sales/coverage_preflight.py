@@ -19,6 +19,7 @@ that would otherwise trip the unstaffed-store fallback and produce ``-1``.
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -29,6 +30,11 @@ import pandas as pd
 from src.defaults import ONLINE_STORE_KEY_BASE, ONLINE_SALES_REP_ROLE
 from src.exceptions import SalesError
 from src.utils.logging_utils import info, warn
+
+# TransferReason value stamped on assignments the repair policy synthetically
+# extends, so a repaired bridge is auditable (which rows are original vs filled).
+# TransferReason is a free VARCHAR(50) with no CHECK/enum, so a new value is safe.
+_COVERAGE_REPAIR_REASON = "Coverage Gap Repair"
 
 
 @dataclass
@@ -258,6 +264,15 @@ def repair_bridge(
     per-employee temporal-exclusivity invariant. If no store salesperson is free
     across the gap, it is left unrepaired (those orders are dropped downstream;
     still no ``-1``). Boundary gaps (store opens/closes mid-month) are skipped.
+
+    The repair is a **principled deterministic greedy**, invariant to the order
+    ``report.gap_cells`` arrives in: gap store-months are processed
+    longest-run-first (the store with the most uncovered months claims shared
+    reps first), and for each gap the candidate is ranked by fewest days added,
+    then least-loaded employee (spreads synthetic work), then ``EmployeeKey`` and
+    row index (stable). Every extended assignment is tagged
+    ``TransferReason = "Coverage Gap Repair"`` so the synthetic fills are
+    auditable in the packaged bridge.
     """
     roles = set(salesperson_roles)
     df = bridge_df.copy()
@@ -282,35 +297,60 @@ def repair_bridge(
                 return True
         return False
 
-    n_changes = 0
-    for store, _m, fd, ld, fully_open in report.gap_cells:
-        if not fully_open:
-            continue
+    def _span_days(r: int) -> int:
+        return int((end[r] - start[r]).astype("timedelta64[D]").astype(np.int64)) + 1
+
+    # Current assigned days per employee — the load we balance synthetic work against.
+    emp_load: dict[int, int] = {
+        e: sum(_span_days(r) for r in ris) for e, ris in emp_rows.items()
+    }
+
+    # Deterministic processing order, independent of how gap_cells were built:
+    # most gap-heavy store first (longest uncovered run gets first claim on a
+    # shared rep), then store key, then month.
+    fully_open_cells = [c for c in report.gap_cells if c[4]]
+    store_gap_count = Counter(int(c[0]) for c in fully_open_cells)
+    ordered = sorted(
+        fully_open_cells,
+        key=lambda c: (-store_gap_count[int(c[0])], int(c[0]), pd.Timestamp(c[1])),
+    )
+
+    repaired_rows: List[int] = []
+    for store, _m, fd, ld, _fo in ordered:
         fd_ts = np.datetime64(fd).astype("datetime64[ns]")
         ld_ts = np.datetime64(ld).astype("datetime64[ns]")
         rows = np.where(is_sp & (sk == store))[0]
         if rows.size == 0:
             continue  # store has no salesperson ever — not bridge-repairable
-        # try candidates nearest-first; use the first whose extension stays clean
-        dist = np.minimum(
-            np.abs((start[rows] - ld_ts).astype("timedelta64[D]").astype(np.int64)),
-            np.abs((end[rows] - fd_ts).astype("timedelta64[D]").astype(np.int64)),
-        )
-        for r in rows[np.argsort(dist, kind="stable")]:
+        # Rank candidates deterministically: fewest days added, then least-loaded
+        # employee (balance), then EmployeeKey, then row index.
+        cand = []
+        for r in rows:
             r = int(r)
             ns = min(start[r], fd_ts)
             ne = max(end[r], ld_ts)
-            if ns == start[r] and ne == end[r]:
-                break  # already spans the month (not actually a gap for this emp)
-            if _overlaps_other(int(emp[r]), r, ns, ne):
+            days_added = int(((start[r] - ns) + (ne - end[r])).astype("timedelta64[D]").astype(np.int64))
+            cand.append((days_added, emp_load[int(emp[r])], int(emp[r]), r, ns, ne))
+        cand.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
+        for days_added, _load, e_key, r, ns, ne in cand:
+            if days_added == 0:
+                break  # a candidate already spans the month (not actually a gap)
+            if _overlaps_other(e_key, r, ns, ne):
                 continue  # would double-book this employee; try the next candidate
             start[r] = ns
             end[r] = ne
-            n_changes += 1
+            emp_load[e_key] += days_added
+            repaired_rows.append(r)
             break
 
-    if n_changes == 0:
+    if not repaired_rows:
         return bridge_df, 0
+
+    # Tag the synthetically-extended rows so the fills are auditable downstream.
+    reason = df["TransferReason"].to_numpy(dtype=object).copy()
+    for r in repaired_rows:
+        reason[r] = _COVERAGE_REPAIR_REASON
+    df["TransferReason"] = reason
 
     df["StartDate"] = pd.to_datetime(start).normalize()
     df["EndDate"] = pd.to_datetime(end).normalize()
@@ -318,7 +358,7 @@ def repair_bridge(
     df = df.sort_values(["EmployeeKey", "StartDate"]).reset_index(drop=True)
     df["AssignmentKey"] = np.arange(1, len(df) + 1, dtype=np.int32)
     df["AssignmentSequence"] = (df.groupby("EmployeeKey").cumcount() + 1).astype(np.int32)
-    return df, n_changes
+    return df, len(repaired_rows)
 
 
 def resolve_salesperson_roles(cfg) -> List[str]:
@@ -396,7 +436,7 @@ def run_coverage_preflight(cfg, parquet_dims: Path, global_start, global_end) ->
                                                       "RenovationStartDate", "RenovationEndDate"]),
                 repaired, global_start, global_end, roles,
             )
-            info(f"Coverage pre-flight (repair): extended {n} assignment(s); "
+            info(f"Coverage pre-flight (repair): closed {n} gap store-month(s); "
                  f"remaining avoidable gaps: {recheck.n_fully_open_gaps}.")
             if recheck.has_avoidable_loss:
                 warn("Coverage pre-flight (repair): some gaps remain (stores with no "
