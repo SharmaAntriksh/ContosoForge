@@ -276,7 +276,7 @@ def _normalize_prob(p: np.ndarray) -> np.ndarray | None:
 
 def _get_brand_probs(m_offset: int, B: int) -> np.ndarray | None:
     """Return normalized brand probability vector for month *m_offset*, or None."""
-    bp = _get_state_attr("brand_prob_by_month", default=None)
+    bp = getattr(State, "brand_prob_by_month", None)
     if bp is not None:
         bp = np.asarray(bp, dtype="float64")
         cand = bp[int(m_offset) % bp.shape[0]] if bp.ndim > 1 else bp
@@ -446,7 +446,7 @@ def _sample_products_per_store(
     brand_probs = None
     B = 0
     if use_brand_popularity:
-        brand_to_rows = _get_state_attr("brand_to_row_idx", default=None)
+        brand_to_rows = getattr(State, "brand_to_row_idx", None)
         if brand_to_rows is not None and len(brand_to_rows) > 0:
             B = len(brand_to_rows)
             brand_probs = _get_brand_probs(m_offset, B)
@@ -551,7 +551,7 @@ def _sample_brand_aware(
         merged_pool, merged_cdf = _cdf_cache[merged_key]
     else:
         # Build combined weight: brand_prob[brand] * product_weight[product]
-        product_brand_key = _get_state_attr("product_brand_key", default=None)
+        product_brand_key = getattr(State, "product_brand_key", None)
         w = np.ones(len(pool), dtype=np.float64)
         if product_weight is not None:
             w *= product_weight[pool]
@@ -574,14 +574,6 @@ def _sample_brand_aware(
         out[orig_idx] = pool[rng.integers(0, len(pool), size=count)]
 
 
-def _get_state_attr(*names, default=None):
-    """Return the first non-None attribute from State among names."""
-    for n in names:
-        if hasattr(State, n):
-            v = getattr(State, n)
-            if v is not None:
-                return v
-    return default
 
 
 # Seasonality boost: which calendar months each profile peaks in
@@ -1324,13 +1316,13 @@ def build_chunk_table(
     )
 
     # Customer dimension arrays (new contract)
-    customer_keys = _get_state_attr("customer_keys", "customers")
+    customer_keys = getattr(State, "customer_keys", None)
     if customer_keys is None:
         raise SalesError("State must provide customer_keys/customers")
     customer_keys = np.asarray(customer_keys, dtype=np.int32)
 
     # is_active_in_sales (new contract)
-    is_active_in_sales = _get_state_attr("customer_is_active_in_sales", "is_active_in_sales")
+    is_active_in_sales = getattr(State, "customer_is_active_in_sales", None)
     if is_active_in_sales is None:
         # backward compat: if State.active_customer_keys exists, treat those as active
         active_keys = getattr(State, "active_customer_keys", None)
@@ -1345,17 +1337,17 @@ def build_chunk_table(
     else:
         is_active_in_sales = np.asarray(is_active_in_sales, dtype=np.int32)
 
-    start_month = _get_state_attr("customer_start_month")
+    start_month = getattr(State, "customer_start_month", None)
     if start_month is None:
         # If not yet wired, fall back: everyone starts at 0 (old behavior)
         start_month = np.zeros(customer_keys.shape[0], dtype="int64")
     else:
         start_month = np.asarray(start_month, dtype="int64")
 
-    end_month = _get_state_attr("customer_end_month")
+    end_month = getattr(State, "customer_end_month", None)
     end_month_norm = _normalize_end_month(end_month, customer_keys.shape[0])
 
-    base_weight = _get_state_attr("customer_base_weight")
+    base_weight = getattr(State, "customer_base_weight", None)
     if base_weight is not None:
         base_weight = np.asarray(base_weight, dtype="float64")
 
@@ -1448,9 +1440,9 @@ def build_chunk_table(
     # build_rows_per_month + inline distinct target that made both chunk-size
     # dependent are gone.
     # ------------------------------------------------------------
-    rows_per_month = _get_state_attr("sales_rows_per_month")
-    orders_per_month = _get_state_attr("sales_orders_per_month")
-    distinct_target_by_month = _get_state_attr("sales_distinct_target")
+    rows_per_month = getattr(State, "sales_rows_per_month", None)
+    orders_per_month = getattr(State, "sales_orders_per_month", None)
+    distinct_target_by_month = getattr(State, "sales_distinct_target", None)
     plan_seed = int(getattr(State, "sales_plan_seed", None) or 0)
     total_chunks = int(getattr(State, "total_chunks", None) or 1)
     if rows_per_month is None or orders_per_month is None:
@@ -1485,7 +1477,7 @@ def build_chunk_table(
     # Closed-form discovery schedule: pool-aligned month each customer first
     # enters sales, static and broadcast read-only (Finding #5/#6).
     if use_discovery:
-        discovery_month = _get_state_attr("customer_discovery_month")
+        discovery_month = getattr(State, "customer_discovery_month", None)
     else:
         discovery_month = None
 
