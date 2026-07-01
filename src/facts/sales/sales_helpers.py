@@ -69,6 +69,26 @@ def _apply_cfg_default(current: Any, default: Any, cfg_value: Any) -> Any:
     return cfg_value if current == default else current
 
 
+def _normalize_seasonal_spikes(spikes: Any) -> dict:
+    """Collapse a seasonal-spikes config into a ``{month: boost}`` map.
+
+    The config can carry two shapes: a list of plain dicts (the fallback defaults
+    or unresolved raw config) or a list of ``SeasonalSpikeConfig`` models (after
+    trend-preset resolution). Both are ``Mapping`` — ``_Base`` is registered as one
+    — so a single ``.get()`` reads either shape without an ``isinstance(dict)``
+    fork. Entries missing month/boost, or with a month outside 1..12, are dropped,
+    matching the historical inline loop exactly (the ``getattr`` branch is a
+    preserved no-op guard for any non-``Mapping`` entry, which real inputs never are).
+    """
+    out: dict = {}
+    for entry in spikes or ():
+        mo = entry.get("month") if isinstance(entry, Mapping) else getattr(entry, "month", None)
+        bo = entry.get("boost") if isinstance(entry, Mapping) else getattr(entry, "boost", None)
+        if mo is not None and bo is not None and 1 <= int(mo) <= 12:
+            out[int(mo)] = float(bo)
+    return out
+
+
 def _normalize_dt_any(x) -> Union[pd.Series, pd.DatetimeIndex]:
     """
     Normalize date-like inputs to midnight.

@@ -37,6 +37,7 @@ from .output_paths import (
 from .sales_helpers import (
     _apply_cfg_default,
     _cfg_get,
+    _normalize_seasonal_spikes,
 )
 
 from .memory_model import (
@@ -676,12 +677,7 @@ def generate_sales_fact(
     _spikes_raw = _cust_dmd.get("seasonal_spikes", None)
     if _spikes_raw is None:
         _spikes_raw = _DEFAULT_SEASONAL_SPIKES
-    _seasonal_spike_map: dict = {}
-    for _entry in _spikes_raw:
-        _mo = _entry.get("month") if isinstance(_entry, dict) else getattr(_entry, "month", None)
-        _bo = _entry.get("boost") if isinstance(_entry, dict) else getattr(_entry, "boost", None)
-        if _mo is not None and _bo is not None and 1 <= int(_mo) <= 12:
-            _seasonal_spike_map[int(_mo)] = float(_bo)
+    _seasonal_spike_map = _normalize_seasonal_spikes(_spikes_raw)
     _max_distinct_ratio_g = _float_or(_macro_cfg_plan.get("max_distinct_ratio"), 0.70)
     _min_distinct_customers_g = _int_or(_macro_cfg_plan.get("min_distinct_customers"), 250)
 
