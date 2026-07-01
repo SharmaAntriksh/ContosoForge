@@ -855,12 +855,36 @@ class MacroDemandConfig(_Base):
 
 # -- Quantity --
 
+class QuantityElasticityConfig(_Base):
+    """Make purchase quantity depend on product price and a
+    per-product unit propensity, so cheap staples sell in higher quantities than
+    expensive durables (instead of a product-agnostic Poisson).
+
+    Pure per-line arithmetic applied to the float quantity before the final
+    round/clamp — no RNG, so it does not perturb determinism.
+    """
+    enabled: bool = True
+    # ε in the price term qty *= (price / reference_price) ** (-ε). Larger ε =
+    # stronger price sensitivity. 0 disables the price term.
+    price_elasticity: float = 0.5
+    # Reference price the elasticity is measured against. None = the median
+    # catalog ListPrice (auto, computed once per run from the product pool).
+    reference_price: Optional[float] = None
+    # Clamp the multiplicative price factor so extreme prices don't blow up qty.
+    factor_clip: List[float] = [0.4, 2.5]
+    # γ in the propensity term qty *= (PopularityScore / 50) ** γ. Popular
+    # products (staples) sell in larger baskets. 0 disables the propensity term.
+    propensity_strength: float = 0.4
+    propensity_clip: List[float] = [0.6, 1.6]
+
+
 class QuantityModelConfig(_Base):
     base_poisson_lambda: float = 1.7
     min_qty: int = 1
     max_qty: int = 8
     monthly_factors: List[float] = [1.0] * 12
     noise_sigma: float = 0.12
+    elasticity: QuantityElasticityConfig = QuantityElasticityConfig()
 
 
 # -- Pricing --
@@ -885,6 +909,13 @@ class MarkdownConfig(_Base):
     min_net_price: float = 0.01
     allow_negative_margin: bool = False
     ladder: List[MarkdownLadderEntry] = []
+    # Reconcile the per-row DiscountAmount with the assigned
+    # PromotionKey. When True (default), a discount is a consequence of a
+    # promotion — only promoted lines (PromotionKey != no_discount_key) carry a
+    # discount and each draws from the *nonzero* ladder, so a "no promotion" row
+    # never shows a markdown and vice versa. When False, the legacy independent
+    # markdown lottery is used (discount unrelated to PromotionKey).
+    reconcile_promotions: bool = True
 
 
 class PriceBandEntry(_Base):
@@ -910,6 +941,12 @@ class DiscountAppearanceConfig(_Base):
 
 class AppearanceConfig(_Base):
     enabled: bool = True
+    # Snap the posted UnitPrice/UnitCost deterministically per
+    # (ProductID, month) — the stochastic round + ending are hash-seeded on
+    # (product, month) instead of the per-row chunk RNG, so every sales line for
+    # the same product-month carries the same posted price (per-line variation
+    # lives only in DiscountAmount). False = legacy per-row stochastic snap.
+    deterministic: bool = True
     unit_price: PriceAppearanceUnitConfig = PriceAppearanceUnitConfig()
     unit_cost: PriceAppearanceUnitConfig = PriceAppearanceUnitConfig()
     discount: DiscountAppearanceConfig = DiscountAppearanceConfig()
@@ -963,6 +1000,11 @@ class ReturnQuantityConfig(_Base):
     full_line_probability: float = 0.85
     split_return_rate: float = 0.0
     max_splits: int = 3
+    # When true, a multi-event return's per-event ReturnNetPrice is apportioned in
+    # integer cents (largest-remainder) so the events sum EXACTLY to the line's
+    # single-event equivalent instead of drifting by per-event rounding. Default
+    # off: reproduces the historical per-event rounding byte-for-byte.
+    reconcile_cents: bool = False
 
 
 class ReturnsModelsConfig(_Base):
@@ -1008,6 +1050,10 @@ class CustomersDemandConfig(_Base):
     max_new_fraction_per_month: float = 0.015
     cycle_amplitude: float = 0.35
     discovery_shape: float = 0.0
+    # Mean forward lag (in months) between a customer becoming eligible and
+    # first transacting, in the closed-form discovery schedule. 0 = customers
+    # debut the month they become eligible; larger spreads discovery later.
+    discovery_lag_scale: float = 1.0
     participation_noise: float = 0.10
     seasonal_spikes: Optional[List[SeasonalSpikeConfig]] = None
 
@@ -1016,12 +1062,84 @@ class CustomersDemandConfig(_Base):
 # models.yaml — root model
 # =========================================================================
 
+class PromoSalienceConfig(_Base):
+    """Weight promotion selection by salience, so deeper / more
+    prominent promotions are redeemed more often than shallow ones (instead of a
+    uniform draw among the promotions active on a given date/channel).
+
+    salience = exp(beta * DiscountPct) * type_weights[PromotionType].
+    """
+    enabled: bool = True
+    # Exponent on DiscountPct (a fraction in [0,1)). Larger = redemption skews
+    # harder toward deep discounts. 0 => discount-flat (type weights only).
+    beta: float = 3.0
+    # Optional per-PromotionType multiplier (e.g. {"Flash Sale": 1.5}); an
+    # unlisted type defaults to 1.0.
+    type_weights: Dict[str, float] = Field(default_factory=dict)
+    # Clamp the deepest/shallowest salience spread so a deep promo can't fully
+    # starve shallow ones (the shallowest keeps >= 1/max_weight_ratio share).
+    max_weight_ratio: float = 12.0
+
+
+class FulfillmentConfig(_Base):
+    """A shared per-line fulfillment-friction latent (hash-seeded on
+    OrderNumber+OrderLineNumber) drives delivery timing AND return behavior, so
+    late deliveries yield more / faster returns.
+
+    Delivery: friction buckets a line into early / on-time / delayed via
+    (p_early, p_delayed) with an explicit named delay-magnitude distribution,
+    replacing the opaque mod-100 ladder. Returns (recomputing the same friction):
+    higher friction => higher return probability and shorter return lag.
+    """
+    enabled: bool = True
+    p_early: float = 0.10       # share of lines delivered early
+    p_delayed: float = 0.20     # share of lines delivered late (p_ontime = 1 - both)
+    delay_distribution: Literal["uniform", "triangular"] = "triangular"
+    delay_min: int = 1
+    delay_max: int = 10
+    delay_mode: int = 3         # peak (days) for the triangular delay magnitude
+    # Return coupling: p_return_i = base_rate * (1 + return_prob_boost * friction_i);
+    # lag_i *= (1 - return_lag_shorten * friction_i).
+    return_prob_boost: float = 1.0
+    return_lag_shorten: float = 0.5
+
+    @model_validator(mode="after")
+    def _validate_shares(self) -> "FulfillmentConfig":
+        pe = max(0.0, float(self.p_early))
+        pd = max(0.0, float(self.p_delayed))
+        if pe + pd > 1.0:
+            raise ValueError(
+                f"models.fulfillment: p_early + p_delayed must be <= 1.0 "
+                f"(got {pe} + {pd} = {pe + pd})"
+            )
+        return self
+
+
+class BasketConfig(_Base):
+    """Order-level basket-theme correlation. Each order is assigned a
+    hash-seeded "theme" (a group of product subcategories); a share of its lines
+    are biased toward that theme's subcategories, so a multi-line order holds
+    complementary items and market-basket mining recovers real association rules
+    instead of only marginal frequencies.
+
+    Hash-seeded on OrderNumber+OrderLineNumber (never the chunk RNG), so it only
+    changes *which* product a line carries — chunk/worker deterministic, no
+    effect on row counts or customer assignment.
+    """
+    enabled: bool = True
+    num_themes: int = Field(default=6, ge=2)   # subcategory groups
+    strength: float = 0.5                       # share of off-theme lines redirected
+
+
 class ModelsInnerConfig(_Base):
     """The ``models`` section inside models.yaml."""
     macro_demand: MacroDemandConfig = MacroDemandConfig()
     quantity: QuantityModelConfig = QuantityModelConfig()
     pricing: PricingModelsConfig = PricingModelsConfig()
     brand_popularity: BrandPopularityConfig = BrandPopularityConfig()
+    promotions: PromoSalienceConfig = PromoSalienceConfig()
+    basket: BasketConfig = BasketConfig()
+    fulfillment: FulfillmentConfig = FulfillmentConfig()
     returns: ReturnsModelsConfig = ReturnsModelsConfig()
     # Injected at runtime by resolve_trend_preset
     customers: Optional[CustomersDemandConfig] = None

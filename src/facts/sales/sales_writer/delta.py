@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional, Sequence, Union
+from typing import Callable, Iterable, List, Optional, Sequence, TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 from .utils import _arrow, info, warn
 from .encoding import _validate_required
@@ -259,6 +262,10 @@ def write_delta_from_parquet_parts(
     partition_cols: Optional[Sequence[str]] = None,
     parts: Optional[Iterable[Union[str, dict]]] = None,
     table_name: Optional[str] = None,
+    # Authoritative schema. When supplied (the pipeline passes the run's
+    # WorkerSchemaBundle schema for this table), it is the write contract; the
+    # first part file is only *read* as a fallback for untrusted external inputs.
+    canonical_schema: "Optional[pa.Schema]" = None,
     # Policy knobs
     validate_schema: Optional[ValidateSchemaFn] = None,
     on_missing_partition_cols: str = "drop",  # "drop" | "error"
@@ -280,7 +287,10 @@ def write_delta_from_parquet_parts(
             f"No delta part files found in folder: {parts_folder_abs or '(no folder specified)'}"
         )
 
-    canonical_schema = pq.read_schema(part_files[0])
+    # Prefer the caller's authoritative schema; only sniff the first part file
+    # when none was supplied (which risks adopting an atypical part's schema).
+    if canonical_schema is None:
+        canonical_schema = pq.read_schema(part_files[0])
 
     if validate_schema is not None:
         validate_schema(canonical_schema, table_name=table_name)
@@ -325,6 +335,7 @@ def write_delta_partitioned(
     sort_small_parts: bool = True,
     sort_row_limit: int = DEFAULT_SORT_ROW_LIMIT,
     table_name: str | None = None,
+    canonical_schema: "Optional[pa.Schema]" = None,
 ):
     """Write Parquet part files to a partitioned Delta Lake table.
 
@@ -352,6 +363,9 @@ def write_delta_partitioned(
         Row count threshold for sorting (default ``DEFAULT_SORT_ROW_LIMIT``).
     table_name : str | None
         Logical table name for validation and logging.
+    canonical_schema : pa.Schema | None
+        Authoritative write schema for the table (the run's WorkerSchemaBundle
+        schema).  When ``None``, the schema is read from the first part file.
     """
     on_missing = "error" if table_name is None else "drop"
 
@@ -361,6 +375,7 @@ def write_delta_partitioned(
         partition_cols=partition_cols,
         parts=parts,
         table_name=table_name,
+        canonical_schema=canonical_schema,
         validate_schema=_validate_required,
         on_missing_partition_cols=on_missing,
         sort_small_parts=sort_small_parts,

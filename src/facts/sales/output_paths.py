@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional
 
 from src.exceptions import SalesError
@@ -28,13 +29,6 @@ class TableSpec:
     # For delta: where _tmp_parts lives (subdir under delta_output_folder)
     # IMPORTANT: for Sales we keep this empty to preserve existing output layout.
     delta_subdir: str         # "" means root delta_output_folder
-
-def _norm(p: Optional[str]) -> Optional[str]:
-    if p is None:
-        return None
-    p = str(p)
-    return os.path.normpath(p)
-
 
 def _is_abs(p: str) -> bool:
     return os.path.isabs(p)
@@ -213,18 +207,27 @@ class OutputPaths:
 
 
 def build_output_paths_from_sales_cfg(sales_cfg) -> OutputPaths:
+    """Single owner of the Sales output-path defaulting: resolve the delta folder
+    (default ``<out_folder>/delta``) and abspath it, exactly as
+    ``generate_sales_fact`` used to do inline. ``sales_cfg`` is any object exposing
+    ``file_format`` / ``out_folder`` / ``merged_file`` / ``delta_output_folder``.
+    """
     file_format = str(getattr(sales_cfg, "file_format", "parquet")).lower()
-    out_folder = _norm(getattr(sales_cfg, "out_folder", "")) or ""
+    out_folder_p = Path(str(getattr(sales_cfg, "out_folder", "") or ""))
     merged_file = getattr(sales_cfg, "merged_file", None)
-    delta_output_folder = _norm(getattr(sales_cfg, "delta_output_folder", None))
+    delta_output_folder = getattr(sales_cfg, "delta_output_folder", None)
 
-    # IMPORTANT: match sales.py defaulting behavior
-    if file_format == "deltaparquet" and not delta_output_folder:
-        delta_output_folder = os.path.normpath(os.path.join(out_folder, "delta"))
+    # Resolve delta folder early (so OutputPaths is built with final values).
+    if file_format == "deltaparquet":
+        if delta_output_folder is None:
+            delta_output_folder = str(out_folder_p / "delta")
+        delta_output_folder = os.path.abspath(str(delta_output_folder))
+    else:
+        delta_output_folder = None
 
     return OutputPaths(
         file_format=file_format,
-        out_folder=out_folder,
-        merged_file=merged_file,
+        out_folder=str(out_folder_p),
+        merged_file=str(merged_file),
         delta_output_folder=delta_output_folder,
     )

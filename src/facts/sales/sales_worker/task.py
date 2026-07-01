@@ -106,9 +106,20 @@ def normalize_tasks(args: TaskArgs) -> Tuple[List[Task], bool]:
     return list(args), False
 
 
-def derive_chunk_seed(seed: Any, idx: int, *, stride: int = 10_000) -> int:
+def derive_chunk_seed(seed: Any, idx: int) -> int:
+    """Deterministic per-chunk RNG seed as a pure function of (run_seed, idx).
+
+    Uses the repo's house pattern ``SeedSequence(run_seed).spawn(n)[idx]`` — the
+    same independent-substream derivation the customer/wishlist/complaint workers
+    use. ``spawn(idx + 1)[idx]`` yields the identical child SeedSequence as
+    ``spawn(n_chunks)[idx]`` (spawn keys are assigned 0..n-1 from a fresh
+    SeedSequence), so a single chunk can be regenerated in isolation without
+    materializing the whole per-chunk seed array, and output is independent of
+    worker count / chunk dispatch order.
+    """
     base_seed = int_or(seed, 0)
-    return base_seed + idx * stride
+    child = np.random.SeedSequence(base_seed).spawn(int(idx) + 1)[int(idx)]
+    return int(child.generate_state(1, dtype=np.uint32)[0])
 
 
 def write_table_by_format(
@@ -265,6 +276,13 @@ def _build_returns_config() -> Optional[ReturnsConfig]:
         return None
     if TABLE_SALES_RETURN is None:
         raise RuntimeError("returns_enabled=True but TABLE_SALES_RETURN is not defined in output_paths.py")
+    # Fulfillment-friction coupling params (read from
+    # models.fulfillment; 0.0 when the feature is off => legacy returns behavior).
+    _mdl = getattr(State, "models_cfg", None)
+    _ff = _mdl.get("fulfillment", None) if _mdl is not None else None
+    _ff_on = bool(_ff.get("enabled", False)) if _ff is not None else False
+    _friction_boost = float(_ff.get("return_prob_boost", 0.0)) if _ff_on else 0.0
+    _friction_shorten = float(_ff.get("return_lag_shorten", 0.0)) if _ff_on else 0.0
     return ReturnsConfig(
         enabled=True,
         return_rate=float(getattr(State, "returns_rate", 0.0) or 0.0),
@@ -275,12 +293,15 @@ def _build_returns_config() -> Optional[ReturnsConfig]:
         full_line_probability=float(getattr(State, "returns_full_line_probability", 0.85)),
         split_return_rate=float(getattr(State, "returns_split_return_rate", 0.0)),
         max_splits=int(getattr(State, "returns_max_splits", 3)),
+        reconcile_cents=bool(getattr(State, "returns_reconcile_cents", False)),
         split_min_gap=int(getattr(State, "returns_split_min_gap", 3)),
         split_max_gap=int(getattr(State, "returns_split_max_gap", 20)),
         lag_distribution=str(getattr(State, "returns_lag_distribution", "uniform") or "uniform"),
         lag_mode=int(getattr(State, "returns_lag_mode", 7)),
         event_key_offset=0,
         logistics_keys=frozenset(getattr(State, "returns_logistics_keys", ())),
+        friction_return_boost=_friction_boost,
+        friction_lag_shorten=_friction_shorten,
     )
 
 
@@ -585,8 +606,8 @@ def _worker_task(args):
     tasks, single = normalize_tasks(args)
     results = []
 
-    # State.validate(["chunk_size"]) is now called once in init_sales_worker
-    # instead of per-task, eliminating ~100-1000 redundant validation calls.
+    # The chunk_size presence check runs once in init_sales_worker instead of
+    # per-task, eliminating ~100-1000 redundant checks.
 
     # --- Hoist loop-invariant reads from State ---
     validate_header = bool(getattr(State, "validate_header_invariants", False))
@@ -629,7 +650,7 @@ def _worker_task(args):
                 "chunk_size must be the constant order-id stride and >= the maximum batch size."
             )
 
-        chunk_seed = derive_chunk_seed(seed, idx_i, stride=10_000)
+        chunk_seed = derive_chunk_seed(seed, idx_i)
 
         # Per-chunk returns config with unique event_key_offset
         if returns_cfg_base is not None:

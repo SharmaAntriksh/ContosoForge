@@ -19,6 +19,7 @@ that would otherwise trip the unstaffed-store fallback and produce ``-1``.
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -29,6 +30,11 @@ import pandas as pd
 from src.defaults import ONLINE_STORE_KEY_BASE, ONLINE_SALES_REP_ROLE
 from src.exceptions import SalesError
 from src.utils.logging_utils import info, warn
+
+# TransferReason value stamped on assignments the repair policy synthetically
+# extends, so a repaired bridge is auditable (which rows are original vs filled).
+# TransferReason is a free VARCHAR(50) with no CHECK/enum, so a new value is safe.
+_COVERAGE_REPAIR_REASON = "Coverage Gap Repair"
 
 
 @dataclass
@@ -45,6 +51,7 @@ class CoverageReport:
     uncovered_months: List[pd.Timestamp] = field(default_factory=list)  # whole month would be dropped
     n_months: int = 0
     n_stores: int = 0
+    interior_hole_gaps: int = 0  # gaps found only by interval-union (mid-month holes)
 
     @property
     def n_gap_cells(self) -> int:
@@ -59,6 +66,41 @@ class CoverageReport:
     @property
     def has_avoidable_loss(self) -> bool:
         return self.n_fully_open_gaps > 0
+
+
+_ONE_DAY = np.timedelta64(1, "D")
+
+
+def _uncovered_days_in_span(intervals, fd, ld) -> int:
+    """Days in ``[fd, ld]`` (inclusive) NOT covered by the UNION of *intervals*.
+
+    ``intervals`` is a list of ``(start, end)`` ``datetime64[D]`` pairs (inclusive).
+    The first/last-day coverage test can mark a store-month "covered" when one
+    assignment spans the first day and a *different* one spans the last day, even
+    if the middle of the month has no salesperson — and those interior days emit
+    ``EmployeeKey = -1`` (dropped) downstream. This detects that hole by unioning
+    the clipped intervals and counting the days left over.
+    """
+    total = int((ld - fd) / _ONE_DAY) + 1
+    clipped = []
+    for s, e in intervals:
+        a = s if s > fd else fd
+        b = e if e < ld else ld
+        if a <= b:
+            clipped.append((a, b))
+    if not clipped:
+        return total
+    clipped.sort()
+    covered = 0
+    cur_s, cur_e = clipped[0]
+    for a, b in clipped[1:]:
+        if a > cur_e + _ONE_DAY:            # a genuine gap between intervals
+            covered += int((cur_e - cur_s) / _ONE_DAY) + 1
+            cur_s, cur_e = a, b
+        elif b > cur_e:                      # overlap/adjacency: extend the run
+            cur_e = b
+    covered += int((cur_e - cur_s) / _ONE_DAY) + 1
+    return total - covered
 
 
 def analyze_coverage(
@@ -105,6 +147,12 @@ def analyze_coverage(
         sp_start = sp_end = np.array([], dtype="datetime64[D]")
         sp_local = np.array([], dtype=np.int64)
 
+    # Group salesperson intervals by store-local index so interval-union can find
+    # interior mid-month coverage holes the first/last-day test cannot see.
+    store_intervals: dict[int, list] = {}
+    for li, s, e in zip(sp_local.tolist(), sp_start, sp_end):
+        store_intervals.setdefault(int(li), []).append((s, e))
+
     months = pd.date_range(global_start, global_end, freq="MS")
     gs = np.datetime64(pd.Timestamp(global_start).normalize(), "D")
     gd = np.datetime64(pd.Timestamp(global_end).normalize(), "D")
@@ -133,13 +181,23 @@ def analyze_coverage(
                 np.logical_or.at(cov_last, sp_local[cle], True)
         covered = cov_first & cov_last
 
+        fully_open_all = (op <= fd) & (isnat_cl | (cl > ld))
         gap = eligible & ~covered
         if gap.any():
-            fully_open_all = (op <= fd) & (isnat_cl | (cl > ld))
             for i in np.where(gap)[0]:
                 rep.gap_cells.append(
                     (int(sk_arr[i]), pd.Timestamp(m), fd, ld, bool(fully_open_all[i]))
                 )
+        # Interval-union: a store can pass the first/last-day test yet have an
+        # interior hole (rep A covers the 1st, rep B the last day, nobody the
+        # middle). Those days would drop to EmployeeKey=-1, so count them too.
+        # Disjoint from `gap` above (`covered` here means first+last both staffed).
+        for i in np.where(eligible & covered)[0]:
+            if _uncovered_days_in_span(store_intervals.get(int(i), ()), fd, ld) > 0:
+                rep.gap_cells.append(
+                    (int(sk_arr[i]), pd.Timestamp(m), fd, ld, bool(fully_open_all[i]))
+                )
+                rep.interior_hole_gaps += 1
         open_here = int(eligible.sum())
         staffed_here = int((eligible & covered).sum())
         # A month where every open store lacks coverage would lose all its sales.
@@ -182,6 +240,9 @@ def format_diagnostic(report: CoverageReport, cfg) -> str:
         f"  ({report.n_stores} stores, {report.n_months} months)",
         "  Suggested fixes:",
     ]
+    if report.interior_hole_gaps:
+        lines.insert(3, f"  ({report.interior_hole_gaps} are mid-month coverage holes — "
+                        "staffed on the 1st/last day but not throughout the month)")
     lines += [f"    - {t}" for t in suggest_adjustments(report, cfg)]
     lines.append("  Or set sales.coverage_policy: skip (accept the missing sales) or "
                  "repair (auto-extend assignments to fill the gaps).")
@@ -203,6 +264,15 @@ def repair_bridge(
     per-employee temporal-exclusivity invariant. If no store salesperson is free
     across the gap, it is left unrepaired (those orders are dropped downstream;
     still no ``-1``). Boundary gaps (store opens/closes mid-month) are skipped.
+
+    The repair is a **principled deterministic greedy**, invariant to the order
+    ``report.gap_cells`` arrives in: gap store-months are processed
+    longest-run-first (the store with the most uncovered months claims shared
+    reps first), and for each gap the candidate is ranked by fewest days added,
+    then least-loaded employee (spreads synthetic work), then ``EmployeeKey`` and
+    row index (stable). Every extended assignment is tagged
+    ``TransferReason = "Coverage Gap Repair"`` so the synthetic fills are
+    auditable in the packaged bridge.
     """
     roles = set(salesperson_roles)
     df = bridge_df.copy()
@@ -227,35 +297,60 @@ def repair_bridge(
                 return True
         return False
 
-    n_changes = 0
-    for store, _m, fd, ld, fully_open in report.gap_cells:
-        if not fully_open:
-            continue
+    def _span_days(r: int) -> int:
+        return int((end[r] - start[r]).astype("timedelta64[D]").astype(np.int64)) + 1
+
+    # Current assigned days per employee — the load we balance synthetic work against.
+    emp_load: dict[int, int] = {
+        e: sum(_span_days(r) for r in ris) for e, ris in emp_rows.items()
+    }
+
+    # Deterministic processing order, independent of how gap_cells were built:
+    # most gap-heavy store first (longest uncovered run gets first claim on a
+    # shared rep), then store key, then month.
+    fully_open_cells = [c for c in report.gap_cells if c[4]]
+    store_gap_count = Counter(int(c[0]) for c in fully_open_cells)
+    ordered = sorted(
+        fully_open_cells,
+        key=lambda c: (-store_gap_count[int(c[0])], int(c[0]), pd.Timestamp(c[1])),
+    )
+
+    repaired_rows: List[int] = []
+    for store, _m, fd, ld, _fo in ordered:
         fd_ts = np.datetime64(fd).astype("datetime64[ns]")
         ld_ts = np.datetime64(ld).astype("datetime64[ns]")
         rows = np.where(is_sp & (sk == store))[0]
         if rows.size == 0:
             continue  # store has no salesperson ever — not bridge-repairable
-        # try candidates nearest-first; use the first whose extension stays clean
-        dist = np.minimum(
-            np.abs((start[rows] - ld_ts).astype("timedelta64[D]").astype(np.int64)),
-            np.abs((end[rows] - fd_ts).astype("timedelta64[D]").astype(np.int64)),
-        )
-        for r in rows[np.argsort(dist, kind="stable")]:
+        # Rank candidates deterministically: fewest days added, then least-loaded
+        # employee (balance), then EmployeeKey, then row index.
+        cand = []
+        for r in rows:
             r = int(r)
             ns = min(start[r], fd_ts)
             ne = max(end[r], ld_ts)
-            if ns == start[r] and ne == end[r]:
-                break  # already spans the month (not actually a gap for this emp)
-            if _overlaps_other(int(emp[r]), r, ns, ne):
+            days_added = int(((start[r] - ns) + (ne - end[r])).astype("timedelta64[D]").astype(np.int64))
+            cand.append((days_added, emp_load[int(emp[r])], int(emp[r]), r, ns, ne))
+        cand.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
+        for days_added, _load, e_key, r, ns, ne in cand:
+            if days_added == 0:
+                break  # a candidate already spans the month (not actually a gap)
+            if _overlaps_other(e_key, r, ns, ne):
                 continue  # would double-book this employee; try the next candidate
             start[r] = ns
             end[r] = ne
-            n_changes += 1
+            emp_load[e_key] += days_added
+            repaired_rows.append(r)
             break
 
-    if n_changes == 0:
+    if not repaired_rows:
         return bridge_df, 0
+
+    # Tag the synthetically-extended rows so the fills are auditable downstream.
+    reason = df["TransferReason"].to_numpy(dtype=object).copy()
+    for r in repaired_rows:
+        reason[r] = _COVERAGE_REPAIR_REASON
+    df["TransferReason"] = reason
 
     df["StartDate"] = pd.to_datetime(start).normalize()
     df["EndDate"] = pd.to_datetime(end).normalize()
@@ -263,7 +358,7 @@ def repair_bridge(
     df = df.sort_values(["EmployeeKey", "StartDate"]).reset_index(drop=True)
     df["AssignmentKey"] = np.arange(1, len(df) + 1, dtype=np.int32)
     df["AssignmentSequence"] = (df.groupby("EmployeeKey").cumcount() + 1).astype(np.int32)
-    return df, n_changes
+    return df, len(repaired_rows)
 
 
 def resolve_salesperson_roles(cfg) -> List[str]:
@@ -341,7 +436,7 @@ def run_coverage_preflight(cfg, parquet_dims: Path, global_start, global_end) ->
                                                       "RenovationStartDate", "RenovationEndDate"]),
                 repaired, global_start, global_end, roles,
             )
-            info(f"Coverage pre-flight (repair): extended {n} assignment(s); "
+            info(f"Coverage pre-flight (repair): closed {n} gap store-month(s); "
                  f"remaining avoidable gaps: {recheck.n_fully_open_gaps}.")
             if recheck.has_avoidable_loss:
                 warn("Coverage pre-flight (repair): some gaps remain (stores with no "

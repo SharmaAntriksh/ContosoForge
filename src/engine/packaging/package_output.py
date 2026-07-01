@@ -23,12 +23,17 @@ from .sql_scripts import (
 )
 
 
-def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path):
+def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
+                   *, order_id_int64: bool | None = None):
     """
     Orchestrates packaging:
       - Creates final packaged folder (dims + config copied by output_utils)
       - Copies fact outputs (Sales / OrderHeader / OrderDetail)
       - Generates SQL scripts (CSV only)
+
+    ``order_id_int64`` is the authoritative OrderNumber-width decision from the
+    sales run manifest, threaded to the CREATE TABLE generator so the DDL's
+    INT/BIGINT choice matches the emitted parquet dtype.
     """
     file_format = str(sales_cfg.file_format).lower()
     is_csv = file_format == "csv"
@@ -198,7 +203,8 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path):
 
         # CREATE TABLE — emits one script set per registered dialect.
         # SQL Server lands at sql/; other dialects land at <run>/<dialect>/.
-        write_create_table_scripts(dims_out=dims_out, facts_out=facts_out, sql_root=sql_root, cfg=cfg)
+        write_create_table_scripts(dims_out=dims_out, facts_out=facts_out, sql_root=sql_root, cfg=cfg,
+                                   order_id_int64=order_id_int64)
 
         # The remaining scripts (constraints, views, verification, BULK INSERT,
         # columnstore helpers) are T-SQL only and always emit at sql/.

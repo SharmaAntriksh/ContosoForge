@@ -20,6 +20,9 @@ import pyarrow as pa
 import pytest
 
 from src.exceptions import SalesError
+from src.facts.sales.sales_worker.task import derive_chunk_seed
+from src.tools.sql.dialect import SqlType
+from src.utils.static_schemas import get_sales_schema, order_id_int64_for_rows
 from src.facts.sales.sales_logic.core.orders import (
     _reset_month_demand,
     _safe_normalized_prob,
@@ -32,6 +35,7 @@ from src.facts.sales.sales_logic.core.delivery import (
     _yyyymmdd_from_days,
     compute_dates,
     fmt,
+    line_friction,
 )
 from src.facts.sales.sales_logic.core.allocation import (
     _remove_rows_stochastic,
@@ -41,15 +45,21 @@ from src.facts.sales.sales_logic.core.allocation import (
     macro_month_weights,
 )
 from src.facts.sales.sales_logic.core.customer_sampling import (
-    _build_seen_mask,
     _eligible_customer_mask_for_month,
-    _make_seen_lookup,
+    _hash_uniform,
+    _hash_uniform_positions,
     _normalize_end_month,
     _normalize_weights,
-    _participation_distinct_target,
-    _sample_customers,
-    _update_seen_lookup,
     _urgency_pick,
+    assign_orders_to_customers,
+    build_month_customer_pool,
+    compute_discovery_months,
+    compute_month_distinct_targets,
+)
+from src.facts.sales.sales_logic.chunk_builder import (
+    _chunk_month_band,
+    _eligible_counts_fast,
+    _eligible_idx_by_month,
 )
 from src.facts.sales.sales_logic.globals import State
 from src.facts.budget.accumulator import BudgetAccumulator
@@ -409,6 +419,40 @@ class TestApplyPromotions:
         )
         assert promo_mod._warned_ch_len_mismatch is True
 
+    def test_salience_biases_selection(self):
+        """Phase 3.2: a high-salience active promo is redeemed far more often
+        than a low-salience one (vs ~50/50 under the uniform draw)."""
+        dates = np.array(["2023-01-15"] * 4000, dtype="datetime64[D]")
+        promo_keys = np.array([1, 10, 20], dtype=np.int32)  # 1 = no_discount_key
+        promo_start = np.array(["2023-01-01"] * 3, dtype="datetime64[D]")
+        promo_end = np.array(["2023-01-31"] * 3, dtype="datetime64[D]")
+        # promo 20 hugely more salient than promo 10 (index-aligned to promo_keys)
+        salience = np.array([1.0, 1.0, 20.0], dtype=np.float64)
+
+        result = apply_promotions(
+            _rng(), 4000, dates, promo_keys, promo_start, promo_end,
+            no_discount_key=1, promo_salience_all=salience,
+        )
+        n20 = int((result == 20).sum())
+        n10 = int((result == 10).sum())
+        assert n20 > n10 * 5, f"salience ignored: promo20={n20}, promo10={n10}"
+
+    def test_salience_none_is_uniform_control(self):
+        """Same two promos, no salience -> roughly balanced (uniform draw)."""
+        dates = np.array(["2023-01-15"] * 4000, dtype="datetime64[D]")
+        promo_keys = np.array([1, 10, 20], dtype=np.int32)
+        promo_start = np.array(["2023-01-01"] * 3, dtype="datetime64[D]")
+        promo_end = np.array(["2023-01-31"] * 3, dtype="datetime64[D]")
+
+        result = apply_promotions(
+            _rng(), 4000, dates, promo_keys, promo_start, promo_end,
+            no_discount_key=1, promo_salience_all=None,
+        )
+        n20 = int((result == 20).sum())
+        n10 = int((result == 10).sum())
+        # Uniform: neither should dominate by the 5x margin the salient case shows.
+        assert 0.5 < n20 / max(1, n10) < 2.0
+
 
 # ===================================================================
 # 4. Delivery
@@ -488,6 +532,70 @@ class TestComputeDates:
         dates = np.array(["2023-03-15"] * n, dtype="datetime64[D]")
         result = compute_dates(rng, n, pk, oids, dates)
         assert result["is_order_delayed"].dtype == bool
+
+
+class TestLineFriction:
+    """Phase 3.4: the shared per-line fulfillment friction latent."""
+
+    def test_deterministic_and_in_range(self):
+        o = np.arange(1, 5000, dtype=np.int64)
+        ln = np.ones(o.size, dtype=np.int32)
+        f1 = line_friction(o, ln)
+        f2 = line_friction(o, ln)
+        np.testing.assert_array_equal(f1, f2)  # pure function of the keys
+        assert f1.min() >= 0.0 and f1.max() < 1.0
+        # roughly uniform
+        assert 0.4 < float(f1.mean()) < 0.6
+
+    def test_line_number_varies_friction(self):
+        # Same order, different line numbers -> different friction.
+        o = np.full(500, 42, dtype=np.int64)
+        f_l1 = line_friction(o, np.ones(500, dtype=np.int32))
+        f_l2 = line_friction(o, np.full(500, 2, dtype=np.int32))
+        assert not np.allclose(f_l1, f_l2)
+
+
+class TestFrictionDelivery:
+    """Phase 3.4: friction-driven delivery bucketing hits the configured shares."""
+
+    def _cfg(self, **over):
+        base = dict(enabled=True, p_early=0.10, p_delayed=0.25,
+                    delay_distribution="triangular", delay_min=1, delay_max=10,
+                    delay_mode=3, return_prob_boost=1.0, return_lag_shorten=0.5)
+        base.update(over)
+        return base
+
+    def test_delivery_status_shares_match_config(self):
+        n = 40_000
+        rng = _rng()
+        pk = np.ones(n, dtype=np.int32)
+        oids = np.arange(1, n + 1, dtype=np.int64)  # one line per order
+        line = np.ones(n, dtype=np.int32)
+        dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
+        res = compute_dates(
+            rng, n, pk, oids, dates,
+            line_numbers=line, fulfillment_cfg=self._cfg(p_early=0.10, p_delayed=0.25),
+        )
+        status = res["delivery_status"]
+        delayed_share = float((status == "Delayed").mean())
+        early_share = float((status == "Early Delivery").mean())
+        assert abs(delayed_share - 0.25) < 0.02, f"delayed={delayed_share:.3f}"
+        assert abs(early_share - 0.10) < 0.02, f"early={early_share:.3f}"
+
+    def test_disabled_uses_legacy_ladder(self):
+        # Without fulfillment_cfg, the (rng-driven) legacy path is used, so the
+        # result differs from the deterministic friction path for the same input.
+        n = 2000
+        pk = np.ones(n, dtype=np.int32)
+        oids = np.arange(1, n + 1, dtype=np.int64)
+        line = np.ones(n, dtype=np.int32)
+        dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
+        legacy = compute_dates(_rng(), n, pk, oids, dates)
+        friction = compute_dates(
+            _rng(), n, pk, oids, dates,
+            line_numbers=line, fulfillment_cfg=self._cfg(),
+        )
+        assert not np.array_equal(legacy["delivery_status"], friction["delivery_status"])
 
 
 # ===================================================================
@@ -679,35 +787,6 @@ class TestEligibleCustomerMask:
         np.testing.assert_array_equal(mask, [False])
 
 
-class TestParticipationDistinctTarget:
-    def test_zero_eligible(self):
-        assert _participation_distinct_target(_rng(), 0, 0, 10, {}) == 0
-
-    def test_zero_orders(self):
-        assert _participation_distinct_target(_rng(), 0, 100, 0, {}) == 0
-
-    def test_basic_ratio(self):
-        k = _participation_distinct_target(
-            _rng(), 0, 100, 200,
-            {"base_distinct_ratio": 0.5},
-        )
-        assert 1 <= k <= 100
-
-    def test_capped_by_eligible(self):
-        k = _participation_distinct_target(
-            _rng(), 0, 10, 200,
-            {"base_distinct_ratio": 1.0},
-        )
-        assert k <= 10
-
-    def test_capped_by_n_orders(self):
-        k = _participation_distinct_target(
-            _rng(), 0, 100, 5,
-            {"base_distinct_ratio": 1.0},
-        )
-        assert k <= 5
-
-
 class TestNormalizeWeights:
     def test_normalizes(self):
         result = _normalize_weights(np.array([1.0, 3.0]))
@@ -723,87 +802,282 @@ class TestNormalizeWeights:
         assert abs(result.sum() - 1.0) < 1e-12
 
 
-class TestBuildSeenMask:
-    def test_empty_seen_all_false(self):
-        keys = np.array([1, 2, 3], dtype=np.int32)
-        mask = _build_seen_mask(keys, set())
-        np.testing.assert_array_equal(mask, [False, False, False])
-
-    def test_some_seen(self):
-        keys = np.array([1, 2, 3, 4], dtype=np.int32)
-        mask = _build_seen_mask(keys, {2, 4})
-        np.testing.assert_array_equal(mask, [False, True, False, True])
-
-    def test_numpy_lookup(self):
-        keys = np.array([1, 2, 3], dtype=np.int32)
-        lookup = np.array([False, True, False, True], dtype=bool)  # index 1=True, 3=True
-        mask = _build_seen_mask(keys, lookup)
-        np.testing.assert_array_equal(mask, [True, False, True])
-
-
-class TestMakeUpdateSeenLookup:
-    def test_create_and_update(self):
-        keys = np.array([1, 2, 5], dtype=np.int32)
-        lookup = _make_seen_lookup(keys)
-        assert lookup.shape == (6,)  # max key is 5
-        assert not lookup.any()
-
-        _update_seen_lookup(lookup, np.array([2, 5], dtype=np.int32))
-        assert lookup[2] is np.True_
-        assert lookup[5] is np.True_
-        assert not lookup[1]
-
-
-class TestSampleCustomers:
-    def test_returns_correct_length(self):
+class TestComputeDiscoveryMonths:
+    def test_anchored_and_within_window(self):
         keys = np.arange(1, 11, dtype=np.int32)
-        eligible = np.ones(10, dtype=bool)
-        result = _sample_customers(
-            _rng(), keys, eligible, set(), 20,
-            use_discovery=False, discovery_cfg={},
-        )
-        assert result.shape == (20,)
+        active = np.ones(10, dtype=np.int64)
+        start = np.array([0, 0, 1, 2, 3, 4, 5, 6, 7, 8], dtype=np.int64)
+        end = np.full(10, -1, dtype=np.int64)
+        disc = compute_discovery_months(keys, active, start, end, T=12,
+                                        run_seed=7, lag_scale=1.0)
+        # Never before eligibility, never past the last month, never the sentinel.
+        assert np.all(disc >= start)
+        assert np.all(disc <= 11)
+        assert not np.any(disc == 12)
 
-    def test_zero_n(self):
-        keys = np.arange(1, 6, dtype=np.int32)
-        eligible = np.ones(5, dtype=bool)
-        result = _sample_customers(
-            _rng(), keys, eligible, set(), 0,
-            use_discovery=False, discovery_cfg={},
-        )
-        assert result.shape == (0,)
+    def test_lag_zero_debuts_at_start(self):
+        keys = np.arange(1, 8, dtype=np.int32)
+        active = np.ones(7, dtype=np.int64)
+        start = np.array([0, 1, 2, 3, 4, 5, 6], dtype=np.int64)
+        end = np.full(7, -1, dtype=np.int64)
+        disc = compute_discovery_months(keys, active, start, end, T=12,
+                                        run_seed=7, lag_scale=0.0)
+        np.testing.assert_array_equal(disc, start)
 
-    def test_no_eligible_returns_empty(self):
-        keys = np.arange(1, 6, dtype=np.int32)
-        eligible = np.zeros(5, dtype=bool)
-        result = _sample_customers(
-            _rng(), keys, eligible, set(), 10,
-            use_discovery=False, discovery_cfg={},
-        )
-        assert result.shape == (0,)
+    def test_warm_start_debuts_month_zero(self):
+        keys = np.array([1, 2, 3], dtype=np.int32)
+        active = np.ones(3, dtype=np.int64)
+        start = np.array([-5, -1, 0], dtype=np.int64)   # pre-existing customers
+        end = np.full(3, -1, dtype=np.int64)
+        disc = compute_discovery_months(keys, active, start, end, T=12,
+                                        run_seed=7, lag_scale=2.0)
+        assert disc[0] == 0 and disc[1] == 0
 
-    def test_discovery_includes_new_customers(self):
-        keys = np.arange(1, 21, dtype=np.int32)
-        eligible = np.ones(20, dtype=bool)
-        seen = {1, 2, 3}
-        result = _sample_customers(
-            _rng(), keys, eligible, seen, 50,
-            use_discovery=True,
-            discovery_cfg={"_target_new_customers": 5, "stochastic_discovery": False},
-        )
-        # Should include some customers not in seen
-        new_customers = set(result) - seen
-        assert len(new_customers) > 0
+    def test_inactive_and_out_of_window_never(self):
+        keys = np.array([1, 2, 3], dtype=np.int32)
+        active = np.array([0, 1, 1], dtype=np.int64)     # #1 inactive
+        start = np.array([0, 15, 2], dtype=np.int64)      # #2 joins after T
+        end = np.full(3, -1, dtype=np.int64)
+        disc = compute_discovery_months(keys, active, start, end, T=12,
+                                        run_seed=7, lag_scale=1.0)
+        assert disc[0] == 12     # inactive → sentinel
+        assert disc[1] == 12     # start_month >= T → sentinel
+        assert disc[2] < 12
 
-    def test_target_distinct_limits_unique(self):
-        keys = np.arange(1, 101, dtype=np.int32)
-        eligible = np.ones(100, dtype=bool)
-        result = _sample_customers(
-            _rng(), keys, eligible, set(), 50,
-            use_discovery=False, discovery_cfg={},
-            target_distinct=5,
-        )
-        assert len(np.unique(result)) <= 5
+    def test_deterministic_and_seed_sensitive(self):
+        keys = np.arange(1, 200, dtype=np.int32)
+        active = np.ones(199, dtype=np.int64)
+        start = (keys % 10).astype(np.int64)
+        end = np.full(199, -1, dtype=np.int64)
+        a = compute_discovery_months(keys, active, start, end, T=24, run_seed=1)
+        b = compute_discovery_months(keys, active, start, end, T=24, run_seed=1)
+        c = compute_discovery_months(keys, active, start, end, T=24, run_seed=2)
+        np.testing.assert_array_equal(a, b)          # same seed → identical
+        assert not np.array_equal(a, c)              # different seed → reshuffled
+
+
+class TestHashUniform:
+    def test_range_and_determinism(self):
+        keys = np.arange(1, 1000, dtype=np.int64)
+        u1 = _hash_uniform(keys, 1234)
+        u2 = _hash_uniform(keys, 1234)
+        np.testing.assert_array_equal(u1, u2)
+        assert u1.min() >= 0.0 and u1.max() < 1.0
+        # Roughly uniform mean for a large sample.
+        assert abs(float(u1.mean()) - 0.5) < 0.05
+
+
+# ===================================================================
+# Global per-month plan (plan globally, shard the index space)
+# ===================================================================
+
+class TestChunkMonthBand:
+    """`_chunk_month_band` tiles the global order/line space exactly."""
+
+    def test_sums_exact_and_no_gaps_across_chunk_counts(self):
+        for C in (1, 2, 3, 5, 12, 37):
+            for R, O in [(1000, 556), (37, 21), (1, 1), (500, 1),
+                         (999, 999), (8, 7), (10000, 5000)]:
+                tot_o = tot_l = 0
+                prev = 0
+                for c in range(C):
+                    start, no, nl = _chunk_month_band(R, O, c, C)
+                    assert nl >= no >= 0            # >= 1 line per order
+                    if no > 0:
+                        assert start == prev       # contiguous, no gaps
+                    prev = start + no
+                    tot_o += no
+                    tot_l += nl
+                assert tot_o == O                  # orders tile [0, O)
+                assert tot_l == R                  # lines sum to total_rows
+
+    def test_degenerate_inputs(self):
+        assert _chunk_month_band(0, 0, 0, 4) == (0, 0, 0)
+        assert _chunk_month_band(100, 0, 0, 4) == (0, 0, 0)
+        assert _chunk_month_band(100, 50, 0, 0) == (0, 0, 0)
+
+
+class TestHashUniformPositions:
+    def test_range_determinism_and_position_sensitivity(self):
+        pos = np.arange(0, 500, dtype=np.int64)
+        a = _hash_uniform_positions(3, pos, 1234)
+        b = _hash_uniform_positions(3, pos, 1234)
+        np.testing.assert_array_equal(a, b)              # deterministic
+        assert a.min() >= 0.0 and a.max() < 1.0
+        # Different month or seed reshuffles.
+        assert not np.array_equal(a, _hash_uniform_positions(4, pos, 1234))
+        assert not np.array_equal(a, _hash_uniform_positions(3, pos, 9999))
+
+
+class TestAssignOrdersToCustomers:
+    """The core chunk-invariance property: distinct set == pool regardless of
+    how the month's order band is split into chunks."""
+
+    def _pool_cdf(self, n=20):
+        pool = np.arange(100, 100 + n, dtype=np.int32)
+        cdf = np.linspace(1.0 / n, 1.0, n)
+        cdf[-1] = 1.0
+        return pool, cdf
+
+    def test_distinct_prefix_is_the_pool(self):
+        pool, cdf = self._pool_cdf(20)
+        # The whole month (O=50 orders): first 20 order-indices are the pool.
+        full = assign_orders_to_customers(
+            m_offset=2, order_start=0, n_orders=50, pool=pool, cdf=cdf, seed=7)
+        assert set(full[:20].tolist()) == set(pool.tolist())
+        assert set(full.tolist()) == set(pool.tolist())   # repeats add nobody new
+
+    def test_split_union_equals_single_pass(self):
+        pool, cdf = self._pool_cdf(20)
+        O = 50
+        single = assign_orders_to_customers(
+            m_offset=2, order_start=0, n_orders=O, pool=pool, cdf=cdf, seed=7)
+        # Split [0, O) into arbitrary contiguous bands and concatenate.
+        for bounds in ([0, 7, 20, 33, 50], [0, 25, 50], [0, 1, 49, 50]):
+            parts = []
+            for a, b in zip(bounds[:-1], bounds[1:]):
+                parts.append(assign_orders_to_customers(
+                    m_offset=2, order_start=a, n_orders=b - a,
+                    pool=pool, cdf=cdf, seed=7))
+            merged = np.concatenate(parts)
+            # Same customer at every global index → identical array, and identical
+            # distinct set (the chunk-invariance guarantee).
+            np.testing.assert_array_equal(merged, single)
+            assert set(merged.tolist()) == set(pool.tolist())
+
+    def test_empty_pool_returns_empty(self):
+        out = assign_orders_to_customers(
+            m_offset=0, order_start=0, n_orders=10,
+            pool=np.empty(0, dtype=np.int32), cdf=np.empty(0), seed=1)
+        assert out.shape == (0,)
+
+
+class TestBuildMonthCustomerPool:
+    def _lifecycle(self, n=40):
+        keys = np.arange(1, n + 1, dtype=np.int32)
+        eligible_idx = np.arange(n)          # all eligible this month
+        end_norm = np.full(n, -1, dtype=np.int64)
+        return keys, eligible_idx, end_norm
+
+    def test_forces_debut_excludes_future_and_caps_at_target(self):
+        keys, eligible_idx, end_norm = self._lifecycle(40)
+        disc = np.full(40, 5, dtype=np.int64)   # most are future
+        disc[:5] = 1                            # 1..5 introduced earlier
+        disc[5:10] = 3                          # 6..10 debut this month (m=3)
+        pool, cdf = build_month_customer_pool(
+            m_offset=3, distinct_target=8, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=disc, base_weight=None,
+            end_month_norm=end_norm, seed=7)
+        s = set(int(x) for x in pool)
+        assert {6, 7, 8, 9, 10} <= s                    # debut cohort forced in
+        assert s <= set(range(1, 11))                   # no not-yet-introduced keys
+        assert pool.size <= 8                           # capped at distinct target
+        assert abs(float(cdf[-1]) - 1.0) < 1e-12
+
+    def test_deterministic_by_month_and_seed(self):
+        keys, eligible_idx, end_norm = self._lifecycle(40)
+        disc = np.zeros(40, dtype=np.int64)             # all introduced
+        a, _ = build_month_customer_pool(
+            m_offset=4, distinct_target=15, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=disc, base_weight=None,
+            end_month_norm=end_norm, seed=7)
+        b, _ = build_month_customer_pool(
+            m_offset=4, distinct_target=15, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=disc, base_weight=None,
+            end_month_norm=end_norm, seed=7)
+        c, _ = build_month_customer_pool(
+            m_offset=4, distinct_target=15, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=disc, base_weight=None,
+            end_month_norm=end_norm, seed=8)
+        np.testing.assert_array_equal(a, b)
+        assert not np.array_equal(a, c)
+
+    def test_discovery_off_draws_from_all_eligible(self):
+        keys, eligible_idx, end_norm = self._lifecycle(40)
+        pool, _ = build_month_customer_pool(
+            m_offset=0, distinct_target=10, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=None, base_weight=None,
+            end_month_norm=end_norm, seed=7)
+        assert pool.size == 10
+        assert len(set(pool.tolist())) == 10            # distinct
+
+
+class TestComputeMonthDistinctTargets:
+    def test_empty_horizon_returns_empty(self):
+        out = compute_month_distinct_targets(
+            seed=1, T=0, eligible_counts=np.zeros(0, dtype=np.int64),
+            orders_per_month=np.zeros(0, dtype=np.int64),
+            month_cal_index=np.zeros(0, dtype=np.int64),
+            distinct_ratio=0.55, cycle_amplitude=0.0, participation_noise=0.0,
+            seasonal_spike_map={}, max_distinct_ratio=0.7, min_distinct_customers=0)
+        assert out.shape == (0,)
+
+    def test_capped_by_orders_and_eligible(self):
+        # target never exceeds orders-per-month or eligible count.
+        out = compute_month_distinct_targets(
+            seed=1, T=4, eligible_counts=np.array([1000, 1000, 5, 1000]),
+            orders_per_month=np.array([3, 1000, 1000, 0]),
+            month_cal_index=np.array([1, 2, 3, 4]),
+            distinct_ratio=1.0, cycle_amplitude=0.0, participation_noise=0.0,
+            seasonal_spike_map={}, max_distinct_ratio=1.0, min_distinct_customers=0)
+        assert out[0] <= 3          # capped by orders
+        assert out[2] <= 5          # capped by eligible
+        assert out[3] == 0          # zero orders → zero
+
+    def test_deterministic_and_seed_sensitive(self):
+        kw = dict(T=12, eligible_counts=np.full(12, 500),
+                  orders_per_month=np.full(12, 300),
+                  month_cal_index=((np.arange(12)) % 12) + 1,
+                  distinct_ratio=0.55, cycle_amplitude=0.35,
+                  participation_noise=0.10,
+                  seasonal_spike_map={11: 0.4, 12: 0.25},
+                  max_distinct_ratio=0.7, min_distinct_customers=1)
+        a = compute_month_distinct_targets(seed=1, **kw)
+        b = compute_month_distinct_targets(seed=1, **kw)
+        c = compute_month_distinct_targets(seed=2, **kw)
+        np.testing.assert_array_equal(a, b)
+        assert not np.array_equal(a, c)
+        assert np.all(a <= 300)     # never exceeds orders
+
+    def test_nonpositive_ratio_is_max_diversity_not_zero(self):
+        # Regression: distinct_ratio <= 0 must mean "no throttle" (D = min(o, e)),
+        # NOT all-zeros — which would leave every month's pool empty and silently
+        # drop every sales row. Zero is allowed only where there are no orders.
+        for ratio in (0.0, -0.5):
+            out = compute_month_distinct_targets(
+                seed=3, T=4, eligible_counts=np.array([500, 500, 10, 500]),
+                orders_per_month=np.array([300, 300, 300, 0]),
+                month_cal_index=np.arange(1, 5), distinct_ratio=ratio,
+                cycle_amplitude=0.0, participation_noise=0.0,
+                seasonal_spike_map={}, max_distinct_ratio=0.7,
+                min_distinct_customers=250)
+            assert out.tolist() == [300, 300, 10, 0]   # min(orders, eligible); 0 iff orders==0
+
+
+class TestEligibleCountsConsistency:
+    """The coordinator's plan (``_eligible_counts_fast``) and the chunk's month
+    pool (``_eligible_idx_by_month``) MUST count the same eligible customers, or
+    the global distinct target is computed against a different base than the pool
+    is drawn from. They must agree even for warm-start (start_month < 0) and
+    out-of-window (start_month >= T) customers."""
+
+    def test_counts_match_index_sizes_with_warm_start_and_out_of_window(self):
+        from src.facts.sales.sales_logic.chunk_builder import reset_worker_cdf_cache
+        # _eligible_idx_by_month memoizes by T alone (arrays are worker-constant in
+        # prod); clear it so this test's ad-hoc arrays aren't served from a stale
+        # cache entry left by another test at the same T.
+        reset_worker_cdf_cache()
+        T = 12
+        rng = np.random.default_rng(0)
+        n = 3000
+        active = rng.integers(0, 2, size=n).astype(np.int32)
+        start = rng.integers(-5, T + 3, size=n).astype(np.int64)   # negatives + >= T
+        end = np.where(rng.random(n) < 0.3,
+                       rng.integers(0, T, size=n), -1).astype(np.int64)
+        counts = _eligible_counts_fast(T, active, start, end)
+        idx = _eligible_idx_by_month(T, active, start, end)
+        idx_sizes = np.array([a.size for a in idx], dtype=np.int64)
+        np.testing.assert_array_equal(counts, idx_sizes)
 
 
 # ===================================================================
@@ -1381,6 +1655,64 @@ class TestBuildWorkerSchemas:
         for tbl in ("OrderDetail", "OrderHeader", "Returns"):
             assert bundle.schema_by_table[tbl].field("OrderNumber").type == pa.int64()
         assert bundle.sales_schema_gen.field("OrderNumber").type == pa.int64()
+
+
+class TestDeriveChunkSeed:
+    """Phase 1.4 / Finding #33: the per-chunk RNG seed is a pure function of
+    (run_seed, chunk_idx) via the house SeedSequence pattern — independently
+    regenerable and independent of chunk dispatch order / worker count."""
+
+    def test_deterministic(self):
+        assert derive_chunk_seed(1234, 7) == derive_chunk_seed(1234, 7)
+
+    def test_distinct_per_chunk_and_seed(self):
+        per_chunk = [derive_chunk_seed(1234, i) for i in range(64)]
+        assert len(set(per_chunk)) == 64                      # no collisions across chunks
+        assert derive_chunk_seed(1234, 7) != derive_chunk_seed(5678, 7)  # seed matters
+
+    def test_regenerable_in_isolation(self):
+        # spawn(idx+1)[idx] (what derive_chunk_seed uses) must equal the canonical
+        # house pattern spawn(n_chunks)[idx], so any single chunk can be reproduced
+        # without materializing the whole per-chunk seed sequence.
+        seed, n = 1234, 40
+        for idx in (0, 1, 17, 39):
+            canonical = int(
+                np.random.SeedSequence(seed).spawn(n)[idx].generate_state(1, dtype=np.uint32)[0]
+            )
+            assert derive_chunk_seed(seed, idx) == canonical
+
+
+class TestOrderIdInt64PathsAgree:
+    """Phase 1.2 / Finding #21: the parquet (Arrow) and SQL (DDL) OrderNumber
+    width must be the SAME decision. Both consume one authoritative flag; the
+    row-count estimate is only a fallback and must itself be id-space aware so the
+    two paths never disagree across a range of total_rows."""
+
+    def _arrow_is_int64(self, flag: bool) -> bool:
+        bundle = build_worker_schemas(
+            file_format="parquet", skip_order_cols=False,
+            skip_order_cols_requested=False, returns_enabled=True,
+            order_id_int64=flag,
+        )
+        return bundle.sales_schema_gen.field("OrderNumber").type == pa.int64()
+
+    def _sql_is_bigint(self, flag: bool) -> bool:
+        cols = dict(get_sales_schema(False, force_int64=flag))
+        return cols["OrderNumber"].sql_type == SqlType.BIGINT
+
+    def test_paths_agree_when_fed_same_flag(self):
+        for flag in (False, True):
+            assert self._arrow_is_int64(flag) == self._sql_is_bigint(flag) == flag
+
+    def test_estimate_makes_paths_agree_across_row_range(self):
+        # Spans below, through, and above the ~134M id-space threshold — including
+        # the 134M–1.07B band where the old total_rows-only DDL rule diverged.
+        for rows in (1_000, 10_000_000, 134_000_000, 200_000_000,
+                     500_000_000, 2_000_000_000):
+            flag = order_id_int64_for_rows(rows)
+            assert self._arrow_is_int64(flag) == self._sql_is_bigint(flag), (
+                f"parquet/DDL OrderNumber width disagree at total_rows={rows:,}"
+            )
 
 
 # ===================================================================

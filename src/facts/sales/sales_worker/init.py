@@ -15,12 +15,13 @@ from ..output_paths import (
 )
 from ..sales_logic import bind_globals, State
 from ..sales_logic.chunk_builder import reset_worker_cdf_cache
-from .schemas import build_worker_schemas
+from .schemas import build_worker_schemas_from_cfg
 from src.exceptions import SalesError
 from src.utils.config_helpers import int_or, float_or, str_or
 from src.utils.logging_utils import warn as _warn
 from src.utils.shared_arrays import resolve_array
-from ..worker_cfg_schema import SalesWorkerCfg
+from src.utils.hashing import GOLDEN, splitmix64
+from ..prep.worker_cfg_schema import SalesWorkerCfg
 
 
 EMPLOYEE_KEY_MIN_NON_MANAGER = 40_000_000
@@ -370,17 +371,6 @@ def _normalize_assignment_arrays(
     return a_store, a_emp, start_fixed, end_fixed, fte, is_primary, max_store_key
 
 
-def _hash_u64(x: np.ndarray) -> np.ndarray:
-    """Vectorized splitmix64 finalizer (uint64 in -> well-mixed uint64 out)."""
-    x = x.astype(np.uint64)
-    x ^= x >> np.uint64(30)
-    x *= np.uint64(0xBF58476D1CE4E5B9)
-    x ^= x >> np.uint64(27)
-    x *= np.uint64(0x94D049BB133111EB)
-    x ^= x >> np.uint64(31)
-    return x
-
-
 def _salesperson_perf_multiplier(
     emp_keys: Any, spread: float, seed: int,
     lo: float = 0.25, hi: float = 4.0,
@@ -399,9 +389,9 @@ def _salesperson_perf_multiplier(
     if spread <= 0.0 or emp.size == 0:
         return np.ones(emp.size, dtype=np.float64)
     s = np.uint64(int(seed) & 0x7FFFFFFF)
-    base = (emp.astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15)) ^ s
-    h1 = _hash_u64(base + np.uint64(0x1))
-    h2 = _hash_u64(base + np.uint64(0x9E3779B9))
+    base = (emp.astype(np.uint64) * GOLDEN) ^ s
+    h1 = splitmix64(base + np.uint64(0x1))
+    h2 = splitmix64(base + np.uint64(0x9E3779B9))
     # Box-Muller: two uniforms -> standard normal. u1 kept strictly in (0,1).
     u1 = (h1.astype(np.float64) + 1.0) / (18446744073709551616.0 + 1.0)  # 2**64 + 1
     u2 = h2.astype(np.float64) / 18446744073709551616.0                  # 2**64
@@ -554,11 +544,20 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     reset_worker_cdf_cache()
     # Clear the other worker-lifetime caches too, so a reused worker process
     # (web server / in-process tests) never serves stale per-run state. Local
-    # imports avoid the init<->task module-load circular import.
+    # imports avoid the init<->task module-load circular import. The two model
+    # caches below are id()-keyed on State.product_np / State.date_pool, so a
+    # freed-then-reallocated array in a second in-process run could otherwise
+    # serve a stale reference price / inflation anchor.
     from .io import reset_dir_cache
     from .task import reset_task_caches
+    from ..sales_logic.columns import reset_sales_channels_cache
+    from ..sales_models.quantity_model import _reset_cache as _reset_quantity_cache
+    from ..sales_models.pricing_pipeline import _reset_caches as _reset_pricing_caches
     reset_dir_cache()
     reset_task_caches()
+    reset_sales_channels_cache()
+    _reset_quantity_cache()
+    _reset_pricing_caches()
     # Resolve any shared-memory descriptors back into numpy array views.
     # This is a no-op for values that are already plain arrays/None.
     _REQUIRED_ARRAYS = {"product_np", "store_keys", "customer_keys", "date_pool", "date_prob"}
@@ -583,6 +582,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         promo_keys_all = worker_cfg["promo_keys_all"]
         promo_start_all = worker_cfg["promo_start_all"]
         promo_end_all = worker_cfg["promo_end_all"]
+        promo_salience_all = worker_cfg.get("promo_salience_all")
         new_customer_promo_keys = worker_cfg.get("new_customer_promo_keys")
         new_customer_window_months = int(worker_cfg.get("new_customer_window_months", 3))
 
@@ -591,6 +591,14 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         customer_start_month = worker_cfg.get("customer_start_month")
         customer_end_month = worker_cfg.get("customer_end_month")
         customer_base_weight = worker_cfg.get("customer_base_weight")
+        customer_discovery_month = worker_cfg.get("customer_discovery_month")
+
+        # Global per-month plan: tiny length-T arrays + scalars.
+        sales_rows_per_month = worker_cfg.get("sales_rows_per_month")
+        sales_orders_per_month = worker_cfg.get("sales_orders_per_month")
+        sales_distinct_target = worker_cfg.get("sales_distinct_target")
+        sales_plan_seed = int_or(worker_cfg.get("sales_plan_seed"), 0)
+        total_chunks = int_or(worker_cfg.get("total_chunks"), 1)
 
         date_pool = worker_cfg["date_pool"]
         date_prob = worker_cfg["date_prob"]
@@ -671,6 +679,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         returns_full_line_probability = float(worker_cfg.get("returns_full_line_probability", 0.85))
         returns_split_return_rate = float(worker_cfg.get("returns_split_return_rate", 0.0))
         returns_max_splits = int(worker_cfg.get("returns_max_splits", 3))
+        returns_reconcile_cents = bool(worker_cfg.get("returns_reconcile_cents", False))
         returns_split_min_gap = int(worker_cfg.get("returns_split_min_gap", 3))
         returns_split_max_gap = int(worker_cfg.get("returns_split_max_gap", 20))
         returns_lag_distribution = str(worker_cfg.get("returns_lag_distribution", "uniform") or "uniform")
@@ -684,8 +693,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         partition_enabled = bool(worker_cfg.get("partition_enabled", False))
         partition_cols = worker_cfg.get("partition_cols") or []
         models_cfg = worker_cfg.get("models_cfg")
-
-        parquet_dict_exclude = worker_cfg.get("parquet_dict_exclude")
 
         # NEW: configurable cap for OrderLineNumber per OrderNumber
         max_lines_per_order = int_or(worker_cfg.get("max_lines_per_order"), 5)
@@ -976,6 +983,8 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     promo_keys_all = as_int32(promo_keys_all)
     promo_start_all = np.asarray(promo_start_all, dtype="datetime64[D]")
     promo_end_all = np.asarray(promo_end_all, dtype="datetime64[D]")
+    if promo_salience_all is not None:
+        promo_salience_all = np.asarray(promo_salience_all, dtype=np.float64)
     if new_customer_promo_keys is not None and len(new_customer_promo_keys) > 0:
         new_customer_promo_keys = as_int32(new_customer_promo_keys)
     else:
@@ -1002,6 +1011,19 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         customer_base_weight = np.asarray(customer_base_weight, dtype=np.float64)
         if customer_base_weight.shape[0] != customer_keys.shape[0]:
             raise RuntimeError("customer_base_weight must align with customer_keys length")
+
+    if customer_discovery_month is not None:
+        customer_discovery_month = as_int64(customer_discovery_month)
+        if customer_discovery_month.shape[0] != customer_keys.shape[0]:
+            raise RuntimeError("customer_discovery_month must align with customer_keys length")
+
+    # Global per-month plan arrays are length-T (months); coerce to int64.
+    if sales_rows_per_month is not None:
+        sales_rows_per_month = as_int64(sales_rows_per_month)
+    if sales_orders_per_month is not None:
+        sales_orders_per_month = as_int64(sales_orders_per_month)
+    if sales_distinct_target is not None:
+        sales_distinct_target = as_int64(sales_distinct_target)
 
     # Use pre-built brand_prob_by_month from shared memory if available
     _prebuilt_bp = worker_cfg.get("_prebuilt_brand_prob_by_month")
@@ -1055,16 +1077,9 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     for t in tables:
         output_paths.ensure_dirs(t)
 
-    bundle = build_worker_schemas(
-        file_format=file_format,
-        skip_order_cols=bool(skip_order_cols),
-        skip_order_cols_requested=bool(skip_order_cols_requested),
-        returns_enabled=bool(returns_enabled),
-        parquet_dict_exclude=set(parquet_dict_exclude) if parquet_dict_exclude else None,
-        models_cfg=models_cfg if isinstance(models_cfg, Mapping) else None,
-        order_id_int64=order_id_int64,
-        partition_cols=partition_cols if partition_cols else None,
-    )
+    # Single source of truth for schema derivation (shared with the coordinator's
+    # Delta assembly): build from worker_cfg so the two paths can't drift.
+    bundle = build_worker_schemas_from_cfg(worker_cfg)
 
     # ---- Budget lookups (already built in main process, passed as flat keys) ----
     budget_enabled = bool(worker_cfg.get("budget_enabled", False))
@@ -1087,6 +1102,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "promo_keys_all": promo_keys_all,
             "promo_start_all": promo_start_all,
             "promo_end_all": promo_end_all,
+            "promo_salience_all": promo_salience_all,
             "new_customer_promo_keys": new_customer_promo_keys,
             "new_customer_window_months": new_customer_window_months,
             "customer_keys": customer_keys,
@@ -1094,6 +1110,13 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "customer_start_month": customer_start_month,
             "customer_end_month": customer_end_month,
             "customer_base_weight": customer_base_weight,
+            "customer_discovery_month": customer_discovery_month,
+            # Global per-month plan
+            "sales_rows_per_month": sales_rows_per_month,
+            "sales_orders_per_month": sales_orders_per_month,
+            "sales_distinct_target": sales_distinct_target,
+            "sales_plan_seed": sales_plan_seed,
+            "total_chunks": total_chunks,
             "store_to_geo_arr": store_to_geo_arr,
             "geo_to_currency_arr": geo_to_currency_arr,
             "date_pool": date_pool,
@@ -1141,6 +1164,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "returns_full_line_probability": returns_full_line_probability,
             "returns_split_return_rate": returns_split_return_rate,
             "returns_max_splits": returns_max_splits,
+            "returns_reconcile_cents": returns_reconcile_cents,
             "returns_split_min_gap": returns_split_min_gap,
             "returns_split_max_gap": returns_split_max_gap,
             "returns_lag_distribution": returns_lag_distribution,
@@ -1167,6 +1191,8 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             # Product profile attributes for weighted sampling
             "product_popularity": worker_cfg.get("product_popularity"),
             "product_seasonality": worker_cfg.get("product_seasonality"),
+            # Per-product SubcategoryKey for basket-theme correlation.
+            "product_subcat_key": worker_cfg.get("product_subcat_key"),
 
             # Column correlation data
             "customer_geo_key": worker_cfg.get("customer_geo_key"),
@@ -1195,5 +1221,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     )
 
     # Validate critical State attributes once at worker init instead of per-task
-    State.validate(["chunk_size"])
+    if State.chunk_size is None:
+        raise SalesError("Missing State fields: ['chunk_size']")
 

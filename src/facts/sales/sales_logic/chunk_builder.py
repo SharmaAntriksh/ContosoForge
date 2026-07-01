@@ -14,20 +14,18 @@ import pyarrow as pa
 
 from src.defaults import PHYSICAL_CHANNELS, DIGITAL_CHANNELS
 from src.exceptions import SalesError
-from src.utils.config_helpers import int_or as _int_or, float_or as _float_or
 from .globals import PA_AVAILABLE, State
 from .core import (
-    _make_seen_lookup,
     _normalize_cdf,
     _normalize_end_month,
-    _sample_customers,
-    _update_seen_lookup,
+    assign_orders_to_customers,
+    build_month_customer_pool,
     apply_promotions,
     build_orders,
-    build_rows_per_month,
     compute_dates,
     compute_prices,
 )
+from .core.basket import apply_basket_theme, reset_basket_cache
 from .columns import build_extra_columns, SALES_CHANNEL_CORE_KEYS
 
 # ------------------------------------------------------------
@@ -128,12 +126,13 @@ _worker_cdf_cache: dict = {}
 # The eligibility predicate depends only on the lifecycle arrays
 # (is_active / start_month / end_month), which bind_globals sets once per
 # worker and never reassigns — so the same masks would otherwise be rebuilt
-# for every chunk the worker processes.  seen_customers (discovery) changes
-# across chunks but does NOT enter the eligibility predicate, so caching the
-# eligible index set is safe.  Keyed on the month count T alone: the lifecycle
-# arrays are invariant within a worker and this cache is cleared at each worker
-# init, so no per-chunk array key is needed (and end_month_norm is reallocated
-# every chunk, so an id()-based key would never hit).
+# for every chunk the worker processes.  The discovery schedule
+# (customer_discovery_month) is likewise static and does NOT enter the
+# eligibility predicate, so caching the eligible index set is safe.  Keyed on
+# the month count T alone: the lifecycle arrays are invariant within a worker
+# and this cache is cleared at each worker init, so no per-chunk array key is
+# needed (end_month_norm is now the once-per-bind State.customer_end_month_norm
+# broadcast, not a per-chunk allocation).
 _worker_eligible_cache: dict = {}
 
 # Worker-lifetime cache of per-calendar-month product weights (12 distinct).
@@ -142,12 +141,22 @@ _worker_eligible_cache: dict = {}
 # otherwise rebuilt T times instead of at most 12.
 _worker_prodweight_cache: dict = {}
 
+# Worker-lifetime cache of per-month distinct-customer pools. The pool
+# + weighted CDF for month m depend only on (m, run seed, static customer arrays,
+# distinct target) — all worker-bound constants — so a worker builds each month's
+# pool at most once and reuses it across every chunk it processes. Keyed on the
+# month offset alone (per CLAUDE.md gotcha #27, m fully determines the value given
+# the worker-constant inputs), so slicing it is O(orders-in-this-chunk).
+_worker_month_pool_cache: dict = {}
+
 
 def reset_worker_cdf_cache() -> None:
     """Clear the worker-lifetime caches (called once per worker init)."""
     _worker_cdf_cache.clear()
     _worker_eligible_cache.clear()
     _worker_prodweight_cache.clear()
+    _worker_month_pool_cache.clear()
+    reset_basket_cache()
 
 
 def _eligible_idx_by_month(T, is_active, start_month, end_month_norm) -> list:
@@ -173,6 +182,67 @@ def _eligible_idx_by_month(T, is_active, start_month, end_month_norm) -> list:
         idx_by_month.append(np.flatnonzero(mask))
     _worker_eligible_cache[T] = idx_by_month
     return idx_by_month
+
+
+def _chunk_month_band(R_m: int, O_m: int, chunk_idx: int, total_chunks: int) -> tuple:
+    """This chunk's slice of month ``m`` in the global order/line index space.
+
+    Returns ``(order_start, n_orders, n_lines)`` (index-space sharding):
+
+    - Orders are floor-sliced from the global ``O_m`` so the chunks tile
+      ``[0, O_m)`` contiguously with no gaps (``sum n_orders == O_m``). This
+      guarantees every order index in ``[0, distinct_pool_size)`` is materialized
+      by exactly one chunk, so the per-month distinct-customer set is exactly the
+      pool regardless of ``chunk_size``.
+    - Lines start at one-per-order and distribute the ``E = R_m - O_m`` extra
+      lines by order-prefix, so ``n_lines >= n_orders`` (build_orders needs >= 1
+      line/order) and ``sum n_lines == R_m`` exactly (preserves total_rows).
+
+    Both allocations are pure functions of ``(chunk_idx, total_chunks)`` — no gaps,
+    no clamps, sums exact in both dimensions.
+    """
+    C = int(total_chunks)
+    c = int(chunk_idx)
+    O = int(O_m)
+    R = int(R_m)
+    if C <= 0 or O <= 0 or R <= 0:
+        return 0, 0, 0
+    lo = (c * O) // C
+    hi = ((c + 1) * O) // C
+    n_orders = hi - lo
+    if n_orders <= 0:
+        return lo, 0, 0
+    E = R - O                    # extra lines beyond one-per-order (>= 0 since O <= R)
+    extra = (E * hi) // O - (E * lo) // O
+    return lo, n_orders, n_orders + extra
+
+
+def _get_month_pool(
+    m_offset, distinct_target, eligible_idx, customer_keys,
+    discovery_month, base_weight, end_month_norm, plan_seed,
+):
+    """Return the cached ``(pool, cdf)`` for month ``m`` (build once per worker).
+
+    The pool is deterministic in ``(m, plan_seed, static customer arrays)`` so it
+    is identical for every chunk and worker — caching by month offset alone is
+    correct (CLAUDE.md gotcha #27) and makes per-chunk customer assignment cheap.
+    """
+    m = int(m_offset)
+    cached = _worker_month_pool_cache.get(m)
+    if cached is not None:
+        return cached
+    pool, cdf = build_month_customer_pool(
+        m_offset=m,
+        distinct_target=int(distinct_target),
+        eligible_idx=eligible_idx,
+        customer_keys=customer_keys,
+        discovery_month=discovery_month,
+        base_weight=base_weight,
+        end_month_norm=end_month_norm,
+        seed=int(plan_seed),
+    )
+    _worker_month_pool_cache[m] = (pool, cdf)
+    return pool, cdf
 
 
 def _get_brand_flat_cache(brand_to_rows: list, B: int) -> tuple:
@@ -206,7 +276,7 @@ def _normalize_prob(p: np.ndarray) -> np.ndarray | None:
 
 def _get_brand_probs(m_offset: int, B: int) -> np.ndarray | None:
     """Return normalized brand probability vector for month *m_offset*, or None."""
-    bp = _get_state_attr("brand_prob_by_month", default=None)
+    bp = getattr(State, "brand_prob_by_month", None)
     if bp is not None:
         bp = np.asarray(bp, dtype="float64")
         cand = bp[int(m_offset) % bp.shape[0]] if bp.ndim > 1 else bp
@@ -376,7 +446,7 @@ def _sample_products_per_store(
     brand_probs = None
     B = 0
     if use_brand_popularity:
-        brand_to_rows = _get_state_attr("brand_to_row_idx", default=None)
+        brand_to_rows = getattr(State, "brand_to_row_idx", None)
         if brand_to_rows is not None and len(brand_to_rows) > 0:
             B = len(brand_to_rows)
             brand_probs = _get_brand_probs(m_offset, B)
@@ -423,7 +493,7 @@ def _sample_products_per_store(
             if _has_brand:
                 _sample_brand_aware(
                     rng, out, orig_idx, count, pool,
-                    brand_probs, B, product_weight, _cdf_cache, _cal_month,
+                    brand_probs, B, product_weight, _cdf_cache, m_offset,
                 )
             elif _has_weight and pool_sz > 1:
                 cache_key = (id(pool), -1, _cal_month)
@@ -457,7 +527,7 @@ def _sample_products_per_store(
 
 def _sample_brand_aware(
     rng, out, orig_idx, count, pool, brand_probs, B,
-    product_weight, _cdf_cache, _cal_month,
+    product_weight, _cdf_cache, m_offset,
 ):
     """Sample products using merged brand × popularity CDF (no brand loop).
 
@@ -466,15 +536,22 @@ def _sample_brand_aware(
     One vectorized RNG + searchsorted call per store instead of looping over
     ~200 brands.  Produces the same marginal distribution as the two-stage
     "pick brand, then pick within brand" approach.
+
+    The merged CDF depends on ``brand_probs``, which is the *absolute*-month
+    brand mix (``brand_prob_by_month[m_offset]``), so the worker-lifetime cache
+    MUST be keyed by ``m_offset`` — not the calendar month. Keying by calendar
+    month lets the first chunk a worker happens to run fix the CDF for every
+    later same-calendar-month absolute month (e.g. Jan-2023 reusing Jan-2022's
+    brand mix), which made product sampling depend on chunk→worker scheduling.
     """
     pool_set_key = id(pool)
-    merged_key = (pool_set_key, "_merged_", _cal_month)
+    merged_key = (pool_set_key, "_merged_", int(m_offset))
 
     if _cdf_cache is not None and merged_key in _cdf_cache:
         merged_pool, merged_cdf = _cdf_cache[merged_key]
     else:
         # Build combined weight: brand_prob[brand] * product_weight[product]
-        product_brand_key = _get_state_attr("product_brand_key", default=None)
+        product_brand_key = getattr(State, "product_brand_key", None)
         w = np.ones(len(pool), dtype=np.float64)
         if product_weight is not None:
             w *= product_weight[pool]
@@ -497,14 +574,6 @@ def _sample_brand_aware(
         out[orig_idx] = pool[rng.integers(0, len(pool), size=count)]
 
 
-def _get_state_attr(*names, default=None):
-    """Return the first non-None attribute from State among names."""
-    for n in names:
-        if hasattr(State, n):
-            v = getattr(State, n)
-            if v is not None:
-                return v
-    return default
 
 
 # Seasonality boost: which calendar months each profile peaks in
@@ -632,8 +701,14 @@ def _eligible_counts_fast(
     s = start_month[active]
     e = end_month_norm[active]
 
-    # keep only sane starts
-    valid_start = (s >= 0) & (s < T)
+    # Warm-start customers (start_month < 0) joined before the window, so they are
+    # eligible from month 0 — clamp to 0 to match the chunk's eligibility predicate
+    # (_eligible_idx_by_month uses ``start_month <= m``). A no-op on the default path
+    # (starts already clamped to >= 0), it keeps the coordinator's global plan and
+    # the chunk's month pool computed against the SAME eligible base. Then drop
+    # starts at/after the window (never eligible in [0, T-1]).
+    s = np.where(s < 0, np.int64(0), s)
+    valid_start = s < T
     s = s[valid_start]
     e = e[valid_start]
     if s.size == 0:
@@ -1198,8 +1273,9 @@ def build_chunk_table(
     Guarantees:
     - Customer lifecycle controls eligibility (IsActiveInSales + Start/End month)
     - Month loop generates orders within that month (date_pool sliced)
-    - Optional discovery forcing (persistable across chunks via State.seen_customers)
-      - IMPORTANT: discovery is OFF if customer_discovery block is absent
+    - Discovery forcing follows a static per-run schedule
+      (State.customer_discovery_month); it is worker/chunk-order independent
+      - IMPORTANT: discovery is OFF if new_customer_share == 0
     - All per-order arrays remain aligned
     """
 
@@ -1240,13 +1316,13 @@ def build_chunk_table(
     )
 
     # Customer dimension arrays (new contract)
-    customer_keys = _get_state_attr("customer_keys", "customers")
+    customer_keys = getattr(State, "customer_keys", None)
     if customer_keys is None:
         raise SalesError("State must provide customer_keys/customers")
     customer_keys = np.asarray(customer_keys, dtype=np.int32)
 
     # is_active_in_sales (new contract)
-    is_active_in_sales = _get_state_attr("customer_is_active_in_sales", "is_active_in_sales")
+    is_active_in_sales = getattr(State, "customer_is_active_in_sales", None)
     if is_active_in_sales is None:
         # backward compat: if State.active_customer_keys exists, treat those as active
         active_keys = getattr(State, "active_customer_keys", None)
@@ -1261,17 +1337,22 @@ def build_chunk_table(
     else:
         is_active_in_sales = np.asarray(is_active_in_sales, dtype=np.int32)
 
-    start_month = _get_state_attr("customer_start_month")
+    start_month = getattr(State, "customer_start_month", None)
     if start_month is None:
         # If not yet wired, fall back: everyone starts at 0 (old behavior)
         start_month = np.zeros(customer_keys.shape[0], dtype="int64")
     else:
         start_month = np.asarray(start_month, dtype="int64")
 
-    end_month = _get_state_attr("customer_end_month")
-    end_month_norm = _normalize_end_month(end_month, customer_keys.shape[0])
+    # Prefer the once-per-bind normalized broadcast (bind_globals); fall back to
+    # computing it here for binders that didn't precompute it (e.g. partial-dict
+    # test binds). Same pure function + inputs, so both paths are byte-identical.
+    end_month_norm = getattr(State, "customer_end_month_norm", None)
+    if end_month_norm is None:
+        end_month = getattr(State, "customer_end_month", None)
+        end_month_norm = _normalize_end_month(end_month, customer_keys.shape[0])
 
-    base_weight = _get_state_attr("customer_base_weight")
+    base_weight = getattr(State, "customer_base_weight", None)
     if base_weight is not None:
         base_weight = np.asarray(base_weight, dtype="float64")
 
@@ -1291,6 +1372,19 @@ def build_chunk_table(
 
     promo_keys_all = State.promo_keys_all
     promo_start_all = State.promo_start_all
+    promo_salience_all = getattr(State, "promo_salience_all", None)
+    # Fulfillment-friction config (drives delivery bucketing here and
+    # return prob/lag in the separate returns pass). Pydantic model or None; both
+    # compute_dates and the returns builder read it via .get().
+    _mdl_cfg = getattr(State, "models_cfg", None)
+    fulfillment_cfg = _mdl_cfg.get("fulfillment", None) if _mdl_cfg is not None else None
+    # Basket-theme correlation config (biases per-line product choice
+    # toward each order's theme). product_subcat_key is bound read-only on State.
+    _basket_cfg = _mdl_cfg.get("basket", None) if _mdl_cfg is not None else None
+    _basket_on = bool(_basket_cfg) and bool(_basket_cfg.get("enabled", False))
+    _basket_num_themes = int(_basket_cfg.get("num_themes", 6)) if _basket_on else 0
+    _basket_strength = float(_basket_cfg.get("strength", 0.0)) if _basket_on else 0.0
+    _basket_subcat = getattr(State, "product_subcat_key", None) if _basket_on else None
     promo_end_all = State.promo_end_all
 
     nc_promo_keys = State.new_customer_promo_keys
@@ -1342,91 +1436,55 @@ def build_chunk_table(
         return _empty_table(schema)
 
     # ------------------------------------------------------------
-    # ROW BUDGET PER MONTH (BASE DEMAND NORMALIZATION)
+    # GLOBAL PER-MONTH PLAN — rows/month, orders/month, and the
+    # distinct-customer target are computed ONCE in the coordinator against the
+    # GLOBAL month totals and broadcast read-only. This chunk slices a contiguous
+    # band of every month's order-id space (see _chunk_month_band), so the
+    # per-month row curve and distinct-customer curve are independent of
+    # chunk_size / worker count (review Finding #4/#14). The per-chunk
+    # build_rows_per_month + inline distinct target that made both chunk-size
+    # dependent are gone.
     # ------------------------------------------------------------
-    macro_cfg = State.models_cfg.get("macro_demand", {}) or {}
-
-    eligible_counts = _eligible_counts_fast(
-        T=T,
-        is_active_in_sales=is_active_in_sales,
-        start_month=start_month,
-        end_month_norm=end_month_norm,
-    )
-    if eligible_counts.sum() <= 0:
+    rows_per_month = getattr(State, "sales_rows_per_month", None)
+    orders_per_month = getattr(State, "sales_orders_per_month", None)
+    distinct_target_by_month = getattr(State, "sales_distinct_target", None)
+    plan_seed = int(getattr(State, "sales_plan_seed", None) or 0)
+    total_chunks = int(getattr(State, "total_chunks", None) or 1)
+    if rows_per_month is None or orders_per_month is None:
+        raise SalesError(
+            "Sales global month plan missing (sales_rows_per_month / "
+            "sales_orders_per_month). The coordinator must broadcast it."
+        )
+    rows_per_month = np.asarray(rows_per_month, dtype=np.int64)
+    orders_per_month = np.asarray(orders_per_month, dtype=np.int64)
+    if distinct_target_by_month is not None:
+        distinct_target_by_month = np.asarray(distinct_target_by_month, dtype=np.int64)
+    if int(rows_per_month.sum()) <= 0:
         return _empty_table(schema)
 
-    rows_per_month = build_rows_per_month(
-        rng=rng,
-        total_rows=int(n),
-        eligible_counts=eligible_counts,
-        macro_cfg=macro_cfg,
-    )
-
     # ------------------------------------------------------------
-    # CUSTOMER MIX CONFIG
+    # CUSTOMER MIX CONFIG (only what the chunk still needs; the distinct-customer
+    # target + participation shaping now live in the global plan / month pool)
     # ------------------------------------------------------------
     cust_cfg = State.models_cfg.get("customers", {}) or {}
     new_customer_share = float(np.clip(
         cust_cfg.get("new_customer_share", 0.10), 0.0, 1.0))
-    distinct_ratio = float(np.clip(
-        cust_cfg.get("distinct_ratio", 0.55), 0.0, 1.0))
-    cycle_amplitude = float(np.clip(
-        cust_cfg.get("cycle_amplitude", 0.35), 0.0, 1.0))
-    discovery_shape = float(np.clip(
-        cust_cfg.get("discovery_shape", 0.0), -1.0, 1.0))
 
-    participation_noise = float(np.clip(
-        cust_cfg.get("participation_noise", 0.10), 0.0, 1.0))
-
-    _DEFAULT_SEASONAL_SPIKES = [
-        {"month": 3,  "boost": 0.15},
-        {"month": 7,  "boost": 0.12},
-        {"month": 9,  "boost": 0.10},
-        {"month": 11, "boost": 0.40},
-        {"month": 12, "boost": 0.25},
-    ]
-    seasonal_spikes_raw = cust_cfg.get("seasonal_spikes", None)
-    if seasonal_spikes_raw is None:
-        seasonal_spikes_raw = _DEFAULT_SEASONAL_SPIKES
-    seasonal_spike_map: dict[int, float] = {}
-    for entry in seasonal_spikes_raw:
-        # Support both dicts (fallback defaults) and Pydantic models (trend presets)
-        month = entry.get("month") if isinstance(entry, dict) else getattr(entry, "month", None)
-        boost = entry.get("boost") if isinstance(entry, dict) else getattr(entry, "boost", None)
-        if month is not None and boost is not None:
-            cal_month = int(month)
-            if 1 <= cal_month <= 12:
-                seasonal_spike_map[cal_month] = float(boost)
-
+    # Discovery is on whenever new customers are expected. Its per-month shape is
+    # baked into the static customer_discovery_month schedule (built once in the
+    # coordinator); here it only gates whether the month pool honors the schedule.
     use_discovery = new_customer_share > 0.0
-
-    # Precompute per-month discovery shape multipliers (normalized to mean=1)
-    if use_discovery and T > 1 and discovery_shape != 0.0:
-        progress = np.linspace(0.0, 1.0, T)
-        shape_mult = 1.0 + discovery_shape * (2.0 * progress - 1.0)
-        shape_mult = np.maximum(shape_mult, 0.1)
-        shape_mult /= shape_mult.mean()
-    else:
-        shape_mult = np.ones(T, dtype=np.float64)
-
-    _BOOTSTRAP_MONTHS = _int_or(macro_cfg.get("bootstrap_months"), 6)
-    _MAX_FRAC_PER_MONTH = _float_or(cust_cfg.get("max_new_fraction_per_month"), 0.015)
-    _MAX_DISTINCT_RATIO = _float_or(macro_cfg.get("max_distinct_ratio"), 0.70)
-    _MIN_DISTINCT_CUSTOMERS = _int_or(macro_cfg.get("min_distinct_customers"), 250)
 
     # Brand popularity is OFF if block absent. If present without enabled, default-on.
     brand_cfg = State.models_cfg.get("brand_popularity", None)
     use_brand_popularity = bool(brand_cfg) and bool(brand_cfg.get("enabled", True))
 
+    # Closed-form discovery schedule: pool-aligned month each customer first
+    # enters sales, static and broadcast read-only (Finding #5/#6).
     if use_discovery:
-        seen_customers = getattr(State, "seen_customers", None)
-        if seen_customers is None:
-            seen_customers = _make_seen_lookup(customer_keys)
-        elif isinstance(seen_customers, set):
-            seen_customers = _make_seen_lookup(customer_keys, existing_set=seen_customers)
-        # else: already a numpy boolean lookup from a previous chunk
+        discovery_month = getattr(State, "customer_discovery_month", None)
     else:
-        seen_customers = None
+        discovery_month = None
 
     # ------------------------------------------------------------
     # Generate month-by-month
@@ -1442,12 +1500,6 @@ def build_chunk_table(
     # Salesperson effective-date map (day-accurate bridge, constant across months)
     eff = getattr(State, "salesperson_effective_by_store", None)
 
-    # Expected average lines per order — used to estimate order count from row target.
-    # When max_lines > 1, build_orders expands each order into 1..max_lines line rows,
-    # so we sample fewer customers (≈ m_rows / avg_lines) and let build_orders expand.
-    max_lines = int(getattr(State, "max_lines_per_order", 6) or 6)
-    avg_lines_est = 1.0 if max_lines == 1 else 1.8
-
     # CDF cache: use worker-lifetime cache so subsequent chunks skip
     # intersection + CDF recomputation entirely (contents are deterministic).
     _product_cdf_cache = _worker_cdf_cache
@@ -1457,8 +1509,22 @@ def build_chunk_table(
         T, is_active_in_sales, start_month, end_month_norm)
 
     for m_offset in range(T):
-        m_rows = int(rows_per_month[m_offset])
-        if m_rows <= 0:
+        R_m = int(rows_per_month[m_offset])
+        if R_m <= 0:
+            continue
+        O_m = int(orders_per_month[m_offset])
+        if O_m <= 0:
+            continue
+
+        # --------------------------------------------------------
+        # INDEX-SPACE SHARDING: this chunk's contiguous band of month m's global
+        # order/line space. order_start/n_orders_band tile [0, O_m) across chunks
+        # with no gaps (so the distinct pool is always fully covered); m_lines is
+        # the exact line target (sum over chunks == R_m).
+        # --------------------------------------------------------
+        order_start, n_orders_band, m_lines = _chunk_month_band(
+            R_m, O_m, chunk_idx, total_chunks)
+        if n_orders_band <= 0 or m_lines <= 0:
             continue
 
         date_idx = month_slices[m_offset]
@@ -1485,75 +1551,27 @@ def build_chunk_table(
             continue
 
         # --------------------------------------------------------
-        # DISCOVERY TARGET
+        # CUSTOMER ASSIGNMENT (global plan; chunk-invariant by construction)
         # --------------------------------------------------------
-        disc_cfg_local = {}
-        if use_discovery:
-            target_new = int(round(
-                new_customer_share * m_rows * float(shape_mult[m_offset])))
+        # Build (once per worker) the month's distinct-customer pool, then map this
+        # chunk's contiguous order band to customers. A given global order index
+        # always maps to the same customer, so the union of distinct customers per
+        # month is exactly the pool regardless of how orders are split into chunks.
+        D_m = int(distinct_target_by_month[m_offset]) if distinct_target_by_month is not None else 0
+        pool, pool_cdf = _get_month_pool(
+            m_offset, D_m, eligible_idx, customer_keys,
+            discovery_month, base_weight, end_month_norm, plan_seed)
+        if pool.size == 0:
+            continue
 
-            # Bootstrap: smooth ramp over first months
-            if m_offset < _BOOTSTRAP_MONTHS:
-                target_new = int(round(
-                    target_new * (m_offset + 1) / _BOOTSTRAP_MONTHS))
-
-            disc_cfg_local["_target_new_customers"] = max(0, target_new)
-            disc_cfg_local["max_fraction_per_month"] = _MAX_FRAC_PER_MONTH
-
-        # --------------------------------------------------------
-        # DETERMINE SAMPLING COUNT
-        # --------------------------------------------------------
-        # In order mode (skip_cols=False, max_lines > 1): sample fewer
-        # customers (one per order), then let build_orders expand each
-        # order into 1..max_lines line rows to reach m_rows total.
-        if not skip_cols and max_lines > 1:
-            n_sample = max(1, int(round(m_rows / avg_lines_est)))
-        else:
-            n_sample = m_rows
-
-        # --------------------------------------------------------
-        # PARTICIPATION DISTINCT TARGET
-        # --------------------------------------------------------
-        target_distinct = None
-        if distinct_ratio > 0.0:
-            eligible_count = int(eligible_idx.size)
-            k = distinct_ratio * eligible_count
-
-            if cycle_amplitude > 0.0:
-                cyc = float(np.sin(2.0 * np.pi * m_offset / 24.0))
-                k *= 1.0 + cycle_amplitude * cyc
-
-            if seasonal_spike_map and month_date_pool.size > 0:
-                cal_month = int(month_date_pool[0].astype("datetime64[M]").astype(int) % 12) + 1
-                k *= 1.0 + seasonal_spike_map.get(cal_month, 0.0)
-
-            if participation_noise > 0.0:
-                k *= 1.0 + participation_noise * float(rng.standard_normal())
-
-            k = max(k, float(_MIN_DISTINCT_CUSTOMERS))
-            k = min(k, eligible_count * _MAX_DISTINCT_RATIO,
-                    float(eligible_count), float(n_sample))
-            target_distinct = max(1, int(round(k)))
-
-        # --------------------------------------------------------
-        # CUSTOMER SAMPLING (discovery/participation aware)
-        # --------------------------------------------------------
-        customer_keys_for_orders = _sample_customers(
-            rng=rng,
-            customer_keys=customer_keys,
-            eligible_mask=None,
-            seen_set=seen_customers,
-            n=int(n_sample),
-            use_discovery=use_discovery,
-            discovery_cfg=disc_cfg_local,
-            base_weight=base_weight,
-            target_distinct=target_distinct,
-            end_month_norm=end_month_norm,
+        customer_keys_for_orders = assign_orders_to_customers(
             m_offset=int(m_offset),
-            eligible_idx=eligible_idx,
+            order_start=int(order_start),
+            n_orders=int(n_orders_band),
+            pool=pool,
+            cdf=pool_cdf,
+            seed=plan_seed,
         )
-
-
         if customer_keys_for_orders.size == 0:
             continue
 
@@ -1565,7 +1583,7 @@ def build_chunk_table(
         if not skip_cols:
             orders = build_orders(
                 rng=rng,
-                n=m_rows,
+                n=m_lines,
                 skip_cols=False,
                 date_pool=month_date_pool,
                 date_prob=month_date_prob,
@@ -1742,6 +1760,15 @@ def build_chunk_table(
                 product_weight=_product_weight,
             )
 
+        # CORRELATION #6: bias off-theme lines toward each order's
+        # basket theme. Applied before channel enforcement so eligibility still
+        # has the final say. Hash-seeded on order/line ids (not the chunk RNG).
+        if _basket_on and _basket_subcat is not None and order_ids_int is not None:
+            prod_idx = apply_basket_theme(
+                prod_idx, order_ids_int, line_num, _basket_subcat,
+                num_themes=_basket_num_themes, strength=_basket_strength,
+            )
+
         # CORRELATION #4: Channel → product eligibility enforcement
         prod_idx = _enforce_channel_product_eligibility(
             rng, prod_idx, sales_channel_key_arr,
@@ -1802,6 +1829,8 @@ def build_chunk_table(
             channel_fulfillment_days=_ch_fulfill,
             unique_orders=_uniq_for_dates,
             inv_idx=_inv_for_dates,
+            line_numbers=line_num,
+            fulfillment_cfg=fulfillment_cfg,
         )
         
         # --------------------------------------------------------
@@ -1823,6 +1852,7 @@ def build_chunk_table(
                 no_discount_key=no_discount_key,
                 channel_keys=_order_ch,
                 promo_channel_group=_pcg,
+                promo_salience_all=promo_salience_all,
             )
 
             promo_keys = np.asarray(promo_order_keys, dtype=np.int32)[order_idx]
@@ -1837,6 +1867,7 @@ def build_chunk_table(
                 no_discount_key=no_discount_key,
                 channel_keys=sales_channel_key_arr,
                 promo_channel_group=_pcg,
+                promo_salience_all=promo_salience_all,
             )
         promo_keys = np.asarray(promo_keys, dtype=np.int32)
 
@@ -1906,17 +1937,17 @@ def build_chunk_table(
             else:
                 salesperson_key_arr = np.full(s_ids.size, -1, dtype=np.int32)
 
-        # UPDATE DISCOVERY STATE (persist)
-        # --------------------------------------------------------
-        if use_discovery:
-            # track customers that actually appeared in this month
-            _update_seen_lookup(seen_customers, np.unique(customer_keys_out))
-            State.seen_customers = seen_customers
+        # Discovery is a static closed-form schedule (State.customer_discovery_month),
+        # so there is no per-chunk "seen" state to persist here anymore.
 
         # --------------------------------------------------------
         # QUANTITY + PRICING
         # --------------------------------------------------------
-        qty = build_quantity(rng, order_dates)
+        qty = build_quantity(
+            rng, order_dates,
+            product_row_idx=prod_idx,
+            unit_price=unit_price,
+        )
 
         price = compute_prices(
             n=len(customer_keys_out),
@@ -1929,6 +1960,9 @@ def build_chunk_table(
             order_dates=order_dates,
             qty=qty,
             price=price,
+            promo_keys=promo_keys,
+            no_discount_key=no_discount_key,
+            product_ids=product_keys,
         )
 
         # --------------------------------------------------------

@@ -8,8 +8,26 @@ import pytest
 from src.facts.sales.sales_worker.returns_builder import (
     ReturnsConfig,
     RETURNS_SCHEMA,
+    _validate_cfg,
     build_sales_returns_from_detail,
 )
+from src.exceptions import SalesError
+
+
+class TestReturnsConfigValidationRaisesSalesError:
+    """Config-shape validation routes through the domain SalesError, not a bare
+    RuntimeError (Finding #42 / gotcha #9)."""
+
+    @pytest.mark.parametrize("kwargs", [
+        {"enabled": "yes", "return_rate": 0.1},           # enabled not a bool
+        {"enabled": True, "return_rate": 1.5},            # rate out of [0,1]
+        {"enabled": True, "return_rate": float("nan")},   # rate not finite
+        {"enabled": True, "return_rate": 0.1, "min_lag_days": -1},
+        {"enabled": True, "return_rate": 0.1, "max_lag_days": -3},
+    ])
+    def test_bad_config_raises_saleserror(self, kwargs):
+        with pytest.raises(SalesError):
+            _validate_cfg(ReturnsConfig(**kwargs))
 
 
 def _rng():
@@ -28,6 +46,70 @@ def _make_detail(n: int = 100) -> pa.Table:
         "NetPrice": pa.array(rng.uniform(20.0, 200.0, size=n)),
         "IsOrderDelayed": pa.array(rng.integers(0, 2, size=n, dtype=np.int32)),
     })
+
+
+def _ugly_detail(n: int = 60) -> pa.Table:
+    """Lines whose unit price (100/3 = 33.333…) can't split into whole cents,
+    so multi-event returns drift by a penny unless reconciled."""
+    return pa.table({
+        "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
+        "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
+        "DeliveryDate": pa.array(
+            np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32(),
+        ),
+        "Quantity": pa.array(np.full(n, 3, dtype=np.int32)),
+        "NetPrice": pa.array(np.full(n, 100.0)),
+        "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
+    })
+
+
+class TestReconcileCents:
+    """6.8 SP4 — integer-cent (largest-remainder) return proration, default off."""
+
+    _CFG = dict(enabled=True, return_rate=1.0, split_return_rate=1.0,
+                max_splits=3, full_line_probability=1.0)
+
+    def test_off_by_default_matches_legacy_rounding(self):
+        # Default (reconcile_cents=False): every event is the legacy
+        # round(unit_price * event_qty, 2).
+        detail = _ugly_detail()
+        cfg = ReturnsConfig(**self._CFG)
+        assert cfg.reconcile_cents is False
+        out = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+        rq = out.column("ReturnQuantity").to_numpy()
+        rnp = out.column("ReturnNetPrice").to_numpy()
+        expected = np.round((100.0 / 3.0) * rq, 2)
+        np.testing.assert_allclose(rnp, expected, atol=1e-9)
+
+    def test_on_reconciles_each_line_to_the_penny(self):
+        # reconcile_cents=True: each line's events sum EXACTLY to the single-event
+        # equivalent — here round(unit_price * qty, 2) = round(100.00, 2) = 100.00.
+        detail = _ugly_detail()
+        cfg = ReturnsConfig(**self._CFG, reconcile_cents=True)
+        out = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+        so = out.column("OrderNumber").to_numpy()
+        rnp = out.column("ReturnNetPrice").to_numpy()
+        for order_num in np.unique(so):
+            total = rnp[so == order_num].sum()
+            assert abs(total - 100.00) < 1e-9, f"order {order_num}: {total} != 100.00"
+
+    def test_on_changes_only_net_price_not_the_rng_stream(self):
+        # Pure arithmetic, no RNG: everything except ReturnNetPrice is byte-identical
+        # between flag-off and flag-on, and at least one drifting line actually changes.
+        detail = _ugly_detail()
+        off = build_sales_returns_from_detail(
+            detail, chunk_seed=42, cfg=ReturnsConfig(**self._CFG))
+        on = build_sales_returns_from_detail(
+            detail, chunk_seed=42, cfg=ReturnsConfig(**self._CFG, reconcile_cents=True))
+        for col in ("OrderNumber", "OrderLineNumber", "ReturnDate", "ReturnReasonKey",
+                    "ReturnQuantity", "ReturnSequence", "ReturnEventKey"):
+            np.testing.assert_array_equal(
+                off.column(col).to_numpy(), on.column(col).to_numpy(),
+                err_msg=f"{col} changed — reconcile must not touch the RNG stream")
+        # A 3-way even split of 100/3 drifts (99.99) off but reconciles (100.00) on.
+        assert not np.array_equal(
+            off.column("ReturnNetPrice").to_numpy(),
+            on.column("ReturnNetPrice").to_numpy())
 
 
 class TestBackwardCompat:
@@ -304,6 +386,58 @@ class TestEdgeCases:
             ret_qty = result.column("ReturnQuantity").to_numpy()
             assert (ret_qty >= 1).all()
             assert (ret_qty <= 1).all()
+
+
+class TestFrictionCoupling:
+    """Phase 3.4: the fulfillment friction latent (keyed on OrderNumber+line)
+    couples returns to delivery — higher friction => more / faster returns."""
+
+    def _detail(self, n):
+        return pa.table({
+            "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
+            "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
+            "DeliveryDate": pa.array(
+                np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32()),
+            "Quantity": pa.array(np.full(n, 4, dtype=np.int32)),
+            "NetPrice": pa.array(np.full(n, 100.0)),
+            "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
+        })
+
+    def test_high_friction_lines_returned_more(self):
+        from src.facts.sales.sales_logic.core.delivery import line_friction
+        n = 6000
+        cfg = ReturnsConfig(enabled=True, return_rate=0.3, friction_return_boost=2.0)
+        result = build_sales_returns_from_detail(self._detail(n), chunk_seed=42, cfg=cfg)
+        returned = set(int(x) for x in result.column("OrderNumber").to_numpy().tolist())
+        o = np.arange(1, n + 1, dtype=np.int64)
+        fr = line_friction(o, np.ones(n, dtype=np.int32))
+        is_ret = np.array([int(x) in returned for x in o])
+        assert fr[is_ret].mean() > fr[~is_ret].mean() + 0.05
+
+    def test_high_friction_shorter_lag(self):
+        from src.facts.sales.sales_logic.core.delivery import line_friction
+        n = 6000
+        cfg = ReturnsConfig(
+            enabled=True, return_rate=1.0, min_lag_days=1, max_lag_days=30,
+            lag_distribution="uniform", friction_lag_shorten=0.8,
+        )
+        result = build_sales_returns_from_detail(self._detail(n), chunk_seed=42, cfg=cfg)
+        ords = result.column("OrderNumber").to_numpy().astype(np.int64)
+        rdate = result.column("ReturnDate").to_numpy().astype("datetime64[D]")
+        lag = (rdate - np.datetime64("2024-03-15")).astype("timedelta64[D]").astype(int)
+        fr = line_friction(ords, np.ones(ords.size, dtype=np.int32))
+        hi = fr >= np.median(fr)
+        assert lag[hi].mean() < lag[~hi].mean()
+
+    def test_boost_and_shorten_zero_is_byte_identical(self):
+        detail = self._detail(500)
+        r0 = build_sales_returns_from_detail(
+            detail, chunk_seed=7, cfg=ReturnsConfig(enabled=True, return_rate=0.4))
+        rf = build_sales_returns_from_detail(
+            detail, chunk_seed=7,
+            cfg=ReturnsConfig(enabled=True, return_rate=0.4,
+                              friction_return_boost=0.0, friction_lag_shorten=0.0))
+        assert r0.equals(rf)
 
 
 class TestDefaultsConsistency:

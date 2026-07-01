@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Dict, List, Mapping, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import re
 
 from src.tools.sql.dialect import ColumnSpec, SqlType
@@ -143,6 +143,13 @@ _SALES_SCHEMA: Schema = (
     ("EmployeeKey", INT_NN),
     ("PromotionKey", INT_NN),
     ("CurrencyKey", INT_NN),
+    # Canonical fact-grain width for these two keys is SMALLINT (int16): the
+    # values (channel id; minute-of-day 0..1439) fit int16, and the SQL foreign
+    # keys reference SMALLINT dimension keys (e.g. Time.TimeKey), so the fact
+    # columns must be SMALLINT for FK creation to succeed. The Arrow schema is
+    # projected from this (SMALLINT -> int16); the writer casts the int32 arrays
+    # the chunk builder/injection produce down to int16 at write time, so the
+    # parquet dtype matches the SQL DDL (was int32 in parquet vs SMALLINT in SQL).
     ("ChannelKey", SMALLINT_NN),
     ("TimeKey", SMALLINT_NN),
     ("OrderDate", DATE_NN),
@@ -1063,19 +1070,47 @@ DATE_COLUMN_GROUPS = {
 
 _INT32_HALF = 1_073_741_823  # int32_max // 2
 
+# The emitted OrderNumber is a *day-banded* id, not a 1..total_rows counter: each
+# calendar day gets a disjoint band and every chunk a slot within it, so the
+# worst-case id is ~8x total_rows (an 8x safety factor in the per-chunk
+# allocation). See sales.generate_sales_fact's ``_max_order_id``. The SQL DDL
+# must promote at the same point the parquet writer does, i.e. against the id
+# ceiling — NOT against total_rows alone (which would keep INT up to ~1.07B rows
+# while parquet already emits BIGINT past ~134M rows → import overflow).
+_ORDER_ID_SAFETY = 8
 
-def promote_order_number(cols: Sequence[SchemaCol], total_rows: int) -> List[SchemaCol]:
-    """Widen ``OrderNumber`` to BIGINT when *total_rows* would overflow
-    int32, preserving the column's nullability.
+
+def order_id_int64_for_rows(total_rows: int) -> bool:
+    """ID-space-aware estimate of the int64 ``OrderNumber`` decision from row
+    count alone. Mirrors the parquet side's ``_max_order_id`` threshold so the
+    two agree whenever the authoritative per-run flag is unavailable.
+    """
+    return int(total_rows) * _ORDER_ID_SAFETY > _INT32_HALF
+
+
+def promote_order_number(
+    cols: Sequence[SchemaCol],
+    total_rows: int,
+    *,
+    force_int64: Optional[bool] = None,
+) -> List[SchemaCol]:
+    """Widen ``OrderNumber`` to BIGINT when the run needs 64-bit order ids,
+    preserving the column's nullability.
 
     Single source of the int64 ``OrderNumber`` decision for generated SQL:
     used by ``get_sales_schema`` (Sales fact) and by the CREATE TABLE generator
     for the other fact tables that carry the column (OrderHeader/OrderDetail/
-    Returns/Complaints) — which pass the static (tuple) schemas. The
-    parquet/generation side makes the same int64 call via the ``order_id_int64``
-    flag.
+    Returns/Complaints).
+
+    ``force_int64`` is the authoritative decision computed once per run from the
+    real emitted id ceiling (stored on the sales run manifest, threaded here by
+    the CREATE TABLE generator). When it is ``None`` — e.g. generating DDL with
+    no run to consult — the decision falls back to a raw ``total_rows`` threshold
+    (callers that want the id-space-aware estimate pass
+    ``force_int64=order_id_int64_for_rows(total_rows)``).
     """
-    if total_rows <= _INT32_HALF:
+    use_bigint = force_int64 if force_int64 is not None else (total_rows > _INT32_HALF)
+    if not use_bigint:
         return list(cols)
     return [
         (name, BIGINT(not_null=not dtype.nullable)) if name == "OrderNumber" else (name, dtype)
@@ -1083,14 +1118,20 @@ def promote_order_number(cols: Sequence[SchemaCol], total_rows: int) -> List[Sch
     ]
 
 
-def get_sales_schema(skip_order_cols: bool, total_rows: int = 0) -> List[SchemaCol]:
+def get_sales_schema(
+    skip_order_cols: bool,
+    total_rows: int = 0,
+    *,
+    force_int64: Optional[bool] = None,
+) -> List[SchemaCol]:
     """Return the Sales schema with or without order number columns.
 
-    When *total_rows* exceeds half of int32 max, ``OrderNumber`` is
-    promoted to BIGINT to prevent overflow in both parquet and SQL output.
+    ``OrderNumber`` is promoted to BIGINT per the run's ``force_int64`` decision
+    when supplied, otherwise per the raw *total_rows* threshold. See
+    ``promote_order_number``.
     """
     cols = list(_SALES_SCHEMA_NO_ORDER if skip_order_cols else _SALES_SCHEMA)
-    return promote_order_number(cols, total_rows)
+    return promote_order_number(cols, total_rows, force_int64=force_int64)
 
 
 def get_sales_order_header_schema() -> List[SchemaCol]:

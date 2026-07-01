@@ -4,7 +4,13 @@ import re as _re
 from pathlib import Path
 from typing import Mapping, Sequence, Tuple
 
-from src.utils.static_schemas import STATIC_SCHEMAS, get_dates_schema, get_sales_schema, promote_order_number
+from src.utils.static_schemas import (
+    STATIC_SCHEMAS,
+    get_dates_schema,
+    get_sales_schema,
+    order_id_int64_for_rows,
+    promote_order_number,
+)
 from src.utils.logging_utils import work
 from src.tools.sql.dialect import ColumnSpec, DEFAULT_DIALECT, Dialect
 from src.tools.sql.sql_helpers import (
@@ -123,6 +129,7 @@ def generate_all_create_tables(
     schema: str | None = None,
     drop_existing: bool = True,
     dialect: Dialect = DEFAULT_DIALECT,
+    order_id_int64: bool | None = None,
 ):
     """
     Writes:
@@ -201,25 +208,35 @@ def generate_all_create_tables(
     include_returns = _returns_enabled(cfg)
 
     eff_skip_order_cols = _skip_order_cols(cfg, skip_order_cols)
-    # int64 OrderNumber promotion threshold, shared across all fact tables
-    # that carry the column (keeps DDL in sync with the parquet/generation side).
+    # int64 OrderNumber decision, shared across all fact tables that carry the
+    # column so the DDL stays in sync with the parquet/generation side. Prefer
+    # the authoritative per-run flag (computed once from the real emitted id
+    # ceiling and threaded in via ``order_id_int64``); fall back to an
+    # id-space-aware estimate from total_rows when generating DDL with no run.
     sales_total_rows = int(getattr(getattr(cfg, "sales", None), "total_rows", 0) or 0)
+    eff_int64 = (
+        order_id_int64 if order_id_int64 is not None
+        else order_id_int64_for_rows(sales_total_rows)
+    )
 
     fact_scripts: list[str] = []
 
     if include_sales:
         fact_scripts.append(
-            _emit(TABLE_SALES, get_sales_schema(eff_skip_order_cols, total_rows=sales_total_rows))
+            _emit(TABLE_SALES, get_sales_schema(
+                eff_skip_order_cols, total_rows=sales_total_rows, force_int64=eff_int64))
         )
 
     if include_sales_order:
         fact_scripts.append(_emit(
             TABLE_SALES_ORDER_HEADER,
-            promote_order_number(_require_static_schema(TABLE_SALES_ORDER_HEADER), sales_total_rows),
+            promote_order_number(_require_static_schema(TABLE_SALES_ORDER_HEADER),
+                                 sales_total_rows, force_int64=eff_int64),
         ))
         fact_scripts.append(_emit(
             TABLE_SALES_ORDER_DETAIL,
-            promote_order_number(_require_static_schema(TABLE_SALES_ORDER_DETAIL), sales_total_rows),
+            promote_order_number(_require_static_schema(TABLE_SALES_ORDER_DETAIL),
+                                 sales_total_rows, force_int64=eff_int64),
         ))
 
     # Returns placement:
@@ -228,7 +245,8 @@ def generate_all_create_tables(
     if include_returns and (include_sales or include_sales_order):
         fact_scripts.append(_emit(
             TABLE_SALES_RETURN,
-            promote_order_number(_require_static_schema(TABLE_SALES_RETURN), sales_total_rows),
+            promote_order_number(_require_static_schema(TABLE_SALES_RETURN),
+                                 sales_total_rows, force_int64=eff_int64),
         ))
 
     # Budget tables (conditional on budget.enabled)
@@ -244,7 +262,8 @@ def generate_all_create_tables(
     if _complaints_enabled(cfg):
         fact_scripts.append(_emit(
             TABLE_COMPLAINTS,
-            promote_order_number(_require_static_schema(TABLE_COMPLAINTS), sales_total_rows),
+            promote_order_number(_require_static_schema(TABLE_COMPLAINTS),
+                                 sales_total_rows, force_int64=eff_int64),
         ))
 
     # Customer Wishlists (conditional on wishlists.enabled)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -14,7 +15,9 @@ import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 
 from src.exceptions import PackagingError
+from src.tools.sql.dialect import SqlType
 from src.utils.logging_utils import stage, done, info
+from src.utils.static_schemas import STATIC_SCHEMAS
 
 __all__ = [
     "write_parquet_with_date32",
@@ -344,6 +347,117 @@ def _date_col_overrides(df: pd.DataFrame) -> dict[str, pd.Series]:
     }
 
 
+# ============================================================
+# Null-typed column coercion (Delta Lake compatibility)
+# ============================================================
+# An entirely-null object column (common for optional dims on small/short-window
+# runs — e.g. employees.TerminationDate/TerminationReason with no terminations,
+# or stores.ClosingDate on a dataset with no closed stores) makes
+# ``pa.Table.from_pandas`` infer the Arrow ``null`` type. delta-rs rejects that
+# type ("Invalid data type for Delta Lake: Null"), crashing the deltaparquet
+# packaging step. Parquet/CSV tolerate null-typed columns, so this only bites
+# Delta. We cast each null-typed column to a concrete type — derived from the
+# static schema where possible — before the Delta write.
+
+# Non-parametric SqlType -> pyarrow type. DECIMAL is handled separately (needs
+# precision/scale args). Widths are exact where cheap, but for an all-null column
+# only the type *category* matters to delta-rs.
+_SQLTYPE_TO_ARROW: dict[SqlType, pa.DataType] = {
+    SqlType.INT: pa.int32(),
+    SqlType.BIGINT: pa.int64(),
+    SqlType.SMALLINT: pa.int16(),
+    SqlType.TINYINT: pa.int8(),
+    SqlType.BIT: pa.bool_(),
+    SqlType.FLOAT: pa.float64(),
+    SqlType.DATE: pa.date32(),
+    SqlType.DATETIME: pa.timestamp("us"),
+    SqlType.DATETIME2: pa.timestamp("us"),
+    SqlType.TIME: pa.time64("us"),
+    SqlType.VARCHAR: pa.string(),
+    SqlType.CHAR: pa.string(),
+}
+
+
+def _to_snake(name: str) -> str:
+    """PascalCase table name -> snake_case dim-file stem (e.g. Stores -> stores)."""
+    s = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
+    return s.lower()
+
+
+# Reverse map: dim parquet stem -> canonical STATIC_SCHEMAS table key. Dimension
+# files are written as ``to_snake(TableName).parquet`` (see quality_report /
+# dimensions_runner), so this resolves e.g. "employees" -> "Employees".
+_STEM_TO_TABLE: dict[str, str] = {_to_snake(k): k for k in STATIC_SCHEMAS}
+
+
+def _arrow_type_for_spec(spec) -> pa.DataType:
+    """Map a static-schema ``ColumnSpec`` to a concrete pyarrow type."""
+    if spec.sql_type is SqlType.DECIMAL:
+        precision, scale = spec.args
+        return pa.decimal128(int(precision), int(scale))
+    return _SQLTYPE_TO_ARROW.get(spec.sql_type, pa.string())
+
+
+def _arrow_types_for_table(table_name: Optional[str]) -> dict[str, pa.DataType]:
+    """Column-name -> intended pyarrow type for a known table, else empty."""
+    if not table_name:
+        return {}
+    schema = STATIC_SCHEMAS.get(table_name)
+    if not schema:
+        return {}
+    return {col: _arrow_type_for_spec(spec) for col, spec in schema}
+
+
+def _dim_table_name_for_file(stem: str) -> Optional[str]:
+    """Resolve a dim parquet file stem to its STATIC_SCHEMAS key (None if unknown)."""
+    return _STEM_TO_TABLE.get(stem)
+
+
+def _coerce_null_columns(table: pa.Table, table_name: Optional[str]) -> pa.Table:
+    """Align entirely-null columns to a concrete type for Delta writes.
+
+    Two cases are handled, both only for columns that carry no data (so nothing
+    is ever lost and populated columns are untouched):
+
+    * ``null``-typed columns — ``pa.Table.from_pandas`` infers this for all-null
+      object columns, and delta-rs rejects it outright. Cast to the static-schema
+      type for ``table_name`` (date -> date32, string -> string, …), falling back
+      to ``pa.string()`` for unknown columns/tables.
+    * concrete-but-off columns — an all-null date column is left as ``timestamp``
+      by the ``force_date32`` path (pandas ``.dt.date`` yields ``datetime64`` for
+      all-NaT), which disagrees with the schema. Realign it to the schema type so
+      the committed Delta schema matches the static schema in both modes.
+    """
+    type_map = _arrow_types_for_table(table_name)
+    for i in range(table.num_columns):
+        field = table.schema.field(i)
+        column = table.column(i)
+        is_null_typed = pa.types.is_null(field.type)
+        if is_null_typed:
+            target = type_map.get(field.name, pa.string())
+        elif (
+            column.null_count == len(column)
+            and field.name in type_map
+            and not field.type.equals(type_map[field.name])
+        ):
+            target = type_map[field.name]
+        else:
+            continue
+
+        try:
+            casted = column.cast(target)
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError):
+            if not is_null_typed:
+                # Column already has a concrete, Delta-valid type; leave it.
+                continue
+            # A ``null``-typed column must not reach delta-rs; an all-null cast to
+            # string always succeeds, so use it as the last-resort concrete type.
+            casted = column.cast(pa.string())
+        table = table.set_column(i, field.name, casted)
+    return table
+
+
 def _write_one_dim_csv(src: Path, dest: Path, *, force_date32: bool) -> None:
     """Read one dimension parquet and write CSV via pyarrow.
 
@@ -507,6 +621,10 @@ def create_final_output_folder(
                         df = df.assign(**overrides)
 
                 table = pa.Table.from_pandas(df, preserve_index=False)
+                # delta-rs rejects Arrow null-typed columns (all-null object
+                # columns on small/short-window runs); cast them to concrete
+                # types derived from the static schema before committing.
+                table = _coerce_null_columns(table, _dim_table_name_for_file(f.stem))
                 write_deltalake(str(delta_out), table, mode="overwrite")
 
         else:

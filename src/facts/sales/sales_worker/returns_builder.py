@@ -8,6 +8,7 @@ import pyarrow as pa
 
 from src.defaults import RETURN_REASON_KEYS, RETURN_REASON_DEFAULT_WEIGHTS
 from src.exceptions import SalesError
+from src.facts.sales.sales_logic.core.delivery import line_friction
 
 
 # Columns required from OrderDetail to produce a returns fact table.
@@ -56,8 +57,16 @@ class ReturnsConfig:
     max_splits: int = 3
     split_min_gap: int = 3
     split_max_gap: int = 20
+    # Integer-cent (largest-remainder) proration for multi-event returns. Default
+    # off reproduces the legacy per-event rounding byte-for-byte.
+    reconcile_cents: bool = False
     event_key_offset: int = 0
     logistics_keys: frozenset = frozenset()
+    # Fulfillment-friction coupling (recomputed per line from
+    # OrderNumber+OrderLineNumber). Defaults 0.0 => no effect (byte-identical to
+    # the pre-3.4 behavior for direct/unit construction).
+    friction_return_boost: float = 0.0   # p_return_i = rate * (1 + boost*friction_i)
+    friction_lag_shorten: float = 0.0    # lag_i *= (1 - shorten*friction_i)
 
 
 def _returns_schema_for(so_type: pa.DataType) -> pa.Schema:
@@ -165,24 +174,24 @@ def _validate_cfg(cfg: ReturnsConfig) -> tuple[float, int, int, np.ndarray, np.n
       (return_rate, min_lag_days, max_lag_days, reason_keys_i64, reason_probs_f64_normalized)
     """
     if not isinstance(cfg.enabled, bool):
-        raise RuntimeError("ReturnsConfig.enabled must be a bool.")
+        raise SalesError("ReturnsConfig.enabled must be a bool.")
 
     # return_rate validation
     rr = float(cfg.return_rate)
     if not np.isfinite(rr):
-        raise RuntimeError("ReturnsConfig.return_rate must be finite.")
+        raise SalesError("ReturnsConfig.return_rate must be finite.")
     if rr < 0.0 or rr > 1.0:
-        raise RuntimeError("ReturnsConfig.return_rate must be in [0, 1].")
+        raise SalesError("ReturnsConfig.return_rate must be in [0, 1].")
 
     # min_lag_days validation (allow 0)
     min_lag = int(getattr(cfg, 'min_lag_days', 0))
     if min_lag < 0:
-        raise RuntimeError('ReturnsConfig.min_lag_days must be >= 0.')
+        raise SalesError('ReturnsConfig.min_lag_days must be >= 0.')
 
     # max_lag_days validation (allow 0)
     max_lag = int(cfg.max_lag_days)
     if max_lag < 0:
-        raise RuntimeError("ReturnsConfig.max_lag_days must be >= 0.")
+        raise SalesError("ReturnsConfig.max_lag_days must be >= 0.")
 
     if min_lag > max_lag:
         raise SalesError('ReturnsConfig.min_lag_days must be <= max_lag_days.')
@@ -199,9 +208,9 @@ def _validate_cfg(cfg: ReturnsConfig) -> tuple[float, int, int, np.ndarray, np.n
         raise SalesError("ReturnsConfig.reason_probs must match reason_keys length.")
 
     if not np.all(np.isfinite(rp)):
-        raise RuntimeError("ReturnsConfig.reason_probs must be finite.")
+        raise SalesError("ReturnsConfig.reason_probs must be finite.")
     if np.any(rp < 0):
-        raise RuntimeError("ReturnsConfig.reason_probs must be >= 0.")
+        raise SalesError("ReturnsConfig.reason_probs must be >= 0.")
 
     s = float(rp.sum())
     if s <= 0.0:
@@ -295,20 +304,36 @@ def build_sales_returns_from_detail(
     if qty_all.size != n:
         raise RuntimeError("Returns builder: unexpected Quantity length mismatch.")
 
+    # OrderNumber/line for all rows — the friction latent keys on them, and the
+    # masked subset feeds the returns output. Read as int64 so large order
+    # numbers aren't truncated; the output is built back to _so_type below.
+    so_all = _as_np_i64(_col_np(detail_cc, "OrderNumber"))
+    line_all = _as_np_i32(_col_np(detail_cc, "OrderLineNumber"))
+
+    # Shared fulfillment friction couples returns to delivery — the
+    # SAME per-line friction the delivery pass used (recomputed here from
+    # OrderNumber+line) makes late-delivered lines both more likely to be
+    # returned and returned sooner.
+    use_friction = (cfg.friction_return_boost > 0.0) or (cfg.friction_lag_shorten > 0.0)
+    friction_all = line_friction(so_all, line_all) if use_friction else None
+
     # Select candidate return lines (only positive-quantity lines can be returned).
-    mask = (rng.random(n) < rr) & (qty_all > 0)
+    if cfg.friction_return_boost > 0.0 and friction_all is not None:
+        p_return = np.clip(rr * (1.0 + cfg.friction_return_boost * friction_all), 0.0, 1.0)
+    else:
+        p_return = rr
+    mask = (rng.random(n) < p_return) & (qty_all > 0)
     if not bool(mask.any()):
         return _empty_returns_table(_so_type)
 
-    # Read as int64 to avoid truncating large order numbers; the output array is
-    # built back to _so_type below.
-    so = _as_np_i64(_col_np(detail_cc, "OrderNumber"))[mask]
-    line = _as_np_i32(_col_np(detail_cc, "OrderLineNumber"))[mask]
+    so = so_all[mask]
+    line = line_all[mask]
     delivery_raw = _col_np(detail_cc, "DeliveryDate")[mask]
     delivery = _to_np_date_days(delivery_raw)
     qty = qty_all[mask]
     net_price = _as_np_f64(_col_np(detail_cc, "NetPrice"))[mask]
     is_delayed = _as_np_i32(_col_np(detail_cc, "IsOrderDelayed"))[mask]
+    friction = friction_all[mask] if friction_all is not None else None
 
     m = int(qty.size)
     if m == 0:
@@ -388,6 +413,11 @@ def build_sales_returns_from_detail(
     # shape (uniform/triangular/normal) + peak come from models.yaml ->
     # returns.lag_days.{distribution,mode}.
     per_line_lag = _draw_base_lag(rng, m, lo, hi, cfg.lag_distribution, cfg.lag_mode)
+    # Shorten the lag for high-friction (late-delivered) lines so they
+    # are returned sooner. Deterministic scale, no extra RNG draw.
+    if cfg.friction_lag_shorten > 0.0 and friction is not None:
+        _scale = 1.0 - cfg.friction_lag_shorten * friction
+        per_line_lag = np.clip(np.rint(per_line_lag * _scale), lo, hi).astype(np.int32)
     base_lag = np.repeat(per_line_lag, num_events)
 
     # For split events (seq > 1), add cumulative incremental gaps
@@ -438,6 +468,31 @@ def build_sales_returns_from_detail(
     # --- ReturnNetPrice: pro-rated by event quantity ---
     unit_price = net_price_exp / np.maximum(qty_exp.astype(np.float64), 1.0)
     return_net_price = np.round(unit_price * event_qty.astype(np.float64), 2)
+    if cfg.reconcile_cents and multi_idx.size:
+        # Integer-cent largest-remainder apportionment: a line's multi-event
+        # ReturnNetPrice values sum EXACTLY to its single-event equivalent
+        # (round(unit_price * ret_qty, 2)) instead of drifting by per-event
+        # rounding. Pure arithmetic — no RNG draw — so the flag-on path leaves the
+        # rest of the returns table (dates, reasons, qty, keys) byte-identical to
+        # the flag-off path; only multi-event ReturnNetPrice values change.
+        for i in multi_idx:
+            k = int(num_events[i])
+            p = int(offsets[i])
+            ev = event_qty[p:p + k].astype(np.int64)
+            rq_line = int(ev.sum())                      # == ret_qty[i]
+            if rq_line <= 0:
+                continue
+            up_line = float(net_price[i]) / max(float(qty[i]), 1.0)
+            total_cents = int(np.round(up_line * rq_line * 100.0))
+            ideal = total_cents * ev
+            base = ideal // rq_line                       # floor cents per event
+            leftover = int(total_cents - int(base.sum()))
+            if leftover > 0:
+                rem = ideal - base * rq_line              # Hamilton remainders
+                # +1 cent to the largest remainders; ties broken by event order.
+                order = np.lexsort((np.arange(k), -rem))
+                base[order[:leftover]] += 1
+            return_net_price[p:p + k] = base.astype(np.float64) / 100.0
 
     # --- ReturnEventKey: sequential, globally unique via offset ---
     return_event_key = cfg.event_key_offset + np.arange(1, total_events + 1, dtype=np.int64)

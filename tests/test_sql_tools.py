@@ -36,6 +36,7 @@ from src.tools.sql.generate_create_table_scripts import (
 )
 from src.utils.static_schemas import (
     DECIMAL, INT, BIGINT, VARCHAR, _INT32_HALF, promote_order_number,
+    order_id_int64_for_rows,
 )
 from src.tools.sql.generate_bulk_insert_sql import (
     _split_qualified,
@@ -854,3 +855,35 @@ class TestOrderNumberDDLPromotion:
         sql = self._facts_sql(tmp_path, 1000)
         assert re.search(r"OrderNumber\W+INT\b", sql)
         assert not re.search(r"OrderNumber\W+BIGINT\b", sql)
+
+    def test_mismatch_zone_now_promotes(self, tmp_path):
+        """Finding #21 regression: OrderNumber is a day-banded id ~8x total_rows,
+        so a run in the 134M–1.07B row band emits int64 in parquet. The DDL used
+        to key off total_rows alone (INT until ~1.07B) → parquet=int64/DDL=INT
+        import overflow. It must now promote in that band too."""
+        rows = 200_000_000  # below _INT32_HALF, above the ~134M id-space threshold
+        assert rows <= _INT32_HALF                    # old raw threshold: would stay INT
+        assert order_id_int64_for_rows(rows) is True  # id-space aware: needs BIGINT
+        sql = self._facts_sql(tmp_path, rows)
+        assert re.search(r"OrderNumber\W+BIGINT\b", sql)
+        assert not re.search(r"OrderNumber\W+INT\b", sql)
+
+    def _facts_sql_flag(self, tmp_path, total_rows, order_id_int64):
+        cfg = _ns(
+            sales={"sales_output": "both", "total_rows": total_rows, "skip_order_cols": False},
+            returns={"enabled": True}, complaints={"enabled": True}, dates={},
+        )
+        generate_all_create_tables(str(tmp_path), cfg, order_id_int64=order_id_int64)
+        return (tmp_path / "schema" / "02_create_facts.sql").read_text(encoding="utf-8")
+
+    def test_authoritative_flag_overrides_row_estimate(self, tmp_path):
+        """The per-run manifest flag wins over the total_rows estimate in both
+        directions, so the DDL matches whatever the parquet writer actually emitted."""
+        # Tiny row count but the run emitted int64 ids → DDL must be BIGINT.
+        sql_true = self._facts_sql_flag(tmp_path / "a", 1000, order_id_int64=True)
+        assert re.search(r"OrderNumber\W+BIGINT\b", sql_true)
+        assert not re.search(r"OrderNumber\W+INT\b", sql_true)
+        # Huge row count but the run emitted int32 ids → DDL must stay INT.
+        sql_false = self._facts_sql_flag(tmp_path / "b", _INT32_HALF + 1, order_id_int64=False)
+        assert re.search(r"OrderNumber\W+INT\b", sql_false)
+        assert not re.search(r"OrderNumber\W+BIGINT\b", sql_false)

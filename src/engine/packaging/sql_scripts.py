@@ -514,13 +514,20 @@ def compose_verification_sql(*, sql_root: Path) -> None:
 # SQL generation from packaged CSVs
 # ------------------------------------------------------------
 
-def write_create_table_scripts(*, dims_out: Path, facts_out: Path, sql_root: Path, cfg: dict) -> None:
+def write_create_table_scripts(
+    *, dims_out: Path, facts_out: Path, sql_root: Path, cfg: dict,
+    order_id_int64: bool | None = None,
+) -> None:
     """Emit CREATE TABLE scripts for every registered SQL dialect.
 
     SQL Server output lands at the existing ``sql/`` root for backward
     compatibility; every other dialect lands at ``<run>/<dialect_name>/``
     as a sibling of ``sql/``. The cost is trivial (~27 KB per extra dialect)
     and avoids forcing users to re-run the pipeline to switch DBMSes.
+
+    ``order_id_int64`` is the authoritative per-run OrderNumber-width decision
+    (from the sales run manifest); passed through so the DDL matches the parquet
+    dtype exactly. ``None`` lets the generator fall back to a row-count estimate.
     """
     with stage("Generating CREATE TABLE Scripts"):
         dims_csv = list(dims_out.glob("*.csv"))
@@ -537,6 +544,7 @@ def write_create_table_scripts(*, dims_out: Path, facts_out: Path, sql_root: Pat
                 output_folder=out_dir,
                 cfg=cfg,
                 dialect=dialect,
+                order_id_int64=order_id_int64,
             )
 
 

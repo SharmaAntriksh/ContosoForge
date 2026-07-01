@@ -32,6 +32,29 @@ def _as_date32(x):
     return a.astype("datetime64[D]", copy=False)
 
 
+def _weighted_pick(rng, candidates, salience_all, size):
+    """Pick ``size`` promo indices from ``candidates`` (indices into
+    ``promo_keys_all``), weighted by salience when available, else uniform.
+
+    Weighted selection uses inverse-CDF sampling (one ``rng.random(size)`` draw)
+    so it is deterministic per RNG state. ``salience_all`` is a per-promo weight
+    array aligned to ``promo_keys_all``; ``candidates`` indexes into it.
+    """
+    k = int(candidates.size)
+    if salience_all is None:
+        return candidates[rng.integers(0, k, size=size)]
+    w = np.asarray(salience_all, dtype=np.float64)[candidates]
+    w = np.where(np.isfinite(w) & (w > 0.0), w, 0.0)
+    total = float(w.sum())
+    if total <= 0.0:
+        return candidates[rng.integers(0, k, size=size)]
+    cdf = np.cumsum(w) / total
+    cdf[-1] = 1.0  # guard fp drift so searchsorted stays in-bounds
+    picks = np.searchsorted(cdf, rng.random(size), side="right")
+    picks = np.minimum(picks, k - 1)
+    return candidates[picks]
+
+
 def apply_promotions(
     rng,
     n,
@@ -43,12 +66,15 @@ def apply_promotions(
     *,
     channel_keys=None,
     promo_channel_group=None,
+    promo_salience_all=None,
 ):
     """
     Assign at most one PromotionKey per row.
 
-    For each row, picks uniformly among promotions whose
-    [StartDate, EndDate] window covers that row's order date.
+    For each row, picks among promotions whose [StartDate, EndDate] window
+    covers that row's order date. When ``promo_salience_all`` is provided,
+    the pick is weighted by per-promo salience (deeper / more prominent
+    promotions redeemed more often); otherwise it is uniform.
 
     CORRELATION #5: When channel_keys and promo_channel_group are provided,
     promotions are filtered by channel affinity:
@@ -179,10 +205,10 @@ def apply_promotions(
                 if _filtered.size == 0:
                     continue  # keep no_discount_key
 
-                _chosen = _filtered[rng.integers(0, _filtered.size, size=_ct_count)]
+                _chosen = _weighted_pick(rng, _filtered, promo_salience_all, _ct_count)
                 promo_keys[_ct_rows] = promo_keys_all[_chosen]
         else:
-            chosen = idx[rng.integers(0, idx.size, size=count)]
+            chosen = _weighted_pick(rng, idx, promo_salience_all, count)
             promo_keys[rows] = promo_keys_all[chosen]
 
     return promo_keys

@@ -377,18 +377,3 @@ class TestExpandedDeterminism:
         r1 = _normalize_cdf(w.copy())
         r2 = _normalize_cdf(w.copy())
         np.testing.assert_array_equal(r1, r2)
-
-    def test_customer_sampling_deterministic(self):
-        from src.facts.sales.sales_logic.core.customer_sampling import _sample_customers
-        keys = np.arange(1, 101, dtype="int32")
-        mask = np.ones(100, dtype=bool)
-
-        r1 = _sample_customers(
-            np.random.default_rng(42), keys, mask, set(), 50,
-            use_discovery=False, discovery_cfg={},
-        )
-        r2 = _sample_customers(
-            np.random.default_rng(42), keys, mask, set(), 50,
-            use_discovery=False, discovery_cfg={},
-        )
-        np.testing.assert_array_equal(r1, r2)

@@ -2,24 +2,12 @@
 
 This module is imported by worker processes; keep it lightweight and deterministic.
 
-The ``State`` class remains the canonical process-local singleton for
-multiprocessing workers.  ``SalesContext`` is the new dependency-injection
-friendly dataclass that makes dependencies explicit.  Use
-``SalesContext.from_state()`` to snapshot the current ``State`` into a
-context object, which can then be passed through function parameters
-instead of relying on the global.
-
-Migration path:
-    1. New/refactored functions accept ``ctx: SalesContext`` as their
-       first parameter.
-    2. Legacy code continues to read from ``State`` directly.
-    3. Over time, functions are converted to use ``ctx`` and ``State``
-       access is phased out.
+The ``State`` class is the canonical process-local singleton for the sales
+workers: it is populated once per worker by ``bind_globals`` and then read (never
+reassigned) during chunk processing. Each worker process has its own ``State``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -74,144 +62,24 @@ def _logical_to_arrow_schema(logical_schema):
 _SQL_TO_PA = _build_sql_to_pa_map() if PA_AVAILABLE else {}
 
 
-# ===============================================================
-# Dependency-injection context (explicit alternative to State)
-# ===============================================================
-
-@dataclass
-class SalesContext:
-    """Explicit, testable container for all sales worker dependencies.
-
-    Every field that ``State`` exposes as a class variable is represented
-    here as a typed dataclass field.  Use ``SalesContext.from_state()``
-    to snapshot the current global ``State`` into a portable context.
-    """
-
-    # -- Dimension data --
-    product_np: Any = None
-    active_product_np: Any = None
-    customer_keys: Any = None
-    customer_is_active_in_sales: Any = None
-    customer_start_month: Any = None
-    customer_end_month: Any = None
-    customer_base_weight: Any = None
-    seen_customers: Any = field(default_factory=set)
-    date_pool: Any = None
-    date_prob: Any = None
-    store_keys: Any = None
-    store_eligible_by_month: Any = None
-    store_open_day: Any = None   # np.ndarray[datetime64[D]] dense by StoreKey
-    store_close_day: Any = None  # np.ndarray[datetime64[D]] dense by StoreKey
-    store_reno_start_day: Any = None  # dense by StoreKey; far-future sentinel where no renovation
-    store_reno_end_day: Any = None    # dense by StoreKey; far-past sentinel where no renovation
-    store_demand_weight: Any = None   # dense float by StoreKey (all-ones = uniform); bound at worker init
-
-    # -- Promotions --
-    promo_keys_all: Any = None
-    promo_start_all: Any = None
-    promo_end_all: Any = None
-    new_customer_promo_keys: Any = None
-    new_customer_window_months: int = 3
-
-    # -- Mappings --
-    store_to_product_rows: Any = None
-    store_to_geo_arr: Any = None
-    geo_to_currency_arr: Any = None
-    models_cfg: Optional[Dict[str, Any]] = None
-
-    # -- Column correlations --
-    customer_geo_key: Any = None
-    geo_to_country_id: Any = None
-    store_to_country_id: Any = None
-    country_to_store_keys: Any = None
-    store_channel_keys: Any = None
-    channel_prob_by_store: Any = None
-    product_channel_eligible: Any = None
-    promo_channel_group: Any = None
-    channel_fulfillment_days: Any = None
-
-    # -- SCD2 version lookup tables (per-entity, per-row resolution) --
-    product_scd2_active: bool = False
-    product_scd2_starts: Any = None     # (N_pool, max_ver) int64: version start epoch days
-    product_scd2_data: Any = None       # (N_pool, max_ver, 3) float64: ProductKey/ListPrice/UnitCost
-    customer_scd2_active: bool = False
-    customer_scd2_starts: Any = None    # (N_pool, max_ver) int64: version start epoch days
-    customer_scd2_keys: Any = None      # (N_pool, max_ver) int32: CustomerKey per version
-    cust_key_to_pool_idx: Any = None    # dense int32: IsCurrent CustomerKey → pool index
-    customer_first_eff_start_by_key: Any = None  # dense int64: CustomerKey → first EffectiveStartDate epoch days; INT64_MIN for unknown keys
-
-    # -- Output config --
-    file_format: Optional[str] = None
-    out_folder: Optional[str] = None
-    chunk_size: Optional[int] = None
-    row_group_size: Optional[int] = None
-    compression: Optional[str] = None
-    order_id_stride_orders: Optional[int] = None
-    skip_order_cols: Optional[bool] = None
-    skip_order_cols_requested: Optional[bool] = None
-    max_lines_per_order: int = 6
-
-    # -- Delta / partitioning --
-    no_discount_key: Any = None
-    delta_output_folder: Optional[str] = None
-    write_delta: Optional[bool] = None
-    partition_enabled: Optional[bool] = None
-    partition_cols: Optional[List[str]] = None
-
-    # -- Budget --
-    budget_enabled: Optional[bool] = None
-    budget_store_to_country: Any = None
-    budget_product_to_cat: Any = None
-
-    # -- Schema --
-    sales_schema: Any = None
-
-    @classmethod
-    def from_state(cls) -> "SalesContext":
-        """Snapshot the current ``State`` singleton into a ``SalesContext``."""
-        fields = {f.name for f in cls.__dataclass_fields__.values()}
-        kwargs = {}
-        for name in fields:
-            val = getattr(State, name, None)
-            if val is not None:
-                kwargs[name] = val
-        return cls(**kwargs)
-
 
 # ===============================================================
 # Global Sales runtime state (process-local)
 # ===============================================================
 
-class _SealableMeta(type):
-    """Metaclass that enforces immutability once ``_sealed`` is True."""
-
-    def __setattr__(cls, name, value):
-        if name == "_sealed" or not getattr(cls, "_sealed", False):
-            super().__setattr__(name, value)
-        else:
-            raise RuntimeError(
-                f"State is sealed; cannot set '{name}'. "
-                "Call State.reset() first (tests only) or pass values before seal()."
-            )
-
-
-class State(metaclass=_SealableMeta):
+class State:
     """
     Shared global state for Sales runtime only.
 
     Holds cached dimension data, promotion context, and output configuration.
 
     Notes:
-    - Process-local (safe with multiprocessing)
-    - Sealed after initialization (bind_globals refuses mutation once sealed)
-    - Uses ``_SealableMeta`` so that ``setattr(State, k, v)`` is blocked
-      after ``seal()`` is called.
+    - Process-local (safe with multiprocessing): each worker process has its own
+      ``State``, populated once by ``bind_globals`` and treated as read-only
+      afterward by convention. The bound dimension/config fields must not be
+      reassigned after binding; per-worker scratch (lazy caches) is the only thing
+      that mutates during chunk processing.
     """
-
-    # --------------------------------------------------------------
-    # Internal control
-    # --------------------------------------------------------------
-    _sealed = False
 
     # --------------------------------------------------------------
     # Core runtime flags / data
@@ -229,10 +97,28 @@ class State(metaclass=_SealableMeta):
     customer_is_active_in_sales = None
     customer_start_month = None
     customer_end_month = None  # int64 with -1 meaning "no end"
+    # Normalized end-month broadcast (int64, -1 == "no end"): a pure function of
+    # customer_end_month, derived ONCE in bind_globals and read read-only by the
+    # chunk hot path so it isn't reallocated every chunk.
+    customer_end_month_norm = None
     customer_base_weight = None  # optional float64
 
-    # Discovery persistence (optional)
-    seen_customers = None
+    # Closed-form discovery schedule (optional): int64 array aligned with
+    # customer_keys giving the month each customer first enters the sales
+    # population. Built once per run and broadcast read-only; replaces the old
+    # mutable per-worker ``seen_customers`` accumulator.
+    customer_discovery_month = None
+
+    # Global per-month plan. Computed once in the coordinator against
+    # the GLOBAL month totals and broadcast read-only; each chunk slices a
+    # contiguous band of every month's order-id space, so the per-month row curve
+    # and distinct-customer curve no longer depend on chunk_size / worker count
+    # (review Finding #4/#14). See chunk_builder.build_chunk_table.
+    sales_rows_per_month = None        # int64[T]: rows per month
+    sales_orders_per_month = None      # int64[T]: orders per month (<= rows)
+    sales_distinct_target = None       # int64[T]: distinct-customer target per month
+    sales_plan_seed = None             # run seed for month-pool + repeat draws
+    total_chunks = None                # chunk count (index-space sharding divisor)
 
     date_pool = None
     date_prob = None
@@ -370,37 +256,13 @@ class State(metaclass=_SealableMeta):
         Reset all State fields.
         Intended for tests / development only.
         """
-        # Unseal first so setattr calls below are allowed by _SealableMeta
-        State._sealed = False
         for key in list(vars(State).keys()):
-            if key.startswith("__") or key == "_sealed":
+            if key.startswith("__"):
                 continue
             attr = getattr(State, key)
             if callable(attr):
                 continue
             setattr(State, key, None)
-
-    @staticmethod
-    def validate(required):
-        """
-        Validate required state fields exist (not None).
-        """
-        missing = [r for r in required if getattr(State, r, None) is None]
-        if missing:
-            raise RuntimeError(f"Missing State fields: {missing}")
-
-    @staticmethod
-    def seal():
-        """
-        Prevent further mutation of State via bind_globals().
-        Called once during worker initialization.
-
-        After sealing, ``_SealableMeta.__setattr__`` rejects any
-        ``setattr(State, ...)`` calls so that sealed state is truly immutable.
-        """
-        if PA_AVAILABLE and State.sales_schema is None:
-            raise RuntimeError("State.sales_schema was not bound before sealing")
-        State._sealed = True
 
 
 # ===============================================================
@@ -413,9 +275,6 @@ def bind_globals(gdict: dict):
 
     Must be called before workers start (per-process).
     """
-    if State._sealed:
-        raise RuntimeError("State is sealed and cannot be modified")
-
     if not isinstance(gdict, dict):
         raise TypeError("bind_globals expects a dict")
 
@@ -423,16 +282,18 @@ def bind_globals(gdict: dict):
     for k, v in gdict.items():
         setattr(State, k, v)
 
-    # Ensure seen_customers exists (chunk_builder will only use it if discovery enabled)
-    sc = getattr(State, "seen_customers", None)
-    if sc is None:
-        State.seen_customers = set()
-    elif not isinstance(sc, set):
-        # tolerate list/tuple/np arrays being passed by caller
-        try:
-            State.seen_customers = set(sc)
-        except (TypeError, ValueError):
-            State.seen_customers = set()
+    # --------------------------------------------------------------
+    # Derive the normalized end-month broadcast ONCE per (re)bind so the chunk
+    # hot path reads it instead of reallocating it every chunk. It is a pure
+    # function of customer_end_month (already int64/-1 upstream), so this is
+    # byte-identical to the old per-chunk _normalize_end_month call. Only
+    # (re)compute when this bind actually touches the customer arrays; the
+    # import is function-local to avoid the core -> ..globals.fmt import cycle.
+    # --------------------------------------------------------------
+    if ("customer_end_month" in gdict or "customer_keys" in gdict) and State.customer_keys is not None:
+        from .core.customer_sampling import _normalize_end_month
+        _n_cust = int(np.asarray(State.customer_keys).shape[0])
+        State.customer_end_month_norm = _normalize_end_month(State.customer_end_month, _n_cust)
 
     # --------------------------------------------------------------
     # Bind Sales schema ONCE, respecting skip_order_cols
@@ -472,7 +333,6 @@ def fmt(dt):
 
 
 __all__ = [
-    "SalesContext",
     "State",
     "bind_globals",
     "fmt",

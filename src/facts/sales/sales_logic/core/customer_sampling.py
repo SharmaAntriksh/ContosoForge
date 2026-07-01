@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import math
 import warnings
 from typing import Optional
 
 import numpy as np
+
+from .allocation import _stable_seed
+from src.utils.hashing import GOLDEN, splitmix64, u01_from_u64
 
 
 # ----------------------------------------------------------------
@@ -115,54 +117,6 @@ def _eligible_customer_mask_for_month(
     )
 
 
-# ----------------------------------------------------------------
-# Participation target
-# ----------------------------------------------------------------
-
-def _participation_distinct_target(
-    rng: np.random.Generator,
-    m_offset: int,
-    eligible_count: int,
-    n_orders: int,
-    cfg: dict,
-) -> int:
-    """
-    Target number of distinct customers to appear in the month.
-    """
-    eligible_count = int(eligible_count)
-    n_orders = int(n_orders)
-    if eligible_count <= 0 or n_orders <= 0:
-        return 0
-
-    base_ratio = float(cfg.get("base_distinct_ratio", 0.0))
-    min_k = int(cfg.get("min_distinct_customers", 0))
-    max_ratio = float(cfg.get("max_distinct_ratio", 1.0))
-
-    k = eligible_count * base_ratio
-
-    cycles_cfg = cfg.get("cycles", {}) or {}
-    if bool(cycles_cfg.get("enabled", False)):
-        period = int(cycles_cfg.get("period_months", 24))
-        amp = float(cycles_cfg.get("amplitude", 0.0))
-        phase = float(cycles_cfg.get("phase", 0.0))
-        noise_std = float(cycles_cfg.get("noise_std", 0.0))
-
-        cyc = math.sin((2.0 * math.pi * float(m_offset) / max(period, 1)) + phase)
-        mult = 1.0 + (amp * cyc)
-        if noise_std > 0:
-            mult += float(rng.normal(loc=0.0, scale=noise_std))
-
-        mult = max(0.05, min(mult, 3.0))
-        k *= mult
-
-    k = max(k, float(min_k))
-    k = min(k, eligible_count * max_ratio)
-    k = min(k, float(eligible_count), float(n_orders))
-
-    # round() can push k above n_orders at the boundary
-    return min(int(max(1, round(k))), n_orders, eligible_count)
-
-
 # ------------------------------------------------------------
 # Shared weight normalization
 # ------------------------------------------------------------
@@ -241,99 +195,95 @@ def _choice(
     return rng.choice(keys, size=size, replace=replace, p=p)
 
 
-def _concat_and_shuffle(rng: np.random.Generator, *arrays: np.ndarray) -> np.ndarray:
-    """Concatenate non-empty arrays and shuffle the result in-place."""
-    parts = [a for a in arrays if a.size > 0]
-    if len(parts) == 0:
-        dtype = arrays[0].dtype if arrays else "int64"
-        return np.empty(0, dtype=dtype)
-    out = np.concatenate(parts) if len(parts) > 1 else parts[0].copy()
-    rng.shuffle(out)
+# ----------------------------------------------------------------
+# Closed-form customer discovery schedule
+# ----------------------------------------------------------------
+# The month each customer first enters the sales population ("discovery") is a
+# pure function of ``(CustomerKey, run_seed)`` and the customer's eligibility
+# window — computed ONCE per run and broadcast read-only to every worker. This
+# replaces the old mutable, per-worker ``seen_customers`` accumulator whose
+# contents depended on which chunks a worker happened to process, which made the
+# output depend on ``--workers`` (review Finding #5/#6). With a static schedule
+# every chunk is a pure function of its own inputs, so worker count no longer
+# affects the generated sales fact.
+
+_SPLITMIX_MASK = np.uint64(0xFFFFFFFFFFFFFFFF)
+
+
+def _hash_uniform(keys: np.ndarray, seed: int) -> np.ndarray:
+    """Deterministic per-key uniform draw in ``[0, 1)`` from ``(key, seed)``.
+
+    Vectorized splitmix64-style mix; stable across runs, platforms, and worker
+    counts. ``seed`` is folded in so different run seeds reshuffle discovery
+    timing even for an unchanged customer dimension.
+    """
+    k = np.asarray(keys).astype(np.uint64)
+    # Pre-mix the scalar seed into a 64-bit constant (non-zero even for seed 0).
+    s_val = (int(seed) * 0x2545F4914F6CDD1D + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+    s = np.uint64(s_val)
+    with np.errstate(over="ignore"):
+        z = splitmix64((k * GOLDEN) ^ s)
+    # Top 53 bits → double in [0, 1).
+    return u01_from_u64(z)
+
+
+def compute_discovery_months(
+    customer_keys: np.ndarray,
+    is_active_in_sales: np.ndarray,
+    start_month: np.ndarray,
+    end_month,
+    T: int,
+    run_seed: int,
+    *,
+    lag_scale: float = 1.0,
+) -> np.ndarray:
+    """Assign every customer the month they are first introduced into sales.
+
+    Returns an int64 array aligned with ``customer_keys``. Discoverable
+    customers get a value in ``[0, T-1]``; inactive customers and those whose
+    join month falls after the window get the sentinel ``T`` ("never", which is
+    strictly greater than any real month offset).
+
+    The month is anchored at the customer's eligibility start and pushed forward
+    by a small, deterministic, hash-seeded lag (mean ``lag_scale`` months) so
+    that discovery is spread realistically past the join month rather than every
+    customer transacting the instant they become eligible. The lag is clamped to
+    the customer's end month so a churning customer is never scheduled past their
+    window. Warm-start (pre-existing, ``start_month < 0``) customers are treated
+    as already known and get no lag.
+    """
+    n = int(np.asarray(customer_keys).shape[0])
+    T = int(T)
+    never = np.int64(max(T, 0))
+    if n == 0 or T <= 0:
+        return np.full(n, never, dtype=np.int64)
+
+    keys = np.asarray(customer_keys).astype(np.int64)
+    active = np.asarray(is_active_in_sales).astype(np.int64) == 1
+    sm = np.asarray(start_month).astype(np.int64)
+    em = _normalize_end_month(end_month, n)   # -1 => no end within window
+
+    # Earliest possible discovery = the customer's first eligible month.
+    s = np.clip(sm, 0, T - 1)
+    # Latest possible discovery = last eligible month within the window.
+    e = np.where(em < 0, np.int64(T - 1), np.minimum(em, np.int64(T - 1)))
+    e = np.maximum(e, s)
+
+    # Deterministic forward lag ~ Exponential(mean=lag_scale), floored to months.
+    u = _hash_uniform(keys, run_seed)
+    scale = max(0.0, float(lag_scale))
+    if scale > 0.0:
+        lag = np.floor(-np.log1p(-u) * scale).astype(np.int64)
+    else:
+        lag = np.zeros(n, dtype=np.int64)
+    lag = np.where(sm < 0, np.int64(0), lag)   # warm start: no lag
+
+    disc = np.clip(s + lag, s, e)
+
+    out = np.full(n, never, dtype=np.int64)
+    discoverable = active & (sm < T)
+    out[discoverable] = disc[discoverable]
     return out
-
-
-# ----------------------------------------------------------------
-# Seen-set masking
-# ----------------------------------------------------------------
-
-# Threshold for switching from lookup-table to sorted-intersection.
-# For dense 1-based keys a boolean array is O(max_key) memory and O(n) time.
-# Fall back to sorted intersection only when keys are extremely sparse.
-_SPARSE_KEY_RATIO = 64
-
-
-def _build_seen_mask(eligible_keys: np.ndarray, seen_set) -> np.ndarray:
-    """
-    Vectorized seen-membership test.
-
-    Accepts either a Python set or a numpy boolean lookup array (see
-    ``_make_seen_lookup`` / ``_update_seen_lookup``).
-
-    Strategy:
-      - If *seen_set* is a numpy array: direct O(n_eligible) indexed lookup.
-      - If *seen_set* is a Python set (legacy): convert to lookup on the fly.
-    """
-    # Fast path: numpy boolean lookup array (new contract)
-    if isinstance(seen_set, np.ndarray):
-        if seen_set.size == 0:
-            return np.zeros(eligible_keys.size, dtype=bool)
-        # Eligible keys that exceed the lookup size are unseen by definition:
-        # out-of-range keys default to False (unseen), which is correct
-        # semantics since they have not been added to the seen_set yet.
-        max_idx = seen_set.size - 1
-        keys = np.asarray(eligible_keys, dtype=np.int32)
-        in_range = keys <= max_idx
-        out = np.zeros(keys.size, dtype=bool)
-        out[in_range] = seen_set[keys[in_range]]
-        return out
-
-    # Legacy path: Python set
-    if not seen_set or len(seen_set) == 0:
-        return np.zeros(eligible_keys.size, dtype=bool)
-
-    max_key = int(eligible_keys.max())
-    n_keys = eligible_keys.size
-
-    # Dense path: boolean lookup table
-    if max_key < n_keys * _SPARSE_KEY_RATIO and max_key < 50_000_000:
-        lookup = np.zeros(max_key + 1, dtype=bool)
-        seen_arr = np.fromiter(seen_set, dtype=np.int32, count=len(seen_set))
-        # Clip to valid range (keys outside the eligible range are irrelevant)
-        valid = seen_arr[(seen_arr >= 0) & (seen_arr <= max_key)]
-        lookup[valid] = True
-        return lookup[eligible_keys]
-
-    # Sparse path: sorted intersection via searchsorted (no Python loop)
-    seen_sorted = np.sort(np.fromiter(seen_set, dtype=np.int32, count=len(seen_set)))
-    pos = np.searchsorted(seen_sorted, eligible_keys)
-    pos = np.clip(pos, 0, seen_sorted.size - 1)
-    return seen_sorted[pos] == eligible_keys
-
-
-def _make_seen_lookup(customer_keys: np.ndarray, existing_set=None) -> np.ndarray:
-    """Create a boolean lookup array for seen-customer tracking.
-
-    Much faster than a Python set for repeated vectorized membership tests.
-    """
-    max_key = int(np.asarray(customer_keys, dtype=np.int32).max())
-    lookup = np.zeros(max_key + 1, dtype=bool)
-    if existing_set:
-        if isinstance(existing_set, np.ndarray):
-            # Copy existing lookup
-            copy_len = min(lookup.size, existing_set.size)
-            lookup[:copy_len] = existing_set[:copy_len]
-        elif isinstance(existing_set, set) and len(existing_set) > 0:
-            seen_arr = np.fromiter(existing_set, dtype="int64", count=len(existing_set))
-            valid = seen_arr[(seen_arr >= 0) & (seen_arr <= max_key)]
-            lookup[valid] = True
-    return lookup
-
-
-def _update_seen_lookup(lookup: np.ndarray, new_keys: np.ndarray) -> None:
-    """Mark keys as seen in the boolean lookup array. O(k) for k new keys."""
-    keys = np.asarray(new_keys, dtype=np.int32)
-    keys = keys[(keys >= 0) & (keys < lookup.size)]
-    lookup[keys] = True
 
 
 # ----------------------------------------------------------------
@@ -379,198 +329,228 @@ def _urgency_pick(
     return keys[order[:min(size, keys.size)]]
 
 
-# ----------------------------------------------------------------
-# Main sampling entry point
-# ----------------------------------------------------------------
+# ================================================================
+# Global per-month plan ("plan globally, shard the index space")
+# ================================================================
+# The chunk-dependent bug (review Finding #4/#14): the per-month distinct-customer
+# target was evaluated against *per-chunk* rows and repeats were drawn from a
+# *chunk-local* pool, so splitting the same rows into more chunks redistributed
+# which customers transact in which month — ``base_distinct_ratio`` silently
+# depended on ``chunk_size``. The fix computes the per-month distinct target and
+# the actual distinct-customer *pool* ONCE from the run seed against GLOBAL month
+# totals, then treats each month's orders as a contiguous global index space that
+# chunks slice. Because a given global order index always maps to the same
+# customer (``assign_orders_to_customers``), the union of distinct customers per
+# month is exactly the month pool regardless of how the orders are chunked.
 
-def _sample_customers(
-    rng: np.random.Generator,
-    customer_keys: np.ndarray,
-    eligible_mask: np.ndarray | None,
-    seen_set,
-    n: int,
-    use_discovery: bool,
-    discovery_cfg: dict,
-    base_weight: np.ndarray | None = None,
-    target_distinct: int | None = None,
-    end_month_norm: np.ndarray | None = None,
-    m_offset: int = 0,
-    eligible_idx: np.ndarray | None = None,
+
+def compute_month_distinct_targets(
+    *,
+    seed: int,
+    T: int,
+    eligible_counts: np.ndarray,
+    orders_per_month: np.ndarray,
+    month_cal_index: np.ndarray,
+    distinct_ratio: float,
+    cycle_amplitude: float,
+    participation_noise: float,
+    seasonal_spike_map: dict,
+    max_distinct_ratio: float,
+    min_distinct_customers: int,
 ) -> np.ndarray:
+    """Global per-month distinct-customer target ``D[m]`` (Finding #4/#14/#17).
+
+    Single source of truth for "how many distinct customers transact in month m",
+    evaluated against the GLOBAL month totals (``eligible_counts``,
+    ``orders_per_month``) and a seed-derived RNG — so it is independent of
+    ``chunk_size`` / worker count. This is the single source of truth for the
+    per-month distinct target (it replaced the per-chunk inline target in
+    chunk_builder and the removed ``_participation_distinct_target`` duplicate).
+    Returns an int64 array of length ``T`` with ``D[m] <= orders_per_month[m]``.
+
+    ``distinct_ratio <= 0`` means "no participation throttle" → maximum diversity
+    (``D[m] = min(orders, eligible)``), matching the pre-Phase-2 organic behavior
+    where a non-positive ratio meant *no distinct target*. It must NOT collapse to
+    zero, which would leave every month with an empty pool and silently drop all
+    rows (the chunk skips months whose pool is empty).
     """
-    Returns array of CustomerKeys of length n, sampled from eligible customers.
+    T = int(T)
+    out = np.zeros(T, dtype=np.int64)
+    if T <= 0:
+        return out
 
-    - If use_discovery: forces a slice of newly-eligible-but-unseen customers to appear.
-    - If target_distinct is provided: builds a distinct pool then repeats from it.
-    - If end_month_norm is provided: undiscovered customers closest to expiry are
-      discovered first so they are not lost to churn.
+    ec = np.asarray(eligible_counts, dtype=np.int64)
+    om = np.asarray(orders_per_month, dtype=np.int64)
+    cal = np.asarray(month_cal_index, dtype=np.int64)
+    ratio = float(distinct_ratio)
+    # One RNG for the whole plan; drawing T normals in order keeps D[m]
+    # deterministic and chunk/worker-invariant (never the per-chunk rng).
+    rng = np.random.default_rng(_stable_seed(seed, "distinct_target", T))
 
-    ``eligible_idx`` may be passed precomputed (the per-month eligible row indices)
-    to skip the ``flatnonzero(mask)`` derivation; otherwise it is derived from
-    ``eligible_mask``.
+    max_ratio = float(max_distinct_ratio)
+    min_k = float(min_distinct_customers)
+    for m in range(T):
+        e = int(ec[m])
+        o = int(om[m])
+        if e <= 0 or o <= 0:
+            continue
+        if ratio <= 0.0:
+            # No throttle → every order can be a fresh customer (organic).
+            out[m] = max(1, min(o, e))
+            continue
+        k = ratio * e
+        if float(cycle_amplitude) > 0.0:
+            k *= 1.0 + float(cycle_amplitude) * float(np.sin(2.0 * np.pi * m / 24.0))
+        if seasonal_spike_map:
+            boost = seasonal_spike_map.get(int(cal[m]))
+            if boost:
+                k *= 1.0 + float(boost)
+        if float(participation_noise) > 0.0:
+            k *= 1.0 + float(participation_noise) * float(rng.standard_normal())
+        k = max(k, min_k)
+        k = min(k, e * max_ratio, float(e), float(o))
+        out[m] = max(1, int(round(k)))
+    return out
+
+
+def build_month_customer_pool(
+    *,
+    m_offset: int,
+    distinct_target: int,
+    eligible_idx: np.ndarray,
+    customer_keys: np.ndarray,
+    discovery_month,
+    base_weight,
+    end_month_norm,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Deterministic distinct-customer pool ``P`` and weighted CDF for month ``m``.
+
+    ``P`` is the exact set of distinct customers that transact in month ``m``
+    (``len(P) <= distinct_target``). Built once per ``(month, run)`` from a
+    month-seeded RNG — never the chunk RNG — so it is identical for every chunk
+    and every worker. Semantics mirror the old discovery/participation path:
+
+    - force-include the discovery *debut* cohort (``discovery_month == m``),
+      nearest-expiry first when it must be truncated to fit ``distinct_target``;
+    - fill the remaining distinct slots from previously-introduced customers
+      (``discovery_month < m``), weighted by ``base_weight``;
+    - if nobody has been introduced yet this month, fall back to an organic draw
+      from all eligible customers so planned orders are never lost.
+
+    The returned CDF (over ``P``, weighted by ``base_weight``) drives repeat-order
+    customer selection in :func:`assign_orders_to_customers`.
     """
-    n = int(n)
-    if n <= 0:
-        return np.empty(0, dtype=np.asarray(customer_keys).dtype)
+    m = int(m_offset)
+    D = int(distinct_target)
+    ei = np.asarray(eligible_idx)
+    ck = np.asarray(customer_keys)
+    empty = (np.empty(0, dtype=ck.dtype), np.empty(0, dtype=np.float64))
+    if D <= 0 or ei.size == 0:
+        return empty
 
-    customer_keys = np.asarray(customer_keys)
+    rng = np.random.default_rng(_stable_seed(seed, "month_pool", m))
+    elig_keys = ck[ei]
 
-    if eligible_idx is None:
-        eligible_mask = np.asarray(eligible_mask, dtype=bool)
-        eligible_idx = np.flatnonzero(eligible_mask)
+    if discovery_month is not None:
+        disc = np.asarray(discovery_month)[ei]
+        introduced = disc <= m
+        debut = disc == m
     else:
-        eligible_idx = np.asarray(eligible_idx)
-    if eligible_idx.size == 0:
-        return np.empty(0, dtype=customer_keys.dtype)
+        introduced = np.ones(ei.size, dtype=bool)
+        debut = np.zeros(ei.size, dtype=bool)
+    prior = introduced & ~debut
 
-    eligible_keys = customer_keys[eligible_idx]
+    debut_keys = elig_keys[debut]
+    debut_idx = ei[debut]
+    prior_keys = elig_keys[prior]
+    prior_idx = ei[prior]
 
-    # Accept numpy boolean lookup arrays (fast) or Python sets (legacy)
-    if not isinstance(seen_set, (set, np.ndarray)):
-        seen_set = set(seen_set) if seen_set else set()
-
-    k = None
-    if target_distinct is not None:
-        try:
-            k0 = int(target_distinct)
-            k = max(1, min(k0, int(eligible_keys.size), n))
-        except (TypeError, ValueError):
-            warnings.warn(
-                f"target_distinct={target_distinct!r} is not a valid integer; "
-                f"falling back to unlimited distinct customers.",
-                stacklevel=2,
-            )
-            k = None
-
-    # Precompute eligible weights (dimension-aligned)
-    p_eligible = _weights_for_indices(eligible_idx, base_weight)
-
-    # -----------------------------
-    # No discovery
-    # -----------------------------
-    if not use_discovery:
-        if k is None:
-            return _choice(rng, eligible_keys, n, replace=True, p=p_eligible)
-
-        distinct_pool = _choice(rng, eligible_keys, k, replace=False, p=p_eligible)
-        remaining = n - distinct_pool.size
-        if remaining <= 0:
-            return _concat_and_shuffle(rng, distinct_pool)
-
-        p_distinct = _weights_for_keys(distinct_pool, base_weight)
-        repeats = _choice(rng, distinct_pool, remaining, replace=True, p=p_distinct)
-        return _concat_and_shuffle(rng, distinct_pool, repeats)
-
-    # -----------------------------
-    # Discovery mode
-    # -----------------------------
-
-    _has_seen = (seen_set.any() if isinstance(seen_set, np.ndarray)
-                  else bool(seen_set))
-    if _has_seen:
-        seen_mask = _build_seen_mask(eligible_keys, seen_set)
-        seen_eligible = eligible_keys[seen_mask]
-        seen_eligible_idx = eligible_idx[seen_mask]
-
-        undiscovered = eligible_keys[~seen_mask]
-        undiscovered_idx = eligible_idx[~seen_mask]
+    # Force the debut cohort in, capped at the distinct target (nearest-expiry
+    # first so churning customers aren't dropped when the cohort is truncated).
+    if debut_keys.size > D:
+        pool = _urgency_pick(rng, debut_keys, debut_idx, end_month_norm, m, D)
     else:
-        seen_eligible = np.empty(0, dtype=eligible_keys.dtype)
-        seen_eligible_idx = np.empty(0, dtype="int64")
-        undiscovered = eligible_keys
-        undiscovered_idx = eligible_idx
+        pool = debut_keys
 
-    forced = np.empty(0, dtype=eligible_keys.dtype)
-    if undiscovered.size > 0:
-        discover_n = int(discovery_cfg.get("_target_new_customers", 1))
+    need = D - int(pool.size)
+    if need > 0 and prior_keys.size > 0:
+        p_prior = _weights_for_indices(prior_idx, base_weight)
+        take = min(need, int(prior_keys.size))
+        extra = _choice(rng, prior_keys, take, replace=False, p=p_prior)
+        pool = extra if pool.size == 0 else np.concatenate([pool, extra])
 
-        # Add variance around the target (seed-deterministic but not "flat").
-        # Default True: restores the older jaggedness without requiring config edits.
-        if bool(discovery_cfg.get("stochastic_discovery", True)) and discover_n > 0:
-            discover_n = int(rng.poisson(lam=float(discover_n)))
+    if pool.size == 0:
+        # Nobody introduced yet this month → organic draw so orders aren't lost.
+        take = min(D, int(elig_keys.size))
+        p_elig = _weights_for_indices(ei, base_weight)
+        pool = _choice(rng, elig_keys, take, replace=False, p=p_elig)
 
-        max_frac = discovery_cfg.get("max_fraction_per_month")
-        if max_frac is not None:
-            try:
-                max_frac_f = float(max_frac)
-            except (TypeError, ValueError):
-                warnings.warn(
-                    f"discovery.max_fraction_per_month={max_frac!r} is not numeric; "
-                    f"ignoring cap. Fix config to apply the intended limit.",
-                    stacklevel=2,
-                )
-                max_frac_f = None
+    if pool.size == 0:
+        return empty
 
-            if max_frac_f is not None:
-                max_new = int(max_frac_f * int(eligible_keys.size))
-                discover_n = min(discover_n, max_new)
+    pool = np.asarray(pool, dtype=ck.dtype)
+    p_pool = _weights_for_keys(pool, base_weight)
+    if p_pool is None:
+        p_pool = np.full(pool.size, 1.0 / pool.size, dtype=np.float64)
+    cdf = np.cumsum(p_pool, dtype=np.float64)
+    cdf[-1] = 1.0  # CLAUDE.md gotcha #16: clamp so searchsorted stays in bounds
+    return pool, cdf
 
-        discover_n = max(0, min(discover_n, int(undiscovered.size)))
-        if discover_n > 0:
-            forced = _urgency_pick(
-                rng, undiscovered, undiscovered_idx,
-                end_month_norm, m_offset, discover_n,
-            )
 
-    # ------------------------------------------------------------
-    # Discovery without participation target
-    # ------------------------------------------------------------
-    if k is None:
-        remaining = n - forced.size
-        if remaining <= 0:
-            return _concat_and_shuffle(rng, forced)
+def _hash_uniform_positions(m_offset: int, positions: np.ndarray, seed: int) -> np.ndarray:
+    """Deterministic uniforms in ``[0, 1)`` keyed by ``(m_offset, position, seed)``.
 
-        # Repeat from ALL eligible this month (seen + undiscovered),
-        # so undiscovered customers can appear organically beyond the
-        # forced set.
-        repeat_pool = eligible_keys
-        p_repeat = p_eligible
+    Used to pick repeat-order customers by *global order index* so a given index
+    always maps to the same customer regardless of how the month is chunked.
+    Vectorized splitmix64-style mix (same family as :func:`_hash_uniform`).
+    """
+    pos = np.asarray(positions).astype(np.uint64)
+    s_val = (int(seed) * 0x2545F4914F6CDD1D + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+    m_val = ((int(m_offset) + 1) * 0xD1B54A32D192ED03) & 0xFFFFFFFFFFFFFFFF
+    s = np.uint64(s_val ^ m_val)
+    with np.errstate(over="ignore"):
+        z = splitmix64((pos * GOLDEN) ^ s)
+    return u01_from_u64(z)
 
-        repeat = _choice(rng, repeat_pool, remaining, replace=True, p=p_repeat)
-        return _concat_and_shuffle(rng, forced, repeat)
 
-    # ------------------------------------------------------------
-    # Participation-controlled discovery
-    # ------------------------------------------------------------
-    if forced.size > k:
-        # _urgency_pick returns in urgency order (nearest-expiry first),
-        # so taking the first k preserves the most urgent customers.
-        forced = forced[:k]
+def assign_orders_to_customers(
+    *,
+    m_offset: int,
+    order_start: int,
+    n_orders: int,
+    pool: np.ndarray,
+    cdf: np.ndarray,
+    seed: int,
+) -> np.ndarray:
+    """Map a contiguous band of global order indices to CustomerKeys.
 
-    distinct_pool = forced
-    need = k - distinct_pool.size
+    Global order index ``j`` (in ``[0, orders_this_month)``) maps to:
 
-    if need > 0:
-        other = undiscovered
-        other_idx = undiscovered_idx
-        if distinct_pool.size > 0 and other.size > 0:
-            keep = ~np.isin(other, distinct_pool)
-            other = other[keep]
-            other_idx = other_idx[keep]
+    - ``pool[j]`` when ``j < len(pool)`` — each distinct customer appears once, at
+      the front of the month's order space;
+    - ``pool[searchsorted(cdf, hash(m, j))]`` otherwise — a weighted repeat.
 
-        # Take as many undiscovered as we can, nearest-expiry first
-        if other.size > 0:
-            take_new = min(need, int(other.size))
-            new_extra = _urgency_pick(
-                rng, other, other_idx,
-                end_month_norm, m_offset, take_new,
-            )
-            distinct_pool = np.concatenate([distinct_pool, new_extra])
-            need = k - distinct_pool.size
+    Because every chunk that owns index ``j`` computes the same customer, the
+    union of distinct customers across all chunks for month ``m`` is exactly
+    ``pool`` — independent of how the month's orders are split into chunks
+    (the whole point of the global per-month plan). Returns a CustomerKey array of length
+    ``n_orders``.
+    """
+    n = int(n_orders)
+    if n <= 0 or pool.size == 0:
+        return np.empty(0, dtype=(pool.dtype if pool.size else np.int32))
+    P = int(pool.size)
+    gj = np.arange(int(order_start), int(order_start) + n, dtype=np.int64)
+    out = np.empty(n, dtype=pool.dtype)
 
-        # Fill remaining slots with seen eligible
-        if need > 0 and seen_eligible.size > 0:
-            take_seen = min(need, int(seen_eligible.size))
-            seen_extra = rng.choice(seen_eligible, size=take_seen, replace=False)
-            distinct_pool = np.concatenate([distinct_pool, seen_extra])
-
-    if distinct_pool.size == 0:
-        return _choice(rng, eligible_keys, n, replace=True, p=p_eligible)
-
-    remaining = n - distinct_pool.size
-    if remaining <= 0:
-        return _concat_and_shuffle(rng, distinct_pool)
-
-    p_distinct = _weights_for_keys(distinct_pool, base_weight)
-    repeats = _choice(rng, distinct_pool, remaining, replace=True, p=p_distinct)
-    return _concat_and_shuffle(rng, distinct_pool, repeats)
+    distinct_mask = gj < P
+    if distinct_mask.any():
+        out[distinct_mask] = pool[gj[distinct_mask]]
+    rep_mask = ~distinct_mask
+    if rep_mask.any():
+        u = _hash_uniform_positions(m_offset, gj[rep_mask], seed)
+        idx = np.searchsorted(cdf, u, side="right")
+        np.clip(idx, 0, P - 1, out=idx)
+        out[rep_mask] = pool[idx]
+    return out

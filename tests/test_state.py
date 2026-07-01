@@ -26,25 +26,15 @@ class TestState:
 
         assert State.skip_order_cols is None
         assert State.file_format is None
-        assert State._sealed is False
 
-    def test_seal_prevents_bind(self):
-        State.skip_order_cols = False
-        State.sales_schema = "fake"  # avoid schema validation
-        State.seal()
+    def test_bind_after_reset_is_allowed(self):
+        # State is per-worker and read-only by convention (no seal machinery);
+        # reset + rebind must always work (tests rebind State between cases).
+        bind_globals({"skip_order_cols": False})
+        State.reset()
+        bind_globals({"skip_order_cols": True})
 
-        with pytest.raises(RuntimeError, match="sealed"):
-            bind_globals({"skip_order_cols": True})
-
-    def test_validate_missing_fields(self):
-        with pytest.raises(RuntimeError, match="Missing State fields"):
-            State.validate(["skip_order_cols", "file_format"])
-
-    def test_validate_passes_when_set(self):
-        State.skip_order_cols = False
-        State.file_format = "parquet"
-
-        State.validate(["skip_order_cols", "file_format"])
+        assert State.skip_order_cols is True
 
 
 # ===================================================================
@@ -68,16 +58,17 @@ class TestBindGlobals:
         with pytest.raises(TypeError, match="expects a dict"):
             bind_globals("not a dict")
 
-    def test_seen_customers_initialized(self):
+    def test_discovery_month_binds_through(self):
+        # Discovery is a static broadcast array now (no mutable seen_customers).
+        arr = np.array([0, 1, 2, 5], dtype=np.int64)
+        bind_globals({"skip_order_cols": False, "customer_discovery_month": arr})
+
+        np.testing.assert_array_equal(State.customer_discovery_month, arr)
+
+    def test_discovery_month_defaults_none(self):
         bind_globals({"skip_order_cols": False})
 
-        assert isinstance(State.seen_customers, set)
-
-    def test_seen_customers_list_converted_to_set(self):
-        bind_globals({"skip_order_cols": False, "seen_customers": [1, 2, 3]})
-
-        assert isinstance(State.seen_customers, set)
-        assert State.seen_customers == {1, 2, 3}
+        assert State.customer_discovery_month is None
 
 
 # ===================================================================

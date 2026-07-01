@@ -13,8 +13,10 @@ from collections.abc import Mapping
 
 import numpy as np
 
+from src.exceptions import SalesError
 from src.facts.sales.sales_logic import State
 from src.utils.logging_utils import warn
+from src.utils.hashing import GOLDEN, splitmix64, u01_from_u64
 
 
 # ===============================================================
@@ -142,13 +144,20 @@ def _to_dict(obj):
 
 
 def _md_cfg_hash(models) -> int:
-    """Content-based hash of the pricing config subset (handles nested structures)."""
+    """Content-based, process-stable hash of the pricing config subset.
+
+    Stable SHA-256 digest (not builtin ``hash()``, which is PYTHONHASHSEED-salted
+    per process) so the version is comparable across processes. Handles nested
+    structures.
+    """
     import json
+    import hashlib
     raw = _to_dict(models.get("pricing", {}) or {})
     try:
-        return hash(json.dumps(raw, sort_keys=True, default=str))
+        blob = json.dumps(raw, sort_keys=True, default=str).encode("utf-8")
     except (TypeError, ValueError):
         return id(raw)
+    return int.from_bytes(hashlib.sha256(blob).digest()[:8], "big")
 
 
 def _load_markdown_cfg():
@@ -161,10 +170,16 @@ def _load_markdown_cfg():
 
     Returns
     -------
-    tuple: (enabled, kind_codes, values, probs, max_pct, min_net, allow_neg)
+    tuple: (enabled, kind_codes, values, probs, max_pct, min_net, allow_neg,
+            reconcile, nz_kind_codes, nz_values, nz_probs)
       kind_codes : int8 array (0=none, 1=pct, 2=amt)
       values     : float64 array (pct in [0,1], amt >= 0)
       probs      : float64 array (normalized weights)
+      reconcile  : bool — gate the markdown draw on PromotionKey
+      nz_*       : the ladder restricted to the nonzero kinds (pct/amt) with
+                   probs renormalized, or (None, None, None) when the ladder has
+                   no nonzero entry. Used by the reconcile path so a promoted
+                   line always draws a real (nonzero) discount.
     """
     global _MD_CFG_VERSION, _MD_CFG_CACHE
 
@@ -187,6 +202,7 @@ def _load_markdown_cfg():
         min_net = 0.01
 
     allow_neg = bool(md.get("allow_negative_margin", False))
+    reconcile = bool(md.get("reconcile_promotions", True))
 
     # Parse full ladder: kind/value/weight triples
     ladder = md.get("ladder", []) or []
@@ -230,14 +246,36 @@ def _load_markdown_cfg():
     s = float(probs.sum())
     probs = probs / s if s > 0 else np.ones(1, dtype=np.float64)
 
+    kind_codes_arr = np.asarray(kind_codes, dtype=np.int8)
+    values_arr = np.asarray(values, dtype=np.float64)
+
+    # Nonzero (pct/amt) subset of the ladder for the reconcile path, so a
+    # promoted line always draws a real discount. Renormalize the weights.
+    nz_mask = kind_codes_arr != 0
+    if nz_mask.any():
+        nz_probs = probs[nz_mask]
+        nz_sum = float(nz_probs.sum())
+        nz_probs = nz_probs / nz_sum if nz_sum > 0 else None
+        if nz_probs is None:
+            nz_kind_codes = nz_values = None
+        else:
+            nz_kind_codes = kind_codes_arr[nz_mask]
+            nz_values = values_arr[nz_mask]
+    else:
+        nz_kind_codes = nz_values = nz_probs = None
+
     result = (
         enabled,
-        np.asarray(kind_codes, dtype=np.int8),
-        np.asarray(values, dtype=np.float64),
+        kind_codes_arr,
+        values_arr,
         probs,
         max_pct,
         min_net,
         allow_neg,
+        reconcile,
+        nz_kind_codes,
+        nz_values,
+        nz_probs,
     )
     _MD_CFG_VERSION = version
     _MD_CFG_CACHE = result
@@ -264,6 +302,7 @@ def _load_appearance_cfg() -> dict:
     p = models.get("pricing", {}) or {}
     appearance = p.get("appearance", {}) or {}
     enabled = bool(appearance.get("enabled", False))
+    deterministic = bool(appearance.get("deterministic", True))
 
     # --- Unit price ---
     up_cfg = appearance.get("unit_price", {}) or {}
@@ -303,6 +342,7 @@ def _load_appearance_cfg() -> dict:
 
     out = {
         "enabled": enabled,
+        "deterministic": deterministic,
         # unit price
         "up_round": up_round,
         "up_band_max": up_max, "up_band_step": up_step,
@@ -322,10 +362,47 @@ def _load_appearance_cfg() -> dict:
 
 
 # ===============================================================
+# Deterministic posted-price hashing
+# ===============================================================
+# SplitMix64 keyed by (product_id, month): same key -> same uniform, so the
+# stochastic snap resolves to the same UnitPrice for every line of a
+# (product, month). Distinct salts give independent draws for the round vs the
+# price/cost endings.
+_UP_ROUND_SALT = np.uint64(0x50A1C0DE00000001)
+_UP_END_SALT = np.uint64(0x50A1C0DE00000002)
+_UC_END_SALT = np.uint64(0x50A1C0DE00000003)
+
+
+def _price_hash_u01(product_ids, months, salt) -> np.ndarray:
+    """Uniform double in [0, 1) keyed by (product_id, month)."""
+    p = np.asarray(product_ids).astype(np.int64, copy=False).astype(np.uint64, copy=False)
+    m = np.asarray(months).astype(np.int64, copy=False).astype(np.uint64, copy=False)
+    x = splitmix64(p * GOLDEN ^ (m + np.uint64(salt)))
+    return u01_from_u64(x)
+
+
+def _pick_ending(rng, end_vals: np.ndarray, end_w: np.ndarray, n: int, hash_u):
+    """Choose a per-row price ending. ``hash_u`` (uniform [0,1), when supplied)
+    drives a deterministic inverse-CDF pick; otherwise draw from ``rng``."""
+    if hash_u is not None:
+        cdf = np.cumsum(np.asarray(end_w, dtype=np.float64))
+        total = float(cdf[-1]) if cdf.size else 0.0
+        if total <= 0.0:
+            return end_vals[np.zeros(n, dtype=np.int64)]
+        cdf = cdf / total
+        cdf[-1] = 1.0  # guard fp drift so searchsorted stays in-bounds
+        idx = np.minimum(np.searchsorted(cdf, hash_u, side="right"), end_vals.size - 1)
+    else:
+        idx = rng.choice(end_vals.size, size=n, p=end_w)
+    return end_vals[idx]
+
+
+# ===============================================================
 # Snapping functions
 # ===============================================================
 
-def _snap_unit_price(rng, up: np.ndarray, acfg: dict) -> np.ndarray:
+def _snap_unit_price(rng, up: np.ndarray, acfg: dict, *,
+                     hash_round=None, hash_end=None) -> np.ndarray:
     """Snap unit prices to banded increments with configurable endings.
 
     Uses stochastic rounding when mode is 'floor': the probability of
@@ -333,12 +410,11 @@ def _snap_unit_price(rng, up: np.ndarray, acfg: dict) -> np.ndarray:
     transition gradually as inflation pushes them through a band rather
     than jumping all at once after a multi-year plateau.
 
-    SM-2 (by design): the stochastic round and the random ending are drawn
-    *per row*, so two sales lines for the same product in the same month can
-    get slightly different UnitPrices. UnitPrice is a fact measure, not a
-    dimension attribute — this models realistic per-transaction price
-    variation. (Product SCD2 mode bypasses this and preserves catalog prices.)
-    See CLAUDE.md gotcha #26.
+    When ``hash_round`` / ``hash_end`` (uniforms keyed by
+    (product, month)) are supplied, the stochastic round and the ending are
+    resolved deterministically per (product, month), so every line of a
+    (product, month) gets the same UnitPrice. Without them the draws come from
+    ``rng`` per row (legacy behavior). See CLAUDE.md gotcha #26.
     """
     if not acfg.get("enabled", False):
         return up
@@ -351,22 +427,24 @@ def _snap_unit_price(rng, up: np.ndarray, acfg: dict) -> np.ndarray:
         ratio = up / step
         floor_val = np.floor(ratio)
         frac = ratio - floor_val
-        anchor = np.where(
-            rng.random(up.shape[0]) < frac,
-            (floor_val + 1) * step,
-            floor_val * step,
-        )
+        u = hash_round if hash_round is not None else rng.random(up.shape[0])
+        anchor = np.where(u < frac, (floor_val + 1) * step, floor_val * step)
     else:
         anchor = _quantize(up, step, acfg["up_round"])
 
-    idx = rng.choice(acfg["up_end_vals"].size, size=up.shape[0], p=acfg["up_end_w"])
-    ending = acfg["up_end_vals"][idx]
+    ending = _pick_ending(
+        rng, acfg["up_end_vals"], acfg["up_end_w"], up.shape[0], hash_end)
 
     return np.maximum(anchor + ending, 0.01)
 
 
-def _snap_cost(rng, uc: np.ndarray, acfg: dict) -> np.ndarray:
-    """Snap unit costs to banded increments."""
+def _snap_cost(rng, uc: np.ndarray, acfg: dict, *, hash_end=None) -> np.ndarray:
+    """Snap unit costs to banded increments.
+
+    The anchor is a deterministic quantize; only the (optional) ending is
+    stochastic. ``hash_end`` makes that pick deterministic per
+    (product, month) instead of per-row off ``rng``.
+    """
     if not acfg.get("enabled", False):
         return uc
 
@@ -378,8 +456,7 @@ def _snap_cost(rng, uc: np.ndarray, acfg: dict) -> np.ndarray:
     end_w = acfg.get("uc_end_w")
 
     if end_vals is not None and end_w is not None and end_vals.size > 0:
-        idx = rng.choice(end_vals.size, size=uc.shape[0], p=end_w)
-        ending = end_vals[idx]
+        ending = _pick_ending(rng, end_vals, end_w, uc.shape[0], hash_end)
         snapped = anchor.copy()
         mask = step >= 1.0
         if mask.any():
@@ -393,14 +470,21 @@ def _snap_cost(rng, uc: np.ndarray, acfg: dict) -> np.ndarray:
 
 
 def _snap_discount(disc: np.ndarray, up: np.ndarray, acfg: dict) -> np.ndarray:
-    """Snap discount amounts to banded increments."""
+    """Snap discount amounts to banded increments.
+
+    The snap step is chosen from the discount *magnitude* (the value being
+    snapped), not from UnitPrice. Keying it to price floored a small markdown on
+    a high-priced item down to a price-scaled step and zeroed it, silently
+    breaking the reconcile guarantee that a promoted line carries a real
+    markdown. ``up`` is still used only to cap the snapped discount at the price.
+    """
     if not acfg.get("enabled", False):
         return disc
 
     disc = np.maximum(_as_f64(disc), 0.0)
     up = np.maximum(_as_f64(up), 0.0)
 
-    step = np.maximum(_choose_step(up, acfg["d_band_max"], acfg["d_band_step"]), 1.0)
+    step = np.maximum(_choose_step(disc, acfg["d_band_max"], acfg["d_band_step"]), 1.0)
     snapped = _quantize(disc, step, acfg["d_round"])
     return np.clip(snapped, 0.0, up)
 
@@ -477,7 +561,7 @@ def _month_noise(month_int: int, seed: int, sigma: float) -> float:
 
 
 def _reset_caches() -> None:
-    """Reset all module-level caches.  Call from State.reset() or tests."""
+    """Reset all module-level caches.  Called from init_sales_worker() and tests."""
     global _MD_CFG_VERSION, _MD_CFG_CACHE
     global _APPEAR_CFG_VERSION, _APPEAR_CFG_CACHE
     _MD_CFG_VERSION = -1
@@ -485,36 +569,49 @@ def _reset_caches() -> None:
     _APPEAR_CFG_VERSION = -1
     _APPEAR_CFG_CACHE = None
     _MONTH_NOISE_CACHE.clear()
+    _START_MONTH_CACHE.clear()
 
 
 # ===============================================================
 # Global start month
 # ===============================================================
 
-def _global_start_month_int(order_dates: np.ndarray) -> int:
-    """
-    Determine the first month of the entire dataset for computing inflation offset.
+_START_MONTH_CACHE: dict = {}
 
-    Uses State.date_pool if available; falls back to min(order_dates).
+
+def _global_start_month_int() -> int:
+    """First month of the *configured* dataset — the single inflation anchor.
+
+    Resolved once from the run-wide ``State.date_pool`` (which starts at the
+    configured dataset start), so the inflation factor for any (product, month)
+    is provably identical across every chunk and worker. There is deliberately
+    NO per-chunk ``min(order_dates)`` fallback: that made the anchor depend on
+    which order dates a chunk happened to contain, so an early-month-sparse chunk
+    would anchor inflation differently than a full one. Memoized per worker
+    (``date_pool`` is bound once at worker init and never reassigned).
     """
     dp = getattr(State, "date_pool", None)
-    if dp is not None:
-        try:
-            if len(dp) > 0:
-                d0 = np.min(np.asarray(dp).astype("datetime64[D]"))
-                return int(d0.astype("datetime64[M]").astype("int64"))
-        except (TypeError, ValueError, OverflowError):
-            pass
-
-    d0 = np.min(np.asarray(order_dates).astype("datetime64[D]"))
-    return int(d0.astype("datetime64[M]").astype("int64"))
+    if dp is None or len(dp) == 0:
+        raise SalesError(
+            "Inflation anchor requires State.date_pool (the configured dataset "
+            "start) to be bound before pricing; it was missing or empty."
+        )
+    key = id(dp)
+    cached = _START_MONTH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    d0 = np.min(np.asarray(dp).astype("datetime64[D]"))
+    start_m = int(d0.astype("datetime64[M]").astype("int64"))
+    _START_MONTH_CACHE[key] = start_m
+    return start_m
 
 
 # ===============================================================
 # Public API
 # ===============================================================
 
-def build_prices(rng, order_dates, qty, price):
+def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_key=1,
+                 product_ids=None):
     """
     Single-pass sales pricing pipeline.
 
@@ -533,6 +630,21 @@ def build_prices(rng, order_dates, qty, price):
     qty : array-like of int (reserved for future basket-size pricing)
     price : dict with keys:
         final_unit_price, final_unit_cost, discount_amt, final_net_price
+    promo_keys : array-like of int or None
+        The per-row assigned PromotionKey. When supplied and
+        ``models.pricing.markdown.reconcile_promotions`` is on, the
+        markdown is reconciled with the promotion: only promoted lines
+        (``PromotionKey != no_discount_key``) receive a discount, drawn from the
+        nonzero ladder. When None (e.g. unit tests), the legacy independent
+        markdown lottery is used.
+    no_discount_key : int
+        The "no promotion" sentinel PromotionKey (default 1).
+    product_ids : array-like of int or None
+        Per-line product identity (ProductKey, == ProductID under non-SCD2). When
+        supplied and ``models.pricing.appearance.deterministic`` is on (Phase
+        4.1), the posted price/cost snap is hash-seeded on (product_id, month) so
+        every line for a product-month shares one UnitPrice. None => legacy
+        per-row stochastic snap.
 
     Returns
     -------
@@ -562,14 +674,16 @@ def build_prices(rng, order_dates, qty, price):
         up = np.maximum(base_up, 0.0)
         uc = np.clip(base_uc, 0.0, up)
     else:
-        # No SCD2: apply runtime inflation + appearance snapping
+        # No SCD2: apply runtime inflation + appearance snapping.
+        # Per-line absolute month — the inflation key AND, in deterministic mode,
+        # the posted-price hash key.
+        order_month_i = order_dates.astype("datetime64[M]").astype("int64")
         if _skip_inflation:
             factor = np.ones(n, dtype=np.float64)
         else:
-            order_month_i = order_dates.astype("datetime64[M]").astype("int64")
             uniq_months, inv = np.unique(order_month_i, return_inverse=True)
 
-            start_m = _global_start_month_int(order_dates)
+            start_m = _global_start_month_int()
             months_since = (uniq_months.astype(np.int64) - start_m).astype(np.float64)
 
             infl = (1.0 + annual_rate) ** (months_since / 12.0)
@@ -584,19 +698,49 @@ def build_prices(rng, order_dates, qty, price):
 
             factor = np.clip(infl * noises, clip_lo, clip_hi)[inv]
 
+        # Deterministic posted price/cost per (product, month). Hash
+        # the stochastic snap on (product_id, month) instead of the per-row chunk
+        # rng, so every line for a (product, month) carries the same UnitPrice.
+        if bool(appearance.get("deterministic", True)) and product_ids is not None:
+            _pid = np.asarray(product_ids)
+            _h_up_round = _price_hash_u01(_pid, order_month_i, _UP_ROUND_SALT)
+            _h_up_end = _price_hash_u01(_pid, order_month_i, _UP_END_SALT)
+            _h_uc_end = _price_hash_u01(_pid, order_month_i, _UC_END_SALT)
+        else:
+            _h_up_round = _h_up_end = _h_uc_end = None
+
         up = np.maximum(base_up * factor, 0.0)
-        up = _snap_unit_price(rng, up, appearance)
+        up = _snap_unit_price(rng, up, appearance,
+                              hash_round=_h_up_round, hash_end=_h_up_end)
         uc = np.minimum(np.maximum(base_uc * factor, 0.0), up)
-        uc = _snap_cost(rng, uc, appearance)
+        uc = _snap_cost(rng, uc, appearance, hash_end=_h_uc_end)
         uc = np.minimum(uc, up)
 
     # ---- 4. Draw markdown discount from ladder ----
     (md_enabled, kind_codes, values, probs,
-     max_pct, min_net, allow_neg) = _load_markdown_cfg()
+     max_pct, min_net, allow_neg,
+     reconcile, nz_kind_codes, nz_values, nz_probs) = _load_markdown_cfg()
 
     disc = np.zeros(n, dtype=np.float64)
 
-    if md_enabled and kind_codes.size > 0:
+    # When reconciling, a discount is a consequence of a promotion —
+    # only promoted lines draw one, and they draw from the *nonzero* ladder so a
+    # promoted line always carries a real markdown while a "no promotion" line
+    # never does. Consumes the same one rng.choice(size=n) as the legacy path,
+    # so the RNG stream position afterward is unchanged.
+    _reconcile = (
+        reconcile and md_enabled and promo_keys is not None
+        and nz_kind_codes is not None and nz_kind_codes.size > 0
+    )
+    if _reconcile:
+        promo_mask = np.asarray(promo_keys, dtype=np.int64) != int(no_discount_key)
+        idx = rng.choice(nz_kind_codes.size, size=n, replace=True, p=nz_probs)
+        kc = nz_kind_codes[idx]
+        v = nz_values[idx]
+        disc = np.where(kc == 1, up * v, disc)   # pct of snapped price
+        disc = np.where(kc == 2, v,      disc)   # flat amt
+        disc = np.where(promo_mask, disc, 0.0)   # no promotion -> no discount
+    elif md_enabled and kind_codes.size > 0:
         idx = rng.choice(kind_codes.size, size=n, replace=True, p=probs)
         kc = kind_codes[idx]
         v = values[idx]
@@ -637,7 +781,7 @@ def build_prices(rng, order_dates, qty, price):
             # discount never rises above the margin-safe ceiling and re-violates.
             if appearance.get("enabled", False):
                 step = np.maximum(
-                    _choose_step(up[mv], appearance["d_band_max"], appearance["d_band_step"]),
+                    _choose_step(safe, appearance["d_band_max"], appearance["d_band_step"]),
                     1.0,
                 )
                 safe = np.floor(safe / step) * step

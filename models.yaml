@@ -31,6 +31,16 @@ models:
     min_qty: 1
     max_qty: 4
 
+    # Phase 3.1 — quantity depends on price + product propensity (elasticity),
+    # so cheap staples sell in larger baskets than expensive durables.
+    elasticity:
+      enabled: true
+      price_elasticity: 0.5        # ε: qty *= (price / reference_price)^(-ε)
+      reference_price: null        # null = median catalog list price (auto)
+      factor_clip: [0.4, 2.5]
+      propensity_strength: 0.4     # γ: qty *= (PopularityScore / 50)^γ
+      propensity_clip: [0.6, 1.6]
+
     monthly_factors:
       - 0.99    # Jan
       - 0.98    # Feb
@@ -63,6 +73,8 @@ models:
       max_pct_of_price: 0.40
       min_net_price: 0.01
       allow_negative_margin: false
+      reconcile_promotions: true    # discounts only on promoted lines (Phase 3.5);
+                                    # false = legacy independent markdown lottery
 
       ladder:
         - { kind: none, value: 0.0,   weight: 0.55 }
@@ -75,6 +87,8 @@ models:
 
     appearance:
       enabled: true
+      deterministic: true    # posted UnitPrice/UnitCost fixed per (product, month)
+                             # (Phase 4.1); false = legacy per-row stochastic snap
 
       unit_price:
         rounding: floor
@@ -99,6 +113,9 @@ models:
           - { max: 1e18,  step: 50 }
 
       discount:
+        # bands are keyed to the DISCOUNT amount (not UnitPrice): a $3 markdown
+        # snaps on the <=10 step, so small discounts on pricey items are not
+        # floored to $0.
         rounding: floor
         bands:
           - { max: 10,   step: 1 }
@@ -115,6 +132,47 @@ models:
     enabled: true
     seed: 123
     winner_boost: 1.4
+
+
+  # ================================================================
+  # PROMOTION SALIENCE — deeper promos redeemed more often (Phase 3.2)
+  # ================================================================
+  promotions:
+    enabled: true
+    beta: 3.0                # salience = exp(beta * DiscountPct) * type_weight
+    max_weight_ratio: 12.0   # cap deepest/shallowest selection-weight spread
+    type_weights: {}         # optional PromotionType -> multiplier overrides,
+                             # e.g. { "Flash Sale": 1.5, "Clearance": 1.3 }
+
+
+  # ================================================================
+  # BASKET THEME — co-purchase correlation within an order (Phase 3.3)
+  # ================================================================
+  # Each order is assigned a hash-seeded theme (a group of subcategories);
+  # a share of its off-theme lines are redirected into that theme so multi-line
+  # orders hold complementary items and affinity mining recovers real rules.
+  basket:
+    enabled: true
+    num_themes: 6      # number of subcategory groups
+    strength: 0.5      # share of off-theme lines redirected toward the theme
+
+
+  # ================================================================
+  # FULFILLMENT FRICTION — delivery timing ↔ returns (Phase 3.4)
+  # ================================================================
+  # One per-line friction latent (hash-seeded on OrderNumber+OrderLineNumber)
+  # drives delivery bucketing AND return behavior, so late deliveries yield
+  # more / faster returns.
+  fulfillment:
+    enabled: true
+    p_early: 0.10               # share delivered early
+    p_delayed: 0.20             # share delivered late (on-time = remainder)
+    delay_distribution: triangular   # uniform | triangular
+    delay_min: 1
+    delay_max: 10
+    delay_mode: 3               # peak days for triangular delay magnitude
+    return_prob_boost: 1.0      # p_return = base * (1 + boost * friction)
+    return_lag_shorten: 0.5     # lag *= (1 - shorten * friction)
 
 
   # ================================================================

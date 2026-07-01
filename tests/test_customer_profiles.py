@@ -234,8 +234,9 @@ class TestResolveTrendPreset:
             assert spike.boost > 0
 
     def test_seasonal_spikes_parseable_by_chunk_builder_logic(self):
-        """The chunk builder's spike parsing must handle both dicts and Pydantic models."""
+        """The real spike normalizer must handle both dicts and Pydantic models identically."""
         from src.engine.config.config_schema import SeasonalSpikeConfig
+        from src.facts.sales.prep.sales_helpers import _normalize_seasonal_spikes
 
         # Pydantic path (trend preset resolved)
         pydantic_spikes = [
@@ -248,22 +249,26 @@ class TestResolveTrendPreset:
             {"month": 12, "boost": 0.25},
         ]
 
-        def _parse_spikes(spikes_raw):
-            result = {}
-            for entry in spikes_raw:
-                month = entry.get("month") if isinstance(entry, dict) else getattr(entry, "month", None)
-                boost = entry.get("boost") if isinstance(entry, dict) else getattr(entry, "boost", None)
-                if month is not None and boost is not None:
-                    cal_month = int(month)
-                    if 1 <= cal_month <= 12:
-                        result[cal_month] = float(boost)
-            return result
-
-        pydantic_result = _parse_spikes(pydantic_spikes)
-        dict_result = _parse_spikes(dict_spikes)
+        pydantic_result = _normalize_seasonal_spikes(pydantic_spikes)
+        dict_result = _normalize_seasonal_spikes(dict_spikes)
 
         assert pydantic_result == dict_result
         assert pydantic_result == {11: 0.40, 12: 0.25}
+
+    def test_seasonal_spikes_normalizer_drops_invalid_entries(self):
+        """Out-of-range months and missing month/boost are dropped (both shapes)."""
+        from src.engine.config.config_schema import SeasonalSpikeConfig
+        from src.facts.sales.prep.sales_helpers import _normalize_seasonal_spikes
+
+        assert _normalize_seasonal_spikes(None) == {}
+        assert _normalize_seasonal_spikes([]) == {}
+        assert _normalize_seasonal_spikes([{"month": 0, "boost": 0.1}]) == {}
+        assert _normalize_seasonal_spikes([{"month": 13, "boost": 0.1}]) == {}
+        assert _normalize_seasonal_spikes([{"month": 5}]) == {}
+        assert _normalize_seasonal_spikes([{"boost": 0.1}]) == {}
+        # Valid Pydantic + valid dict mixed, last-write-wins on duplicate month.
+        mixed = [SeasonalSpikeConfig(month=6, boost=0.2), {"month": 6, "boost": 0.3}]
+        assert _normalize_seasonal_spikes(mixed) == {6: 0.3}
 
     def test_all_presets_inject_lifecycle(self):
         for trend_name in VALID_TRENDS:

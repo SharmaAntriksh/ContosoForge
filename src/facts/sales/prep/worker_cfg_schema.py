@@ -49,6 +49,7 @@ class SalesWorkerCfg(TypedDict, total=False):
     promo_keys_all: Required[np.ndarray]
     promo_start_all: Required[np.ndarray]
     promo_end_all: Required[np.ndarray]
+    promo_salience_all: Optional[np.ndarray]
     new_customer_promo_keys: Optional[np.ndarray]
     new_customer_window_months: int
 
@@ -59,8 +60,16 @@ class SalesWorkerCfg(TypedDict, total=False):
     customer_start_month: Optional[np.ndarray]
     customer_end_month: Optional[np.ndarray]
     customer_base_weight: Optional[np.ndarray]
+    customer_discovery_month: Optional[np.ndarray]
     customer_geo_key: Optional[np.ndarray]
     customer_first_eff_start_by_key: Optional[np.ndarray]
+
+    # -- Global per-month plan -----------------------------------------------
+    sales_rows_per_month: Optional[np.ndarray]     # int64[T]: rows per month
+    sales_orders_per_month: Optional[np.ndarray]   # int64[T]: orders per month
+    sales_distinct_target: Optional[np.ndarray]    # int64[T]: distinct target
+    sales_plan_seed: int                           # run seed for month pools
+    total_chunks: int                              # index-space sharding divisor
 
     # -- Geography / currency ------------------------------------------------
     geo_to_currency: Optional[Dict[int, int]]
@@ -117,6 +126,7 @@ class SalesWorkerCfg(TypedDict, total=False):
     returns_full_line_probability: float
     returns_split_return_rate: float
     returns_max_splits: int
+    returns_reconcile_cents: bool
     returns_split_min_gap: int
     returns_split_max_gap: int
     returns_lag_distribution: str

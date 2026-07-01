@@ -1,4 +1,4 @@
-"""Tests for the salesperson-coverage pre-flight (src.facts.sales.coverage_preflight).
+"""Tests for the salesperson-coverage pre-flight (src.facts.sales.prep.coverage_preflight).
 
 Real generation never produces a coverage gap (the dimension guards prevent it),
 so these tests build a synthetic bridge with a deliberate gap to exercise
@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from src.exceptions import SalesError
-from src.facts.sales.coverage_preflight import (
+from src.facts.sales.prep.coverage_preflight import (
     analyze_coverage,
     repair_bridge,
     run_coverage_preflight,
@@ -64,6 +64,29 @@ class TestAnalyzeCoverage:
         assert {d.strftime("%Y-%m") for d in rep.uncovered_months} == {"2021-03", "2021-04"}
         assert rep.has_avoidable_loss
         assert rep.n_fully_open_gaps == 2
+
+    def test_interior_mid_month_hole_detected(self):
+        # Store 1 is staffed on Jan 1 (assignment ends Jan 10) and on Jan 31
+        # (next assignment starts Jan 20), but Jan 11-19 has no salesperson.
+        # The first/last-day test alone marks January covered; interval-union
+        # catches the interior hole (those days would drop to EmployeeKey=-1).
+        b = _bridge([("2020-06-01", "2021-01-10"), ("2021-01-20", "2021-12-31")])
+        rep = analyze_coverage(_stores(), b, *WIN, ROLES)
+        gap_months = sorted({m.strftime("%Y-%m") for _, m, *_ in rep.gap_cells})
+        assert gap_months == ["2021-01"]
+        assert rep.n_fully_open_gaps == 1
+        assert rep.interior_hole_gaps == 1
+        # Feb-Jun are fully covered by the second assignment: no false positives.
+        assert rep.n_gap_cells == 1
+
+    def test_contiguous_two_assignments_no_hole(self):
+        # Two back-to-back assignments (adjacent days) fully cover the window —
+        # interval-union must NOT report a phantom gap at the seam.
+        b = _bridge([("2020-06-01", "2021-03-15"), ("2021-03-16", "2021-12-31")])
+        rep = analyze_coverage(_stores(), b, *WIN, ROLES)
+        assert rep.n_gap_cells == 0
+        assert rep.interior_hole_gaps == 0
+        assert not rep.has_avoidable_loss
 
     def test_online_and_physical_checked_independently(self):
         # An online store with its OWN online rep is covered; a separate physical
@@ -130,6 +153,45 @@ class TestRepair:
             ed = pd.to_datetime(grp["EndDate"]).tolist()
             for i in range(len(grp) - 1):
                 assert ed[i] < sd[i + 1], f"employee {ek} double-booked by repair"
+
+
+    def test_repair_is_deterministic_and_order_independent(self):
+        # Principled repair must produce identical output regardless of the order
+        # gap_cells arrive in (the core #39 determinism guarantee).
+        import random
+
+        b = _bridge([("2020-06-01", "2021-02-28"), ("2021-05-01", "2021-12-31")])
+        rep_a = analyze_coverage(_stores(), b, *WIN, ROLES)
+        repaired_a, n_a = repair_bridge(b, rep_a, ROLES)
+
+        rep_b = analyze_coverage(_stores(), b, *WIN, ROLES)
+        random.Random(20260701).shuffle(rep_b.gap_cells)
+        repaired_b, n_b = repair_bridge(b, rep_b, ROLES)
+
+        assert n_a == n_b > 0
+        cols = ["EmployeeKey", "StoreKey", "StartDate", "EndDate", "TransferReason"]
+        a = repaired_a.sort_values(["EmployeeKey", "StartDate"]).reset_index(drop=True)[cols]
+        c = repaired_b.sort_values(["EmployeeKey", "StartDate"]).reset_index(drop=True)[cols]
+        pd.testing.assert_frame_equal(a, c)
+
+    def test_repair_tags_synthetic_extensions(self):
+        # Extended assignments are stamped 'Coverage Gap Repair'; untouched rows
+        # keep their original reason.
+        b = _bridge([("2020-06-01", "2021-02-28"), ("2021-05-01", "2021-12-31")])
+        rep = analyze_coverage(_stores(), b, *WIN, ROLES)
+        repaired, n = repair_bridge(b, rep, ROLES)
+        assert n > 0
+        reasons = set(repaired["TransferReason"])
+        assert "Coverage Gap Repair" in reasons
+        # One assignment may absorb several adjacent gap-months, so distinct
+        # tagged rows are >= 1 and <= the number of gap store-months closed.
+        assert 1 <= (repaired["TransferReason"] == "Coverage Gap Repair").sum() <= n
+        # A clean bridge is returned untouched (no tag, original object).
+        clean = _bridge([("2020-06-01", "2021-12-31")])
+        clean_rep = analyze_coverage(_stores(), clean, *WIN, ROLES)
+        out, n0 = repair_bridge(clean, clean_rep, ROLES)
+        assert n0 == 0
+        assert "Coverage Gap Repair" not in set(out["TransferReason"])
 
 
 class TestPolicies:
