@@ -468,11 +468,36 @@ no duplicated algorithm; no dead abstraction.
 **Goal:** retire the small "kept consistent by vigilance" fossils. Each is low-risk; batch
 them into a few PRs.
 
-- [ ] **6.1 Typed config access** — `Finding #24 #28` · `E:M R:lo`
-  Read `models_cfg.customers.new_customer_share` etc.; move the ~15 magic-literal defaults
-  onto the schema; normalize `seasonal_spikes` to one shape (kill the `isinstance(dict)`
-  fork). Replace the `_apply_cfg_default` precedence ladder with `_UNSET` sentinels or a
-  single resolved `SalesRunConfig`.
+- [x] **6.1 Typed config access** — `Finding #24 #28` · `E:M R:lo` — **DONE (safe core) / DEFERRED (rest)**
+  - **Done (`168068e`):** normalized `seasonal_spikes` to a single shape and killed the
+    `isinstance(dict)` fork. Extracted `_normalize_seasonal_spikes()` into the leaf
+    `sales_helpers` module and routed the coordinator (`sales.py`) through it. Key fact:
+    `SeasonalSpikeConfig` is a `_Base` registered as a `Mapping` with a `.get()` shim, so one
+    `.get()` reads both the dict-shape fallback defaults and the Pydantic post-resolution list
+    identically — the per-shape fork was redundant. Also repointed
+    `test_seasonal_spikes_parseable_by_chunk_builder_logic` at the real helper (it previously
+    duplicated the parse logic in a dead local `_parse_spikes` copy) + added a drop-invalid test.
+    Byte-identical: both canonical digests match (`e07d8719..` w2/c1000, `cb2aa781..` w1/c4000);
+    full suite 1959 green.
+  - *Scoping verdict (deferred — a read-only 5-agent Workflow scoped all four sub-goals):*
+    - **Bulk `.get()`→attribute access (~40 sites):** mostly cosmetic AND unsafe in general —
+      the `.get(key, LIT)` literal is only dead when the object is *always* the Pydantic model,
+      but many parents are `X.get("section", {}) or {}` where `{}` is a live path; converting
+      those downstream reads to attribute access would `AttributeError`. The defensive `.get()`
+      is correct as-is. Low value, real risk.
+    - **Move ~15 magic-literal defaults onto the schema:** 32/46 inventoried literals already
+      *equal* their schema default (dead duplication, no behavior); the 14 mismatches are mostly
+      worker-dict reads (out of scope per gotcha #24) or intentional feature-disabled fallbacks
+      (`return_prob_boost=0.0`, etc.). The genuinely-actionable surface is tiny; the risky ones
+      (`lines_per_order` → new `LinesPerOrderConfig`, `max_distinct_ratio`/`min_distinct_customers`)
+      would make new schema defaults *authoritative* for the demand curve — needs an explicit
+      sign-off + digest acceptance, not a silent hygiene commit.
+    - **Replace `_apply_cfg_default` ladder (11 sites):** high churn, subtle CLI×cfg precedence,
+      nested `_int_or` fallbacks + `hasattr` guards + a `chunk_size` self-fallback with an
+      order-dependent hazard; marginal readability gain over the correct 3-line helper. Not worth
+      the determinism risk for pure ergonomics.
+    - **Decision (this session):** ship the byte-safe valuable core; defer the cosmetic/risky
+      remainder. Revisit only with a deliberate decision on the authoritative-defaults items.
 - [ ] **6.2 Nested worker-config dataclasses** — `Finding #9` · `E:M R:lo` — **DEFERRED**
   Compose `worker_cfg` from `ProductCfg`/`ReturnsCfg`/`EmployeeCfg`/… each owning its
   fields and a `to_shm()` so the **publish list is derived, not hand-maintained**. (Keep
