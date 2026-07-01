@@ -8,6 +8,8 @@ from typing import Optional
 
 import numpy as np
 
+from .allocation import _stable_seed
+
 
 # ----------------------------------------------------------------
 # End-month normalization
@@ -551,3 +553,223 @@ def _sample_customers(
     p_distinct = _weights_for_keys(distinct_pool, base_weight)
     repeats = _choice(rng, distinct_pool, remaining, replace=True, p=p_distinct)
     return _concat_and_shuffle(rng, distinct_pool, repeats)
+
+
+# ================================================================
+# Global per-month plan (Phase 2 — "plan globally, shard the index space")
+# ================================================================
+# The chunk-dependent bug (review Finding #4/#14): the per-month distinct-customer
+# target was evaluated against *per-chunk* rows and repeats were drawn from a
+# *chunk-local* pool, so splitting the same rows into more chunks redistributed
+# which customers transact in which month — ``base_distinct_ratio`` silently
+# depended on ``chunk_size``. The fix computes the per-month distinct target and
+# the actual distinct-customer *pool* ONCE from the run seed against GLOBAL month
+# totals, then treats each month's orders as a contiguous global index space that
+# chunks slice. Because a given global order index always maps to the same
+# customer (``assign_orders_to_customers``), the union of distinct customers per
+# month is exactly the month pool regardless of how the orders are chunked.
+
+
+def compute_month_distinct_targets(
+    *,
+    seed: int,
+    T: int,
+    eligible_counts: np.ndarray,
+    orders_per_month: np.ndarray,
+    month_cal_index: np.ndarray,
+    distinct_ratio: float,
+    cycle_amplitude: float,
+    participation_noise: float,
+    seasonal_spike_map: dict,
+    max_distinct_ratio: float,
+    min_distinct_customers: int,
+) -> np.ndarray:
+    """Global per-month distinct-customer target ``D[m]`` (Finding #4/#14/#17).
+
+    Single source of truth for "how many distinct customers transact in month m",
+    evaluated against the GLOBAL month totals (``eligible_counts``,
+    ``orders_per_month``) and a seed-derived RNG — so it is independent of
+    ``chunk_size`` / worker count. This replaces both the per-chunk inline target
+    (chunk_builder) and the dead ``_participation_distinct_target``. Returns an
+    int64 array of length ``T`` with ``D[m] <= orders_per_month[m]``.
+    """
+    T = int(T)
+    out = np.zeros(T, dtype=np.int64)
+    if T <= 0 or float(distinct_ratio) <= 0.0:
+        return out
+
+    ec = np.asarray(eligible_counts, dtype=np.int64)
+    om = np.asarray(orders_per_month, dtype=np.int64)
+    cal = np.asarray(month_cal_index, dtype=np.int64)
+    # One RNG for the whole plan; drawing T normals in order keeps D[m]
+    # deterministic and chunk/worker-invariant (never the per-chunk rng).
+    rng = np.random.default_rng(_stable_seed(seed, "distinct_target", T))
+
+    max_ratio = float(max_distinct_ratio)
+    min_k = float(min_distinct_customers)
+    for m in range(T):
+        e = int(ec[m])
+        o = int(om[m])
+        if e <= 0 or o <= 0:
+            continue
+        k = float(distinct_ratio) * e
+        if float(cycle_amplitude) > 0.0:
+            k *= 1.0 + float(cycle_amplitude) * float(np.sin(2.0 * np.pi * m / 24.0))
+        if seasonal_spike_map:
+            boost = seasonal_spike_map.get(int(cal[m]))
+            if boost:
+                k *= 1.0 + float(boost)
+        if float(participation_noise) > 0.0:
+            k *= 1.0 + float(participation_noise) * float(rng.standard_normal())
+        k = max(k, min_k)
+        k = min(k, e * max_ratio, float(e), float(o))
+        out[m] = max(1, int(round(k)))
+    return out
+
+
+def build_month_customer_pool(
+    *,
+    m_offset: int,
+    distinct_target: int,
+    eligible_idx: np.ndarray,
+    customer_keys: np.ndarray,
+    discovery_month,
+    base_weight,
+    end_month_norm,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Deterministic distinct-customer pool ``P`` and weighted CDF for month ``m``.
+
+    ``P`` is the exact set of distinct customers that transact in month ``m``
+    (``len(P) <= distinct_target``). Built once per ``(month, run)`` from a
+    month-seeded RNG — never the chunk RNG — so it is identical for every chunk
+    and every worker. Semantics mirror the old discovery/participation path:
+
+    - force-include the discovery *debut* cohort (``discovery_month == m``),
+      nearest-expiry first when it must be truncated to fit ``distinct_target``;
+    - fill the remaining distinct slots from previously-introduced customers
+      (``discovery_month < m``), weighted by ``base_weight``;
+    - if nobody has been introduced yet this month, fall back to an organic draw
+      from all eligible customers so planned orders are never lost.
+
+    The returned CDF (over ``P``, weighted by ``base_weight``) drives repeat-order
+    customer selection in :func:`assign_orders_to_customers`.
+    """
+    m = int(m_offset)
+    D = int(distinct_target)
+    ei = np.asarray(eligible_idx)
+    ck = np.asarray(customer_keys)
+    empty = (np.empty(0, dtype=ck.dtype), np.empty(0, dtype=np.float64))
+    if D <= 0 or ei.size == 0:
+        return empty
+
+    rng = np.random.default_rng(_stable_seed(seed, "month_pool", m))
+    elig_keys = ck[ei]
+
+    if discovery_month is not None:
+        disc = np.asarray(discovery_month)[ei]
+        introduced = disc <= m
+        debut = disc == m
+    else:
+        introduced = np.ones(ei.size, dtype=bool)
+        debut = np.zeros(ei.size, dtype=bool)
+    prior = introduced & ~debut
+
+    debut_keys = elig_keys[debut]
+    debut_idx = ei[debut]
+    prior_keys = elig_keys[prior]
+    prior_idx = ei[prior]
+
+    # Force the debut cohort in, capped at the distinct target (nearest-expiry
+    # first so churning customers aren't dropped when the cohort is truncated).
+    if debut_keys.size > D:
+        pool = _urgency_pick(rng, debut_keys, debut_idx, end_month_norm, m, D)
+    else:
+        pool = debut_keys
+
+    need = D - int(pool.size)
+    if need > 0 and prior_keys.size > 0:
+        p_prior = _weights_for_indices(prior_idx, base_weight)
+        take = min(need, int(prior_keys.size))
+        extra = _choice(rng, prior_keys, take, replace=False, p=p_prior)
+        pool = extra if pool.size == 0 else np.concatenate([pool, extra])
+
+    if pool.size == 0:
+        # Nobody introduced yet this month → organic draw so orders aren't lost.
+        take = min(D, int(elig_keys.size))
+        p_elig = _weights_for_indices(ei, base_weight)
+        pool = _choice(rng, elig_keys, take, replace=False, p=p_elig)
+
+    if pool.size == 0:
+        return empty
+
+    pool = np.asarray(pool, dtype=ck.dtype)
+    p_pool = _weights_for_keys(pool, base_weight)
+    if p_pool is None:
+        p_pool = np.full(pool.size, 1.0 / pool.size, dtype=np.float64)
+    cdf = np.cumsum(p_pool, dtype=np.float64)
+    cdf[-1] = 1.0  # CLAUDE.md gotcha #16: clamp so searchsorted stays in bounds
+    return pool, cdf
+
+
+def _hash_uniform_positions(m_offset: int, positions: np.ndarray, seed: int) -> np.ndarray:
+    """Deterministic uniforms in ``[0, 1)`` keyed by ``(m_offset, position, seed)``.
+
+    Used to pick repeat-order customers by *global order index* so a given index
+    always maps to the same customer regardless of how the month is chunked.
+    Vectorized splitmix64-style mix (same family as :func:`_hash_uniform`).
+    """
+    pos = np.asarray(positions).astype(np.uint64)
+    s_val = (int(seed) * 0x2545F4914F6CDD1D + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+    m_val = ((int(m_offset) + 1) * 0xD1B54A32D192ED03) & 0xFFFFFFFFFFFFFFFF
+    s = np.uint64(s_val ^ m_val)
+    with np.errstate(over="ignore"):
+        z = (pos * np.uint64(0x9E3779B97F4A7C15)) ^ s
+        z ^= (z >> np.uint64(30))
+        z = z * np.uint64(0xBF58476D1CE4E5B9)
+        z ^= (z >> np.uint64(27))
+        z = z * np.uint64(0x94D049BB133111EB)
+        z ^= (z >> np.uint64(31))
+    return (z >> np.uint64(11)).astype(np.float64) * (1.0 / float(1 << 53))
+
+
+def assign_orders_to_customers(
+    *,
+    m_offset: int,
+    order_start: int,
+    n_orders: int,
+    pool: np.ndarray,
+    cdf: np.ndarray,
+    seed: int,
+) -> np.ndarray:
+    """Map a contiguous band of global order indices to CustomerKeys.
+
+    Global order index ``j`` (in ``[0, orders_this_month)``) maps to:
+
+    - ``pool[j]`` when ``j < len(pool)`` — each distinct customer appears once, at
+      the front of the month's order space;
+    - ``pool[searchsorted(cdf, hash(m, j))]`` otherwise — a weighted repeat.
+
+    Because every chunk that owns index ``j`` computes the same customer, the
+    union of distinct customers across all chunks for month ``m`` is exactly
+    ``pool`` — independent of how the month's orders are split into chunks
+    (the whole point of Phase 2). Returns a CustomerKey array of length
+    ``n_orders``.
+    """
+    n = int(n_orders)
+    if n <= 0 or pool.size == 0:
+        return np.empty(0, dtype=(pool.dtype if pool.size else np.int32))
+    P = int(pool.size)
+    gj = np.arange(int(order_start), int(order_start) + n, dtype=np.int64)
+    out = np.empty(n, dtype=pool.dtype)
+
+    distinct_mask = gj < P
+    if distinct_mask.any():
+        out[distinct_mask] = pool[gj[distinct_mask]]
+    rep_mask = ~distinct_mask
+    if rep_mask.any():
+        u = _hash_uniform_positions(m_offset, gj[rep_mask], seed)
+        idx = np.searchsorted(cdf, u, side="right")
+        np.clip(idx, 0, P - 1, out=idx)
+        out[rep_mask] = pool[idx]
+    return out

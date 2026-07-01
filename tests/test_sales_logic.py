@@ -46,13 +46,18 @@ from src.facts.sales.sales_logic.core.allocation import (
 from src.facts.sales.sales_logic.core.customer_sampling import (
     _eligible_customer_mask_for_month,
     _hash_uniform,
+    _hash_uniform_positions,
     _normalize_end_month,
     _normalize_weights,
     _participation_distinct_target,
     _sample_customers,
     _urgency_pick,
+    assign_orders_to_customers,
+    build_month_customer_pool,
     compute_discovery_months,
+    compute_month_distinct_targets,
 )
+from src.facts.sales.sales_logic.chunk_builder import _chunk_month_band
 from src.facts.sales.sales_logic.globals import State
 from src.facts.budget.accumulator import BudgetAccumulator
 from src.engine.config.config_schema import AppConfig
@@ -839,6 +844,178 @@ class TestSampleCustomers:
             target_distinct=5,
         )
         assert len(np.unique(result)) <= 5
+
+
+# ===================================================================
+# Phase 2 — global per-month plan (plan globally, shard the index space)
+# ===================================================================
+
+class TestChunkMonthBand:
+    """`_chunk_month_band` tiles the global order/line space exactly."""
+
+    def test_sums_exact_and_no_gaps_across_chunk_counts(self):
+        for C in (1, 2, 3, 5, 12, 37):
+            for R, O in [(1000, 556), (37, 21), (1, 1), (500, 1),
+                         (999, 999), (8, 7), (10000, 5000)]:
+                tot_o = tot_l = 0
+                prev = 0
+                for c in range(C):
+                    start, no, nl = _chunk_month_band(R, O, c, C)
+                    assert nl >= no >= 0            # >= 1 line per order
+                    if no > 0:
+                        assert start == prev       # contiguous, no gaps
+                    prev = start + no
+                    tot_o += no
+                    tot_l += nl
+                assert tot_o == O                  # orders tile [0, O)
+                assert tot_l == R                  # lines sum to total_rows
+
+    def test_degenerate_inputs(self):
+        assert _chunk_month_band(0, 0, 0, 4) == (0, 0, 0)
+        assert _chunk_month_band(100, 0, 0, 4) == (0, 0, 0)
+        assert _chunk_month_band(100, 50, 0, 0) == (0, 0, 0)
+
+
+class TestHashUniformPositions:
+    def test_range_determinism_and_position_sensitivity(self):
+        pos = np.arange(0, 500, dtype=np.int64)
+        a = _hash_uniform_positions(3, pos, 1234)
+        b = _hash_uniform_positions(3, pos, 1234)
+        np.testing.assert_array_equal(a, b)              # deterministic
+        assert a.min() >= 0.0 and a.max() < 1.0
+        # Different month or seed reshuffles.
+        assert not np.array_equal(a, _hash_uniform_positions(4, pos, 1234))
+        assert not np.array_equal(a, _hash_uniform_positions(3, pos, 9999))
+
+
+class TestAssignOrdersToCustomers:
+    """The core chunk-invariance property: distinct set == pool regardless of
+    how the month's order band is split into chunks."""
+
+    def _pool_cdf(self, n=20):
+        pool = np.arange(100, 100 + n, dtype=np.int32)
+        cdf = np.linspace(1.0 / n, 1.0, n)
+        cdf[-1] = 1.0
+        return pool, cdf
+
+    def test_distinct_prefix_is_the_pool(self):
+        pool, cdf = self._pool_cdf(20)
+        # The whole month (O=50 orders): first 20 order-indices are the pool.
+        full = assign_orders_to_customers(
+            m_offset=2, order_start=0, n_orders=50, pool=pool, cdf=cdf, seed=7)
+        assert set(full[:20].tolist()) == set(pool.tolist())
+        assert set(full.tolist()) == set(pool.tolist())   # repeats add nobody new
+
+    def test_split_union_equals_single_pass(self):
+        pool, cdf = self._pool_cdf(20)
+        O = 50
+        single = assign_orders_to_customers(
+            m_offset=2, order_start=0, n_orders=O, pool=pool, cdf=cdf, seed=7)
+        # Split [0, O) into arbitrary contiguous bands and concatenate.
+        for bounds in ([0, 7, 20, 33, 50], [0, 25, 50], [0, 1, 49, 50]):
+            parts = []
+            for a, b in zip(bounds[:-1], bounds[1:]):
+                parts.append(assign_orders_to_customers(
+                    m_offset=2, order_start=a, n_orders=b - a,
+                    pool=pool, cdf=cdf, seed=7))
+            merged = np.concatenate(parts)
+            # Same customer at every global index → identical array, and identical
+            # distinct set (the chunk-invariance guarantee).
+            np.testing.assert_array_equal(merged, single)
+            assert set(merged.tolist()) == set(pool.tolist())
+
+    def test_empty_pool_returns_empty(self):
+        out = assign_orders_to_customers(
+            m_offset=0, order_start=0, n_orders=10,
+            pool=np.empty(0, dtype=np.int32), cdf=np.empty(0), seed=1)
+        assert out.shape == (0,)
+
+
+class TestBuildMonthCustomerPool:
+    def _lifecycle(self, n=40):
+        keys = np.arange(1, n + 1, dtype=np.int32)
+        eligible_idx = np.arange(n)          # all eligible this month
+        end_norm = np.full(n, -1, dtype=np.int64)
+        return keys, eligible_idx, end_norm
+
+    def test_forces_debut_excludes_future_and_caps_at_target(self):
+        keys, eligible_idx, end_norm = self._lifecycle(40)
+        disc = np.full(40, 5, dtype=np.int64)   # most are future
+        disc[:5] = 1                            # 1..5 introduced earlier
+        disc[5:10] = 3                          # 6..10 debut this month (m=3)
+        pool, cdf = build_month_customer_pool(
+            m_offset=3, distinct_target=8, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=disc, base_weight=None,
+            end_month_norm=end_norm, seed=7)
+        s = set(int(x) for x in pool)
+        assert {6, 7, 8, 9, 10} <= s                    # debut cohort forced in
+        assert s <= set(range(1, 11))                   # no not-yet-introduced keys
+        assert pool.size <= 8                           # capped at distinct target
+        assert abs(float(cdf[-1]) - 1.0) < 1e-12
+
+    def test_deterministic_by_month_and_seed(self):
+        keys, eligible_idx, end_norm = self._lifecycle(40)
+        disc = np.zeros(40, dtype=np.int64)             # all introduced
+        a, _ = build_month_customer_pool(
+            m_offset=4, distinct_target=15, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=disc, base_weight=None,
+            end_month_norm=end_norm, seed=7)
+        b, _ = build_month_customer_pool(
+            m_offset=4, distinct_target=15, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=disc, base_weight=None,
+            end_month_norm=end_norm, seed=7)
+        c, _ = build_month_customer_pool(
+            m_offset=4, distinct_target=15, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=disc, base_weight=None,
+            end_month_norm=end_norm, seed=8)
+        np.testing.assert_array_equal(a, b)
+        assert not np.array_equal(a, c)
+
+    def test_discovery_off_draws_from_all_eligible(self):
+        keys, eligible_idx, end_norm = self._lifecycle(40)
+        pool, _ = build_month_customer_pool(
+            m_offset=0, distinct_target=10, eligible_idx=eligible_idx,
+            customer_keys=keys, discovery_month=None, base_weight=None,
+            end_month_norm=end_norm, seed=7)
+        assert pool.size == 10
+        assert len(set(pool.tolist())) == 10            # distinct
+
+
+class TestComputeMonthDistinctTargets:
+    def test_zero_ratio_is_all_zero(self):
+        out = compute_month_distinct_targets(
+            seed=1, T=6, eligible_counts=np.full(6, 100),
+            orders_per_month=np.full(6, 50), month_cal_index=np.arange(1, 7),
+            distinct_ratio=0.0, cycle_amplitude=0.0, participation_noise=0.0,
+            seasonal_spike_map={}, max_distinct_ratio=0.7, min_distinct_customers=0)
+        assert out.tolist() == [0] * 6
+
+    def test_capped_by_orders_and_eligible(self):
+        # target never exceeds orders-per-month or eligible count.
+        out = compute_month_distinct_targets(
+            seed=1, T=4, eligible_counts=np.array([1000, 1000, 5, 1000]),
+            orders_per_month=np.array([3, 1000, 1000, 0]),
+            month_cal_index=np.array([1, 2, 3, 4]),
+            distinct_ratio=1.0, cycle_amplitude=0.0, participation_noise=0.0,
+            seasonal_spike_map={}, max_distinct_ratio=1.0, min_distinct_customers=0)
+        assert out[0] <= 3          # capped by orders
+        assert out[2] <= 5          # capped by eligible
+        assert out[3] == 0          # zero orders → zero
+
+    def test_deterministic_and_seed_sensitive(self):
+        kw = dict(T=12, eligible_counts=np.full(12, 500),
+                  orders_per_month=np.full(12, 300),
+                  month_cal_index=((np.arange(12)) % 12) + 1,
+                  distinct_ratio=0.55, cycle_amplitude=0.35,
+                  participation_noise=0.10,
+                  seasonal_spike_map={11: 0.4, 12: 0.25},
+                  max_distinct_ratio=0.7, min_distinct_customers=1)
+        a = compute_month_distinct_targets(seed=1, **kw)
+        b = compute_month_distinct_targets(seed=1, **kw)
+        c = compute_month_distinct_targets(seed=2, **kw)
+        np.testing.assert_array_equal(a, b)
+        assert not np.array_equal(a, c)
+        assert np.all(a <= 300)     # never exceeds orders
 
 
 # ===================================================================

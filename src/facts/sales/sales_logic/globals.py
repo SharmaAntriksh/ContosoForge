@@ -96,6 +96,14 @@ class SalesContext:
     customer_end_month: Any = None
     customer_base_weight: Any = None
     customer_discovery_month: Any = None   # int64 pool-aligned: month each customer first enters sales
+    # -- Global per-month plan (Phase 2): computed once in the coordinator,
+    #    broadcast read-only, and sliced per chunk so the per-month row curve and
+    #    distinct-customer curve are independent of chunk_size / worker count. --
+    sales_rows_per_month: Any = None       # int64[T]: global rows per month
+    sales_orders_per_month: Any = None     # int64[T]: global orders per month
+    sales_distinct_target: Any = None      # int64[T]: distinct-customer target per month
+    sales_plan_seed: Optional[int] = None  # run seed for month-pool + repeat draws
+    total_chunks: Optional[int] = None     # chunk count (for index-space sharding)
     date_pool: Any = None
     date_prob: Any = None
     store_keys: Any = None
@@ -236,6 +244,17 @@ class State(metaclass=_SealableMeta):
     # population. Built once per run and broadcast read-only; replaces the old
     # mutable per-worker ``seen_customers`` accumulator.
     customer_discovery_month = None
+
+    # Global per-month plan (Phase 2). Computed once in the coordinator against
+    # the GLOBAL month totals and broadcast read-only; each chunk slices a
+    # contiguous band of every month's order-id space, so the per-month row curve
+    # and distinct-customer curve no longer depend on chunk_size / worker count
+    # (review Finding #4/#14). See chunk_builder.build_chunk_table.
+    sales_rows_per_month = None        # int64[T]: rows per month
+    sales_orders_per_month = None      # int64[T]: orders per month (<= rows)
+    sales_distinct_target = None       # int64[T]: distinct-customer target per month
+    sales_plan_seed = None             # run seed for month-pool + repeat draws
+    total_chunks = None                # chunk count (index-space sharding divisor)
 
     date_pool = None
     date_prob = None

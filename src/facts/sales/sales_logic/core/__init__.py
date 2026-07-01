@@ -31,6 +31,9 @@ from .customer_sampling import (
     _participation_distinct_target,
     _sample_customers,
     compute_discovery_months,
+    compute_month_distinct_targets,
+    build_month_customer_pool,
+    assign_orders_to_customers,
 )
 
 # Re-export: promotions
@@ -94,6 +97,11 @@ __all__ = [
 
     # customer discovery schedule
     "compute_discovery_months",
+
+    # global per-month plan (Phase 2)
+    "compute_month_distinct_targets",
+    "build_month_customer_pool",
+    "assign_orders_to_customers",
 ]
 
 # Internal symbols re-exported for chunk_builder and tests (not part of the

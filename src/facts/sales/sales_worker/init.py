@@ -593,6 +593,13 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         customer_base_weight = worker_cfg.get("customer_base_weight")
         customer_discovery_month = worker_cfg.get("customer_discovery_month")
 
+        # Global per-month plan (Phase 2): tiny length-T arrays + scalars.
+        sales_rows_per_month = worker_cfg.get("sales_rows_per_month")
+        sales_orders_per_month = worker_cfg.get("sales_orders_per_month")
+        sales_distinct_target = worker_cfg.get("sales_distinct_target")
+        sales_plan_seed = int_or(worker_cfg.get("sales_plan_seed"), 0)
+        total_chunks = int_or(worker_cfg.get("total_chunks"), 1)
+
         date_pool = worker_cfg["date_pool"]
         date_prob = worker_cfg["date_prob"]
 
@@ -1009,6 +1016,14 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         if customer_discovery_month.shape[0] != customer_keys.shape[0]:
             raise RuntimeError("customer_discovery_month must align with customer_keys length")
 
+    # Global per-month plan arrays are length-T (months); coerce to int64.
+    if sales_rows_per_month is not None:
+        sales_rows_per_month = as_int64(sales_rows_per_month)
+    if sales_orders_per_month is not None:
+        sales_orders_per_month = as_int64(sales_orders_per_month)
+    if sales_distinct_target is not None:
+        sales_distinct_target = as_int64(sales_distinct_target)
+
     # Use pre-built brand_prob_by_month from shared memory if available
     _prebuilt_bp = worker_cfg.get("_prebuilt_brand_prob_by_month")
     if _prebuilt_bp is not None:
@@ -1101,6 +1116,12 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "customer_end_month": customer_end_month,
             "customer_base_weight": customer_base_weight,
             "customer_discovery_month": customer_discovery_month,
+            # Global per-month plan (Phase 2)
+            "sales_rows_per_month": sales_rows_per_month,
+            "sales_orders_per_month": sales_orders_per_month,
+            "sales_distinct_target": sales_distinct_target,
+            "sales_plan_seed": sales_plan_seed,
+            "total_chunks": total_chunks,
             "store_to_geo_arr": store_to_geo_arr,
             "geo_to_currency_arr": geo_to_currency_arr,
             "date_pool": date_pool,

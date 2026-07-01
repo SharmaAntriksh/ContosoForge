@@ -11,20 +11,23 @@ What they pin down (verified empirically while authoring):
 
 * **Total row count is chunk-size invariant** — both runs emit exactly the
   requested ``total_rows``. (passes today)
-* **The per-month distinct-customer curve is NOT chunk-size invariant** — because
-  the per-month "distinct customer" target is computed against *per-chunk* rows and
-  repeats are drawn only from the chunk-local pool (``sales_logic/chunk_builder.py``
-  ~1517; ``sales_logic/core/customer_sampling.py`` ~432/540), splitting the same
-  rows into more chunks redistributes which customers transact in which month. So
-  ``base_distinct_ratio`` — a business parameter — silently depends on ``chunk_size``.
-  This is review Finding #4/#14, fixed by Phase 2 (global per-month plan; distinct
-  target evaluated against global month rows). The test below is ``xfail(strict=True)``
-  today; when Phase 2 lands it XPASSes — delete the marker to make it a hard guard.
+* **The per-month distinct-customer curve is chunk-size invariant** (Phase 2). It
+  used *not* to be: the per-month distinct target was computed against *per-chunk*
+  rows and repeats were drawn only from a chunk-local pool, so splitting the same
+  rows into more chunks redistributed which customers transacted in which month —
+  ``base_distinct_ratio`` (a business parameter) silently depended on ``chunk_size``
+  (review Finding #4/#14). Phase 2 fixes this: the coordinator computes the
+  per-month rows, orders, and distinct target ONCE against the global month totals
+  and each chunk slices a contiguous band of every month's order-id space
+  (``chunk_builder._chunk_month_band`` + ``assign_orders_to_customers``), so the
+  per-month distinct-customer set is exactly the month pool regardless of chunking.
+  Now a hard regression guard (the ``xfail`` was removed when Phase 2 landed).
 
-Because both runs are single-worker they are fully deterministic, so the divergence
-is reproducible run-to-run (no scheduling flakiness): at 12 chunks the per-month
-distinct-customer counts differed from the single-chunk run by up to ~48 customers
-per month while total rows and total distinct customers were unchanged.
+Because both runs are single-worker they are fully deterministic, so any regression
+would be reproducible run-to-run (no scheduling flakiness): before Phase 2, at 12
+chunks the per-month distinct-customer counts differed from the single-chunk run by
+up to ~48 customers per month while total rows and total distinct customers were
+unchanged.
 """
 from __future__ import annotations
 
@@ -82,17 +85,19 @@ def test_total_rows_invariant_to_chunk_size(run_sales_df):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Finding #4/#14: the per-month distinct-customer target is computed "
-           "against per-chunk rows (chunk_builder ~1517), so splitting the same rows "
-           "into more chunks redistributes the per-month distinct-customer curve — "
-           "base_distinct_ratio silently depends on chunk_size. Fixed by Phase 2 "
-           "(global per-month plan). When that lands this XPASSes — delete this "
-           "marker to turn it into a hard regression guard.",
-)
 def test_per_month_distinct_customers_invariant_to_chunk_size(run_sales_df):
-    """The per-month distinct-customer curve must not depend on chunk_size."""
+    """The per-month distinct-customer curve must not depend on chunk_size.
+
+    Hard regression guard since Phase 2 (global per-month plan). Finding #4/#14
+    used to make ``base_distinct_ratio`` depend on ``chunk_size`` because the
+    distinct target was evaluated against per-chunk rows and repeats were drawn
+    from a chunk-local pool. The coordinator now computes the per-month rows,
+    orders, and distinct target ONCE against the global month totals; each chunk
+    slices a contiguous band of every month's order-id space
+    (``chunk_builder._chunk_month_band`` + ``assign_orders_to_customers``), so a
+    given global order index always maps to the same customer and the per-month
+    distinct-customer set is exactly the month pool regardless of chunking.
+    """
     df_single = run_sales_df("dist_single", chunk_size=SINGLE_CHUNK_SIZE)
     df_many = run_sales_df("dist_many", chunk_size=MANY_CHUNK_SIZE)
 

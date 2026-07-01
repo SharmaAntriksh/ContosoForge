@@ -28,7 +28,14 @@ from src.utils.config_helpers import int_or as _int_or, float_or as _float_or, b
 from src.utils.logging_utils import debug, info, skip, warn, work
 from src.utils.shared_arrays import SharedArrayGroup
 from .sales_logic import State
-from .sales_logic.core import compute_discovery_months
+from .sales_logic.core import (
+    compute_discovery_months,
+    compute_month_distinct_targets,
+    build_rows_per_month,
+    _normalize_end_month,
+)
+from .sales_logic.core.allocation import _stable_seed
+from .sales_logic.chunk_builder import _eligible_counts_fast
 from .sales_worker import PoolRunSpec, iter_imap_unordered, _worker_task, init_sales_worker
 from .sales_writer import merge_parquet_files, optimize_parquet
 from .output_paths import (
@@ -1440,6 +1447,7 @@ def _build_worker_cfg(
     returns_lag_distribution, returns_lag_mode,
     returns_logistics_keys, returns_event_key_capacity,
     month_stride=0, per_chunk_alloc=0, order_id_int64=False,
+    total_chunks=1,
 ):
     """Build the worker_cfg dict from typed containers."""
     # Salesperson performance spread (Part 2): resolved once here so both the
@@ -1478,6 +1486,13 @@ def _build_worker_cfg(
         customer_base_weight=cust["customer_base_weight"],
         customer_discovery_month=cust.get("customer_discovery_month"),
         customer_first_eff_start_by_key=cust["customer_first_eff_start_by_key"],
+
+        # Global per-month plan (Phase 2): tiny length-T arrays + scalars.
+        sales_rows_per_month=cust.get("sales_rows_per_month"),
+        sales_orders_per_month=cust.get("sales_orders_per_month"),
+        sales_distinct_target=cust.get("sales_distinct_target"),
+        sales_plan_seed=int(seed),
+        total_chunks=int(total_chunks),
 
         store_to_geo=stores["store_to_geo"],
         geo_to_currency=stores["geo_to_currency"],
@@ -2504,6 +2519,91 @@ def generate_sales_fact(
         lag_scale=_discovery_lag_scale,
     )
 
+    # ------------------------------------------------------------
+    # Global per-month plan (Phase 2.1/2.2). Compute the per-month row curve,
+    # order count, and distinct-customer target ONCE here against the GLOBAL month
+    # totals, then broadcast read-only. Each chunk slices a contiguous band of
+    # every month's order-id space (see chunk_builder), so both the per-month row
+    # curve and the distinct-customer curve are independent of chunk_size / worker
+    # count (review Finding #4/#14/#17) — replacing the old per-chunk allocation
+    # and per-chunk distinct target that made both depend on chunk_size.
+    # ------------------------------------------------------------
+    _end_month_norm_g = _normalize_end_month(
+        _cust.get("customer_end_month"),
+        int(np.asarray(_cust["customer_keys"]).shape[0]),
+    )
+    _elig_counts_g = _eligible_counts_fast(
+        T=_T_months,
+        is_active_in_sales=_cust["is_active_in_sales"],
+        start_month=_cust["customer_start_month"],
+        end_month_norm=_end_month_norm_g,
+    )
+    _macro_cfg_plan = State.models_cfg.get("macro_demand", {}) or {}
+    _plan_rng = np.random.default_rng(_stable_seed(int(seed), "month_rows_plan", _T_months))
+    _rows_per_month_g = build_rows_per_month(
+        rng=_plan_rng,
+        total_rows=int(total_rows),
+        eligible_counts=_elig_counts_g,
+        macro_cfg=_macro_cfg_plan,
+    )
+
+    # Orders per month = lines / avg-lines-per-order, matching chunk_builder's
+    # order-vs-line accounting. avg=1 collapses orders==lines (skip_order_cols or
+    # max_lines==1). O[m] <= R[m] and O[m] >= 1 wherever R[m] > 0.
+    _eff_skip = False if sales_output in {"sales_order", "both"} else bool(skip_order_cols)
+    _avg_lines = 1.8 if (not _eff_skip and _max_lines_per_order > 1) else 1.0
+    _orders_per_month_g = np.minimum(
+        np.rint(_rows_per_month_g / _avg_lines).astype(np.int64), _rows_per_month_g)
+    _orders_per_month_g = np.where(
+        _rows_per_month_g > 0, np.maximum(_orders_per_month_g, 1), 0).astype(np.int64)
+
+    # Distinct-customer target per month (canonical single source — Phase 2.2/2.3).
+    # Mirrors the config reads the chunk builder used inline, but evaluated once
+    # against global month totals.
+    _cust_dmd = State.models_cfg.get("customers", {}) or {}
+    _distinct_ratio = float(np.clip(_cust_dmd.get("distinct_ratio", 0.55), 0.0, 1.0))
+    _cycle_amp = float(np.clip(_cust_dmd.get("cycle_amplitude", 0.35), 0.0, 1.0))
+    _part_noise = float(np.clip(_cust_dmd.get("participation_noise", 0.10), 0.0, 1.0))
+    _DEFAULT_SEASONAL_SPIKES = [
+        {"month": 3, "boost": 0.15}, {"month": 7, "boost": 0.12},
+        {"month": 9, "boost": 0.10}, {"month": 11, "boost": 0.40},
+        {"month": 12, "boost": 0.25},
+    ]
+    _spikes_raw = _cust_dmd.get("seasonal_spikes", None)
+    if _spikes_raw is None:
+        _spikes_raw = _DEFAULT_SEASONAL_SPIKES
+    _seasonal_spike_map: dict = {}
+    for _entry in _spikes_raw:
+        _mo = _entry.get("month") if isinstance(_entry, dict) else getattr(_entry, "month", None)
+        _bo = _entry.get("boost") if isinstance(_entry, dict) else getattr(_entry, "boost", None)
+        if _mo is not None and _bo is not None and 1 <= int(_mo) <= 12:
+            _seasonal_spike_map[int(_mo)] = float(_bo)
+    _max_distinct_ratio_g = _float_or(_macro_cfg_plan.get("max_distinct_ratio"), 0.70)
+    _min_distinct_customers_g = _int_or(_macro_cfg_plan.get("min_distinct_customers"), 250)
+
+    # Calendar month (1-12) per month offset (for the seasonal spike lookup).
+    if _dp_months.size:
+        _min_abs_month = int(_dp_months.min())
+        _month_cal_index = ((np.arange(_T_months, dtype=np.int64) + _min_abs_month) % 12) + 1
+    else:
+        _month_cal_index = np.zeros(_T_months, dtype=np.int64)
+
+    _cust["sales_rows_per_month"] = _rows_per_month_g
+    _cust["sales_orders_per_month"] = _orders_per_month_g
+    _cust["sales_distinct_target"] = compute_month_distinct_targets(
+        seed=int(seed),
+        T=_T_months,
+        eligible_counts=_elig_counts_g,
+        orders_per_month=_orders_per_month_g,
+        month_cal_index=_month_cal_index,
+        distinct_ratio=_distinct_ratio,
+        cycle_amplitude=_cycle_amp,
+        participation_noise=_part_noise,
+        seasonal_spike_map=_seasonal_spike_map,
+        max_distinct_ratio=_max_distinct_ratio_g,
+        min_distinct_customers=_min_distinct_customers_g,
+    )
+
     # Worker configuration
     worker_cfg = _build_worker_cfg(
         _cust, _prod, _stores, _emps, _corr, _promos,
@@ -2519,7 +2619,7 @@ def generate_sales_fact(
         returns_lag_distribution, returns_lag_mode,
         returns_logistics_keys, returns_event_key_capacity,
         month_stride=_day_stride, per_chunk_alloc=_per_chunk_alloc,
-        order_id_int64=_order_id_int64,
+        order_id_int64=_order_id_int64, total_chunks=total_chunks,
     )
 
     # Streaming accumulators (budget, inventory, wishlists, complaints)

@@ -63,6 +63,13 @@ class SalesWorkerCfg(TypedDict, total=False):
     customer_geo_key: Optional[np.ndarray]
     customer_first_eff_start_by_key: Optional[np.ndarray]
 
+    # -- Global per-month plan (Phase 2) -------------------------------------
+    sales_rows_per_month: Optional[np.ndarray]     # int64[T]: rows per month
+    sales_orders_per_month: Optional[np.ndarray]   # int64[T]: orders per month
+    sales_distinct_target: Optional[np.ndarray]    # int64[T]: distinct target
+    sales_plan_seed: int                           # run seed for month pools
+    total_chunks: int                              # index-space sharding divisor
+
     # -- Geography / currency ------------------------------------------------
     geo_to_currency: Optional[Dict[int, int]]
     geo_to_country_id: Optional[np.ndarray]
