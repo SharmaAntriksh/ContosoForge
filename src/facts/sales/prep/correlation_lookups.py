@@ -150,7 +150,7 @@ def _prebuild_shared_structures(
     employee_assign_end_date = emps["employee_assign_end_date"]
     employee_assign_fte = emps["employee_assign_fte"]
     employee_assign_is_primary = emps["employee_assign_is_primary"]
-    from .sales_worker.init import (
+    from ..sales_worker.init import (
         _build_store_subcat_matrix,
         _build_brand_prob_by_month_rotate_winner,
         _build_salesperson_effective_by_store,

@@ -81,7 +81,7 @@ def _compute_returns_effective(cfg, sales_cfg) -> Tuple[Any, bool]:
 
 def _run_coverage_preflight(cfg, parquet_dims: Path) -> None:
     """Validate salesperson coverage before the sales stage (see coverage_preflight)."""
-    from src.facts.sales.coverage_preflight import run_coverage_preflight
+    from src.facts.sales.prep.coverage_preflight import run_coverage_preflight
 
     defaults = getattr(cfg, "defaults", None)
     dates = getattr(defaults, "dates", None) if defaults is not None else None

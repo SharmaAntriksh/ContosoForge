@@ -30,7 +30,7 @@ from .output_paths import (
     TABLE_SALES_ORDER_HEADER,
     TABLE_SALES_RETURN,
 )
-from .sales_helpers import _CSV_COPY_BUF
+from .prep.sales_helpers import _CSV_COPY_BUF
 from .sales_writer import merge_parquet_files, optimize_parquet
 
 

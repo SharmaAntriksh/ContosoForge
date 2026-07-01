@@ -236,7 +236,7 @@ class TestResolveTrendPreset:
     def test_seasonal_spikes_parseable_by_chunk_builder_logic(self):
         """The real spike normalizer must handle both dicts and Pydantic models identically."""
         from src.engine.config.config_schema import SeasonalSpikeConfig
-        from src.facts.sales.sales_helpers import _normalize_seasonal_spikes
+        from src.facts.sales.prep.sales_helpers import _normalize_seasonal_spikes
 
         # Pydantic path (trend preset resolved)
         pydantic_spikes = [
@@ -258,7 +258,7 @@ class TestResolveTrendPreset:
     def test_seasonal_spikes_normalizer_drops_invalid_entries(self):
         """Out-of-range months and missing month/boost are dropped (both shapes)."""
         from src.engine.config.config_schema import SeasonalSpikeConfig
-        from src.facts.sales.sales_helpers import _normalize_seasonal_spikes
+        from src.facts.sales.prep.sales_helpers import _normalize_seasonal_spikes
 
         assert _normalize_seasonal_spikes(None) == {}
         assert _normalize_seasonal_spikes([]) == {}

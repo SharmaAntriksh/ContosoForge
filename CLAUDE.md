@@ -123,6 +123,15 @@ src/
   facts/
     sales/                       # Core sales fact generation
       sales.py                   # Entry point, orchestrates worker pool
+      prep/                      # Coordinator-side setup (main process, before the worker pool spawns)
+        sales_helpers.py         # Leaf helpers (stdlib/numpy/pandas; importable without importing sales.py)
+        dimension_loaders.py     # Load dimension parquet + promo-salience precompute
+        correlation_lookups.py   # Correlation lookups + _prebuild_shared_structures (SHM broadcast)
+        scd2_grid.py             # Shared SCD2 version-index grid helper
+        memory_model.py          # Chunk-size RAM budgeting (cap by available physical bytes)
+        worker_cfg_builder.py    # Assemble worker_cfg dict + streamed-fact accumulators
+        worker_cfg_schema.py     # Worker config dict schema (SalesWorkerCfg)
+        coverage_preflight.py    # Pre-run salesperson-coverage check (abort/skip/repair policy)
       sales_logic/               # Business logic (orders, pricing, promos, allocation)
         globals.py               # State class (per-worker; bound once, read-only thereafter) + schema bridge
         chunk_builder.py         # Per-chunk row assembly (CDF sampling, ID arithmetic)
@@ -131,9 +140,8 @@ src/
       sales_models/              # quantity model (Poisson), pricing pipeline (inflation+markdown+snap)
       sales_worker/              # Multiprocessing pool, task definitions, schemas
       sales_writer/              # Output writers (parquet merge, delta, CSV), encoding
-      coverage_preflight.py      # Pre-run coverage/feasibility checks
       output_paths.py            # Scratch/output path resolution
-      worker_cfg_schema.py       # Worker config dict schema
+      output_assembler.py        # Final output assembly (parquet merge / delta / csv dispatch)
     budget/                      # Budget fact (Low/Medium/High scenarios): accumulator, engine, lookups, micro_agg, runner
     inventory/                   # Inventory snapshots (monthly grain, ABC class, shrinkage): accumulator, engine, micro_agg, runner, worker
     wishlists/                   # Customer wishlists (streamed): accumulator, constants, micro_agg, runner, scd2, selection, worker

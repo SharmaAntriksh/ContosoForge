@@ -1,4 +1,4 @@
-"""Tests for the salesperson-coverage pre-flight (src.facts.sales.coverage_preflight).
+"""Tests for the salesperson-coverage pre-flight (src.facts.sales.prep.coverage_preflight).
 
 Real generation never produces a coverage gap (the dimension guards prevent it),
 so these tests build a synthetic bridge with a deliberate gap to exercise
@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from src.exceptions import SalesError
-from src.facts.sales.coverage_preflight import (
+from src.facts.sales.prep.coverage_preflight import (
     analyze_coverage,
     repair_bridge,
     run_coverage_preflight,

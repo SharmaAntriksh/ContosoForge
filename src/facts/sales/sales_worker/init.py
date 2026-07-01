@@ -20,7 +20,7 @@ from src.exceptions import SalesError
 from src.utils.config_helpers import int_or, float_or, str_or
 from src.utils.logging_utils import warn as _warn
 from src.utils.shared_arrays import resolve_array
-from ..worker_cfg_schema import SalesWorkerCfg
+from ..prep.worker_cfg_schema import SalesWorkerCfg
 
 
 EMPLOYEE_KEY_MIN_NON_MANAGER = 40_000_000

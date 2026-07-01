@@ -24,7 +24,7 @@ from src.utils.config_helpers import (
 from src.utils.logging_utils import info
 
 from .dimension_loaders import _compute_promo_salience
-from .sales_logic import State
+from ..sales_logic import State
 from .worker_cfg_schema import SalesWorkerCfg
 
 # Budget streaming aggregation (lazy import to avoid hard dependency)
