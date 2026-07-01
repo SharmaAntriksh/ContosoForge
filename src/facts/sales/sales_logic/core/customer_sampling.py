@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import warnings
 from typing import Optional
 
@@ -115,54 +114,6 @@ def _eligible_customer_mask_for_month(
         & (start_month <= m)
         & ((end_month_norm < 0) | (m <= end_month_norm))
     )
-
-
-# ----------------------------------------------------------------
-# Participation target
-# ----------------------------------------------------------------
-
-def _participation_distinct_target(
-    rng: np.random.Generator,
-    m_offset: int,
-    eligible_count: int,
-    n_orders: int,
-    cfg: dict,
-) -> int:
-    """
-    Target number of distinct customers to appear in the month.
-    """
-    eligible_count = int(eligible_count)
-    n_orders = int(n_orders)
-    if eligible_count <= 0 or n_orders <= 0:
-        return 0
-
-    base_ratio = float(cfg.get("base_distinct_ratio", 0.0))
-    min_k = int(cfg.get("min_distinct_customers", 0))
-    max_ratio = float(cfg.get("max_distinct_ratio", 1.0))
-
-    k = eligible_count * base_ratio
-
-    cycles_cfg = cfg.get("cycles", {}) or {}
-    if bool(cycles_cfg.get("enabled", False)):
-        period = int(cycles_cfg.get("period_months", 24))
-        amp = float(cycles_cfg.get("amplitude", 0.0))
-        phase = float(cycles_cfg.get("phase", 0.0))
-        noise_std = float(cycles_cfg.get("noise_std", 0.0))
-
-        cyc = math.sin((2.0 * math.pi * float(m_offset) / max(period, 1)) + phase)
-        mult = 1.0 + (amp * cyc)
-        if noise_std > 0:
-            mult += float(rng.normal(loc=0.0, scale=noise_std))
-
-        mult = max(0.05, min(mult, 3.0))
-        k *= mult
-
-    k = max(k, float(min_k))
-    k = min(k, eligible_count * max_ratio)
-    k = min(k, float(eligible_count), float(n_orders))
-
-    # round() can push k above n_orders at the boundary
-    return min(int(max(1, round(k))), n_orders, eligible_count)
 
 
 # ------------------------------------------------------------
@@ -394,8 +345,16 @@ def _urgency_pick(
 
 
 # ----------------------------------------------------------------
-# Main sampling entry point
+# Legacy per-chunk sampling entry point
 # ----------------------------------------------------------------
+# DEAD as of Phase 2: the live path no longer samples customers per chunk. The
+# per-month distinct-customer pool is built once (build_month_customer_pool) and
+# each chunk maps its global order band to customers (assign_orders_to_customers),
+# which is what makes the per-month distinct curve chunk/worker invariant. This
+# function (and _concat_and_shuffle) is retained only for its unit tests and is
+# slated for removal in Phase 5.1 (State/architecture cleanup) — do NOT re-wire it
+# into the chunk builder, as its chunk-local sampling is exactly the chunk-size
+# dependence Phase 2 removed.
 
 def _sample_customers(
     rng: np.random.Generator,
@@ -589,9 +548,10 @@ def compute_month_distinct_targets(
     Single source of truth for "how many distinct customers transact in month m",
     evaluated against the GLOBAL month totals (``eligible_counts``,
     ``orders_per_month``) and a seed-derived RNG — so it is independent of
-    ``chunk_size`` / worker count. This replaces both the per-chunk inline target
-    (chunk_builder) and the dead ``_participation_distinct_target``. Returns an
-    int64 array of length ``T`` with ``D[m] <= orders_per_month[m]``.
+    ``chunk_size`` / worker count. This is the single source of truth for the
+    per-month distinct target (it replaced the per-chunk inline target in
+    chunk_builder and the removed ``_participation_distinct_target`` duplicate).
+    Returns an int64 array of length ``T`` with ``D[m] <= orders_per_month[m]``.
     """
     T = int(T)
     out = np.zeros(T, dtype=np.int64)

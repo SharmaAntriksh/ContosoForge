@@ -28,7 +28,6 @@ from .orders import (
 from .customer_sampling import (
     _normalize_end_month,
     _eligible_customer_mask_for_month,
-    _participation_distinct_target,
     _sample_customers,
     compute_discovery_months,
     compute_month_distinct_targets,
@@ -106,6 +105,8 @@ __all__ = [
 
 # Internal symbols re-exported for chunk_builder and tests (not part of the
 # public API, but importable from this package for backward compatibility):
-#   _normalize_end_month, _eligible_customer_mask_for_month,
-#   _participation_distinct_target, _sample_customers, _stable_row_hash
+#   _normalize_end_month, _eligible_customer_mask_for_month, _sample_customers,
+#   _stable_row_hash. The global per-month plan helpers
+#   (compute_month_distinct_targets / build_month_customer_pool /
+#   assign_orders_to_customers) are the Phase 2 live path.
 # (_yyyymmdd_from_days is retained for test coverage only — no prod caller.)

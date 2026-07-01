@@ -49,7 +49,6 @@ from src.facts.sales.sales_logic.core.customer_sampling import (
     _hash_uniform_positions,
     _normalize_end_month,
     _normalize_weights,
-    _participation_distinct_target,
     _sample_customers,
     _urgency_pick,
     assign_orders_to_customers,
@@ -684,35 +683,6 @@ class TestEligibleCustomerMask:
 
         mask = _eligible_customer_mask_for_month(5, active, start, end)
         np.testing.assert_array_equal(mask, [False])
-
-
-class TestParticipationDistinctTarget:
-    def test_zero_eligible(self):
-        assert _participation_distinct_target(_rng(), 0, 0, 10, {}) == 0
-
-    def test_zero_orders(self):
-        assert _participation_distinct_target(_rng(), 0, 100, 0, {}) == 0
-
-    def test_basic_ratio(self):
-        k = _participation_distinct_target(
-            _rng(), 0, 100, 200,
-            {"base_distinct_ratio": 0.5},
-        )
-        assert 1 <= k <= 100
-
-    def test_capped_by_eligible(self):
-        k = _participation_distinct_target(
-            _rng(), 0, 10, 200,
-            {"base_distinct_ratio": 1.0},
-        )
-        assert k <= 10
-
-    def test_capped_by_n_orders(self):
-        k = _participation_distinct_target(
-            _rng(), 0, 100, 5,
-            {"base_distinct_ratio": 1.0},
-        )
-        assert k <= 5
 
 
 class TestNormalizeWeights:
