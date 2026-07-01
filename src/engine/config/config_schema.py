@@ -856,7 +856,7 @@ class MacroDemandConfig(_Base):
 # -- Quantity --
 
 class QuantityElasticityConfig(_Base):
-    """Phase 3.1: make purchase quantity depend on product price and a
+    """Make purchase quantity depend on product price and a
     per-product unit propensity, so cheap staples sell in higher quantities than
     expensive durables (instead of a product-agnostic Poisson).
 
@@ -909,7 +909,7 @@ class MarkdownConfig(_Base):
     min_net_price: float = 0.01
     allow_negative_margin: bool = False
     ladder: List[MarkdownLadderEntry] = []
-    # Phase 3.5: reconcile the per-row DiscountAmount with the assigned
+    # Reconcile the per-row DiscountAmount with the assigned
     # PromotionKey. When True (default), a discount is a consequence of a
     # promotion — only promoted lines (PromotionKey != no_discount_key) carry a
     # discount and each draws from the *nonzero* ladder, so a "no promotion" row
@@ -941,7 +941,7 @@ class DiscountAppearanceConfig(_Base):
 
 class AppearanceConfig(_Base):
     enabled: bool = True
-    # Phase 4.1: snap the posted UnitPrice/UnitCost deterministically per
+    # Snap the posted UnitPrice/UnitCost deterministically per
     # (ProductID, month) — the stochastic round + ending are hash-seeded on
     # (product, month) instead of the per-row chunk RNG, so every sales line for
     # the same product-month carries the same posted price (per-line variation
@@ -1058,7 +1058,7 @@ class CustomersDemandConfig(_Base):
 # =========================================================================
 
 class PromoSalienceConfig(_Base):
-    """Phase 3.2: weight promotion selection by salience, so deeper / more
+    """Weight promotion selection by salience, so deeper / more
     prominent promotions are redeemed more often than shallow ones (instead of a
     uniform draw among the promotions active on a given date/channel).
 
@@ -1077,7 +1077,7 @@ class PromoSalienceConfig(_Base):
 
 
 class FulfillmentConfig(_Base):
-    """Phase 3.4: a shared per-line fulfillment-friction latent (hash-seeded on
+    """A shared per-line fulfillment-friction latent (hash-seeded on
     OrderNumber+OrderLineNumber) drives delivery timing AND return behavior, so
     late deliveries yield more / faster returns.
 
@@ -1111,7 +1111,7 @@ class FulfillmentConfig(_Base):
 
 
 class BasketConfig(_Base):
-    """Phase 3.3: order-level basket-theme correlation. Each order is assigned a
+    """Order-level basket-theme correlation. Each order is assigned a
     hash-seeded "theme" (a group of product subcategories); a share of its lines
     are biased toward that theme's subcategories, so a multi-line order holds
     complementary items and market-basket mining recovers real association rules

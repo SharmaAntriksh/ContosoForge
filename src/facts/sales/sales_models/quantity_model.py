@@ -129,7 +129,7 @@ def _clip_pair(val, default):
 
 
 def _parse_elasticity(el) -> dict:
-    """Parse the Phase 3.1 elasticity sub-config into a plain dict.
+    """Parse the elasticity sub-config into a plain dict.
 
     Absent (``None``) => disabled, so unit-test configs that only set the
     scalar quantity keys keep the legacy product-agnostic behavior.
@@ -221,7 +221,7 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None):
       1. Draw from Poisson(λ) + 1  (minimum 1 item)
       2. Multiply by monthly seasonal factors
       3. Add multiplicative noise
-      3b. Elasticity (Phase 3.1): scale by (price/ref)^(-ε) and a per-product
+      3b. Elasticity: scale by (price/ref)^(-ε) and a per-product
           unit propensity — pure arithmetic on the float quantity, no RNG, so
           determinism is preserved. Only active when ``unit_price`` is supplied
           (the pipeline path) *and* ``models.quantity.elasticity.enabled``.
@@ -261,7 +261,7 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None):
     if sigma > 0.0:
         qty *= rng.lognormal(mean=0.0, sigma=sigma, size=n)
 
-    # 3b. Elasticity + propensity (Phase 3.1) — deterministic, no RNG draws.
+    # 3b. Elasticity + propensity — deterministic, no RNG draws.
     el = cfg["elasticity"]
     if el.get("enabled") and unit_price is not None:
         eps = el.get("price_elasticity", 0.0)

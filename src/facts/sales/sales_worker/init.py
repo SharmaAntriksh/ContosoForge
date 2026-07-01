@@ -594,7 +594,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         customer_base_weight = worker_cfg.get("customer_base_weight")
         customer_discovery_month = worker_cfg.get("customer_discovery_month")
 
-        # Global per-month plan (Phase 2): tiny length-T arrays + scalars.
+        # Global per-month plan: tiny length-T arrays + scalars.
         sales_rows_per_month = worker_cfg.get("sales_rows_per_month")
         sales_orders_per_month = worker_cfg.get("sales_orders_per_month")
         sales_distinct_target = worker_cfg.get("sales_distinct_target")
@@ -1120,7 +1120,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "customer_end_month": customer_end_month,
             "customer_base_weight": customer_base_weight,
             "customer_discovery_month": customer_discovery_month,
-            # Global per-month plan (Phase 2)
+            # Global per-month plan
             "sales_rows_per_month": sales_rows_per_month,
             "sales_orders_per_month": sales_orders_per_month,
             "sales_distinct_target": sales_distinct_target,
@@ -1199,7 +1199,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             # Product profile attributes for weighted sampling
             "product_popularity": worker_cfg.get("product_popularity"),
             "product_seasonality": worker_cfg.get("product_seasonality"),
-            # Phase 3.3: per-product SubcategoryKey for basket-theme correlation.
+            # Per-product SubcategoryKey for basket-theme correlation.
             "product_subcat_key": worker_cfg.get("product_subcat_key"),
 
             # Column correlation data

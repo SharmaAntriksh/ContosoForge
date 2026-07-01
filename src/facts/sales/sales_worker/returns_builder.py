@@ -59,7 +59,7 @@ class ReturnsConfig:
     split_max_gap: int = 20
     event_key_offset: int = 0
     logistics_keys: frozenset = frozenset()
-    # Phase 3.4 — fulfillment-friction coupling (recomputed per line from
+    # Fulfillment-friction coupling (recomputed per line from
     # OrderNumber+OrderLineNumber). Defaults 0.0 => no effect (byte-identical to
     # the pre-3.4 behavior for direct/unit construction).
     friction_return_boost: float = 0.0   # p_return_i = rate * (1 + boost*friction_i)
@@ -307,7 +307,7 @@ def build_sales_returns_from_detail(
     so_all = _as_np_i64(_col_np(detail_cc, "OrderNumber"))
     line_all = _as_np_i32(_col_np(detail_cc, "OrderLineNumber"))
 
-    # Phase 3.4: shared fulfillment friction couples returns to delivery — the
+    # Shared fulfillment friction couples returns to delivery — the
     # SAME per-line friction the delivery pass used (recomputed here from
     # OrderNumber+line) makes late-delivered lines both more likely to be
     # returned and returned sooner.
@@ -410,7 +410,7 @@ def build_sales_returns_from_detail(
     # shape (uniform/triangular/normal) + peak come from models.yaml ->
     # returns.lag_days.{distribution,mode}.
     per_line_lag = _draw_base_lag(rng, m, lo, hi, cfg.lag_distribution, cfg.lag_mode)
-    # Phase 3.4: shorten the lag for high-friction (late-delivered) lines so they
+    # Shorten the lag for high-friction (late-delivered) lines so they
     # are returned sooner. Deterministic scale, no extra RNG draw.
     if cfg.friction_lag_shorten > 0.0 and friction is not None:
         _scale = 1.0 - cfg.friction_lag_shorten * friction

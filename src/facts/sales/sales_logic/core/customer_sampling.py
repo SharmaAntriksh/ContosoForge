@@ -347,14 +347,14 @@ def _urgency_pick(
 # ----------------------------------------------------------------
 # Legacy per-chunk sampling entry point
 # ----------------------------------------------------------------
-# DEAD as of Phase 2: the live path no longer samples customers per chunk. The
+# DEAD: the live path no longer samples customers per chunk. The
 # per-month distinct-customer pool is built once (build_month_customer_pool) and
 # each chunk maps its global order band to customers (assign_orders_to_customers),
 # which is what makes the per-month distinct curve chunk/worker invariant. This
 # function (and _concat_and_shuffle) is retained only for its unit tests and is
-# slated for removal in Phase 5.1 (State/architecture cleanup) — do NOT re-wire it
+# slated for removal during the State/architecture cleanup — do NOT re-wire it
 # into the chunk builder, as its chunk-local sampling is exactly the chunk-size
-# dependence Phase 2 removed.
+# dependence removed when the per-month plan became global.
 
 def _sample_customers(
     rng: np.random.Generator,
@@ -515,7 +515,7 @@ def _sample_customers(
 
 
 # ================================================================
-# Global per-month plan (Phase 2 — "plan globally, shard the index space")
+# Global per-month plan ("plan globally, shard the index space")
 # ================================================================
 # The chunk-dependent bug (review Finding #4/#14): the per-month distinct-customer
 # target was evaluated against *per-chunk* rows and repeats were drawn from a
@@ -724,7 +724,7 @@ def assign_orders_to_customers(
     Because every chunk that owns index ``j`` computes the same customer, the
     union of distinct customers across all chunks for month ``m`` is exactly
     ``pool`` — independent of how the month's orders are split into chunks
-    (the whole point of Phase 2). Returns a CustomerKey array of length
+    (the whole point of the global per-month plan). Returns a CustomerKey array of length
     ``n_orders``.
     """
     n = int(n_orders)

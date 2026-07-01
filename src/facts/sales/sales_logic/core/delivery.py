@@ -63,7 +63,7 @@ def _stable_row_hash(order_dates: np.ndarray, product_keys: np.ndarray) -> np.nd
 
 
 # ----------------------------------------------------------------
-# Fulfillment friction latent (Phase 3.4)
+# Fulfillment friction latent
 # ----------------------------------------------------------------
 
 _FRICTION_C = np.uint64(0xD1B54A32D192ED03)
@@ -126,7 +126,7 @@ _TWO_POW_63 = np.float64(9223372036854775808.0)  # 2**63
 
 def _friction_delivery_offset(n, has_orders, order_ids_int, line_numbers,
                               hash_vals, cfg):
-    """Friction-driven delivery offset (Phase 3.4), relative to the due date.
+    """Friction-driven delivery offset, relative to the due date.
 
     Deterministic (no RNG): the per-line friction latent buckets a line into
     early (offset < 0), on-time (0), or delayed (offset > 0) via (p_early,
@@ -176,7 +176,7 @@ def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
     - order_ids_int present  → order-level coherent behavior
     - order_ids_int is None → row-level fallback (skip_order_cols=True)
     - channel_keys + channel_fulfillment_days → channel-aware due date offsets
-    - fulfillment_cfg (Phase 3.4) → friction-driven early/on-time/delayed
+    - fulfillment_cfg → friction-driven early/on-time/delayed
       bucketing with an explicit named delay-magnitude distribution, replacing
       the legacy mod-100 ladder + RNG early draws. Deterministic (no RNG). When
       None/disabled, the legacy path is used unchanged.
@@ -248,7 +248,7 @@ def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
     _ff_on = bool(fulfillment_cfg) and bool(fulfillment_cfg.get("enabled", False))
 
     if _ff_on:
-        # Phase 3.4: friction-driven bucketing (deterministic, no RNG).
+        # Friction-driven bucketing (deterministic, no RNG).
         delivery_offset = _friction_delivery_offset(
             n, has_orders, order_ids_int, line_numbers, hash_vals, fulfillment_cfg
         )

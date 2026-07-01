@@ -72,9 +72,9 @@ def apply_promotions(
     Assign at most one PromotionKey per row.
 
     For each row, picks among promotions whose [StartDate, EndDate] window
-    covers that row's order date. When ``promo_salience_all`` is provided
-    (Phase 3.2), the pick is weighted by per-promo salience (deeper / more
-    prominent promotions redeemed more often); otherwise it is uniform.
+    covers that row's order date. When ``promo_salience_all`` is provided,
+    the pick is weighted by per-promo salience (deeper / more prominent
+    promotions redeemed more often); otherwise it is uniform.
 
     CORRELATION #5: When channel_keys and promo_channel_group are provided,
     promotions are filtered by channel affinity:

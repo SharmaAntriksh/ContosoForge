@@ -64,7 +64,7 @@ class SalesWorkerCfg(TypedDict, total=False):
     customer_geo_key: Optional[np.ndarray]
     customer_first_eff_start_by_key: Optional[np.ndarray]
 
-    # -- Global per-month plan (Phase 2) -------------------------------------
+    # -- Global per-month plan -----------------------------------------------
     sales_rows_per_month: Optional[np.ndarray]     # int64[T]: rows per month
     sales_orders_per_month: Optional[np.ndarray]   # int64[T]: orders per month
     sales_distinct_target: Optional[np.ndarray]    # int64[T]: distinct target

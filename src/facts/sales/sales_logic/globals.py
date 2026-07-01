@@ -96,7 +96,7 @@ class SalesContext:
     customer_end_month: Any = None
     customer_base_weight: Any = None
     customer_discovery_month: Any = None   # int64 pool-aligned: month each customer first enters sales
-    # -- Global per-month plan (Phase 2): computed once in the coordinator,
+    # -- Global per-month plan: computed once in the coordinator,
     #    broadcast read-only, and sliced per chunk so the per-month row curve and
     #    distinct-customer curve are independent of chunk_size / worker count. --
     sales_rows_per_month: Any = None       # int64[T]: global rows per month
@@ -245,7 +245,7 @@ class State(metaclass=_SealableMeta):
     # mutable per-worker ``seen_customers`` accumulator.
     customer_discovery_month = None
 
-    # Global per-month plan (Phase 2). Computed once in the coordinator against
+    # Global per-month plan. Computed once in the coordinator against
     # the GLOBAL month totals and broadcast read-only; each chunk slices a
     # contiguous band of every month's order-id space, so the per-month row curve
     # and distinct-customer curve no longer depend on chunk_size / worker count

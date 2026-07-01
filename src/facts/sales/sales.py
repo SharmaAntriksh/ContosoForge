@@ -1006,7 +1006,7 @@ def _load_products(
     _has_brand_col = "Brand" in _prod_schema
     _has_subcat_col = "SubcategoryKey" in _prod_schema
     # Load SubcategoryKey whenever available: consumed by store assortment AND by
-    # the Phase 3.3 basket-theme correlation (which is independent of assortment).
+    # the basket-theme correlation (which is independent of assortment).
     _need_subcat = _has_subcat_col
 
     # Determine SCD2 capability upfront so we include required columns in
@@ -1377,7 +1377,7 @@ def _load_promotions(parquet_folder_p, promo_df=None):
 
 
 def _compute_promo_salience(promo_df, promo_keys_all, models_cfg):
-    """Per-promo selection weight for Phase 3.2 promo-salience weighting.
+    """Per-promo selection weight for promo-salience weighting.
 
     ``salience[i] = exp(beta * DiscountPct_i) * type_weights[PromotionType_i]``,
     aligned to ``promo_keys_all`` (``promo_df`` is in the same row order). Returns
@@ -1515,7 +1515,7 @@ def _build_worker_cfg(
         promo_keys_all=promos["promo_keys_all"],
         promo_start_all=promos["promo_start_all"],
         promo_end_all=promos["promo_end_all"],
-        # Phase 3.2: per-promo salience weights (None => uniform promo draw).
+        # Per-promo salience weights (None => uniform promo draw).
         promo_salience_all=_compute_promo_salience(
             promos["promo_df"], promos["promo_keys_all"],
             getattr(State, "models_cfg", None),
@@ -1532,7 +1532,7 @@ def _build_worker_cfg(
         customer_discovery_month=cust.get("customer_discovery_month"),
         customer_first_eff_start_by_key=cust["customer_first_eff_start_by_key"],
 
-        # Global per-month plan (Phase 2): tiny length-T arrays + scalars.
+        # Global per-month plan: tiny length-T arrays + scalars.
         sales_rows_per_month=cust.get("sales_rows_per_month"),
         sales_orders_per_month=cust.get("sales_orders_per_month"),
         sales_distinct_target=cust.get("sales_distinct_target"),
@@ -1636,7 +1636,7 @@ def _build_worker_cfg(
     # Store-product assortment (optional)
     assortment_cfg = prod["assortment_cfg"]
     product_subcat_key = prod["product_subcat_key"]
-    # Publish SubcategoryKey whenever available — the Phase 3.3 basket-theme
+    # Publish SubcategoryKey whenever available — the basket-theme
     # correlation needs it even when store assortment is disabled.
     if product_subcat_key is not None:
         worker_cfg["product_subcat_key"] = product_subcat_key
@@ -2568,7 +2568,7 @@ def generate_sales_fact(
     )
 
     # ------------------------------------------------------------
-    # Global per-month plan (Phase 2.1/2.2). Compute the per-month row curve,
+    # Global per-month plan. Compute the per-month row curve,
     # order count, and distinct-customer target ONCE here against the GLOBAL month
     # totals, then broadcast read-only. Each chunk slices a contiguous band of
     # every month's order-id space (see chunk_builder), so both the per-month row
@@ -2605,7 +2605,7 @@ def generate_sales_fact(
     _orders_per_month_g = np.where(
         _rows_per_month_g > 0, np.maximum(_orders_per_month_g, 1), 0).astype(np.int64)
 
-    # Distinct-customer target per month (canonical single source — Phase 2.2/2.3).
+    # Distinct-customer target per month (canonical single source).
     # Mirrors the config reads the chunk builder used inline, but evaluated once
     # against global month totals.
     _cust_dmd = State.models_cfg.get("customers", {}) or {}

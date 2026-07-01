@@ -167,7 +167,7 @@ def _load_markdown_cfg():
       kind_codes : int8 array (0=none, 1=pct, 2=amt)
       values     : float64 array (pct in [0,1], amt >= 0)
       probs      : float64 array (normalized weights)
-      reconcile  : bool — gate the markdown draw on PromotionKey (Phase 3.5)
+      reconcile  : bool — gate the markdown draw on PromotionKey
       nz_*       : the ladder restricted to the nonzero kinds (pct/amt) with
                    probs renormalized, or (None, None, None) when the ladder has
                    no nonzero entry. Used by the reconcile path so a promoted
@@ -354,7 +354,7 @@ def _load_appearance_cfg() -> dict:
 
 
 # ===============================================================
-# Deterministic posted-price hashing (Phase 4.1)
+# Deterministic posted-price hashing
 # ===============================================================
 # SplitMix64 keyed by (product_id, month): same key -> same uniform, so the
 # stochastic snap resolves to the same UnitPrice for every line of a
@@ -415,7 +415,7 @@ def _snap_unit_price(rng, up: np.ndarray, acfg: dict, *,
     transition gradually as inflation pushes them through a band rather
     than jumping all at once after a multi-year plateau.
 
-    Phase 4.1: when ``hash_round`` / ``hash_end`` (uniforms keyed by
+    When ``hash_round`` / ``hash_end`` (uniforms keyed by
     (product, month)) are supplied, the stochastic round and the ending are
     resolved deterministically per (product, month), so every line of a
     (product, month) gets the same UnitPrice. Without them the draws come from
@@ -447,7 +447,7 @@ def _snap_cost(rng, uc: np.ndarray, acfg: dict, *, hash_end=None) -> np.ndarray:
     """Snap unit costs to banded increments.
 
     The anchor is a deterministic quantize; only the (optional) ending is
-    stochastic. ``hash_end`` (Phase 4.1) makes that pick deterministic per
+    stochastic. ``hash_end`` makes that pick deterministic per
     (product, month) instead of per-row off ``rng``.
     """
     if not acfg.get("enabled", False):
@@ -630,7 +630,7 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
         final_unit_price, final_unit_cost, discount_amt, final_net_price
     promo_keys : array-like of int or None
         The per-row assigned PromotionKey. When supplied and
-        ``models.pricing.markdown.reconcile_promotions`` is on (Phase 3.5), the
+        ``models.pricing.markdown.reconcile_promotions`` is on, the
         markdown is reconciled with the promotion: only promoted lines
         (``PromotionKey != no_discount_key``) receive a discount, drawn from the
         nonzero ladder. When None (e.g. unit tests), the legacy independent
@@ -696,7 +696,7 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
 
             factor = np.clip(infl * noises, clip_lo, clip_hi)[inv]
 
-        # Phase 4.1: deterministic posted price/cost per (product, month). Hash
+        # Deterministic posted price/cost per (product, month). Hash
         # the stochastic snap on (product_id, month) instead of the per-row chunk
         # rng, so every line for a (product, month) carries the same UnitPrice.
         if bool(appearance.get("deterministic", True)) and product_ids is not None:
@@ -721,7 +721,7 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
 
     disc = np.zeros(n, dtype=np.float64)
 
-    # Phase 3.5: when reconciling, a discount is a consequence of a promotion —
+    # When reconciling, a discount is a consequence of a promotion —
     # only promoted lines draw one, and they draw from the *nonzero* ladder so a
     # promoted line always carries a real markdown while a "no promotion" line
     # never does. Consumes the same one rng.choice(size=n) as the legacy path,

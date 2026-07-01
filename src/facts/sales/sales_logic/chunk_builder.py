@@ -141,7 +141,7 @@ _worker_eligible_cache: dict = {}
 # otherwise rebuilt T times instead of at most 12.
 _worker_prodweight_cache: dict = {}
 
-# Worker-lifetime cache of per-month distinct-customer pools (Phase 2). The pool
+# Worker-lifetime cache of per-month distinct-customer pools. The pool
 # + weighted CDF for month m depend only on (m, run seed, static customer arrays,
 # distinct target) — all worker-bound constants — so a worker builds each month's
 # pool at most once and reuses it across every chunk it processes. Keyed on the
@@ -187,7 +187,7 @@ def _eligible_idx_by_month(T, is_active, start_month, end_month_norm) -> list:
 def _chunk_month_band(R_m: int, O_m: int, chunk_idx: int, total_chunks: int) -> tuple:
     """This chunk's slice of month ``m`` in the global order/line index space.
 
-    Returns ``(order_start, n_orders, n_lines)`` (Phase 2 index-space sharding):
+    Returns ``(order_start, n_orders, n_lines)`` (index-space sharding):
 
     - Orders are floor-sliced from the global ``O_m`` so the chunks tile
       ``[0, O_m)`` contiguously with no gaps (``sum n_orders == O_m``). This
@@ -1376,12 +1376,12 @@ def build_chunk_table(
     promo_keys_all = State.promo_keys_all
     promo_start_all = State.promo_start_all
     promo_salience_all = getattr(State, "promo_salience_all", None)
-    # Phase 3.4: fulfillment-friction config (drives delivery bucketing here and
+    # Fulfillment-friction config (drives delivery bucketing here and
     # return prob/lag in the separate returns pass). Pydantic model or None; both
     # compute_dates and the returns builder read it via .get().
     _mdl_cfg = getattr(State, "models_cfg", None)
     fulfillment_cfg = _mdl_cfg.get("fulfillment", None) if _mdl_cfg is not None else None
-    # Phase 3.3: basket-theme correlation config (biases per-line product choice
+    # Basket-theme correlation config (biases per-line product choice
     # toward each order's theme). product_subcat_key is bound read-only on State.
     _basket_cfg = _mdl_cfg.get("basket", None) if _mdl_cfg is not None else None
     _basket_on = bool(_basket_cfg) and bool(_basket_cfg.get("enabled", False))
@@ -1439,7 +1439,7 @@ def build_chunk_table(
         return _empty_table(schema)
 
     # ------------------------------------------------------------
-    # GLOBAL PER-MONTH PLAN (Phase 2) — rows/month, orders/month, and the
+    # GLOBAL PER-MONTH PLAN — rows/month, orders/month, and the
     # distinct-customer target are computed ONCE in the coordinator against the
     # GLOBAL month totals and broadcast read-only. This chunk slices a contiguous
     # band of every month's order-id space (see _chunk_month_band), so the
@@ -1763,7 +1763,7 @@ def build_chunk_table(
                 product_weight=_product_weight,
             )
 
-        # CORRELATION #6 (Phase 3.3): bias off-theme lines toward each order's
+        # CORRELATION #6: bias off-theme lines toward each order's
         # basket theme. Applied before channel enforcement so eligibility still
         # has the final say. Hash-seeded on order/line ids (not the chunk RNG).
         if _basket_on and _basket_subcat is not None and order_ids_int is not None:

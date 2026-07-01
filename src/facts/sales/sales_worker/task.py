@@ -276,7 +276,7 @@ def _build_returns_config() -> Optional[ReturnsConfig]:
         return None
     if TABLE_SALES_RETURN is None:
         raise RuntimeError("returns_enabled=True but TABLE_SALES_RETURN is not defined in output_paths.py")
-    # Phase 3.4: fulfillment-friction coupling params (read from
+    # Fulfillment-friction coupling params (read from
     # models.fulfillment; 0.0 when the feature is off => legacy returns behavior).
     _mdl = getattr(State, "models_cfg", None)
     _ff = _mdl.get("fulfillment", None) if _mdl is not None else None

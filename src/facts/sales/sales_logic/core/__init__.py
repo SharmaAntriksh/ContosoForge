@@ -97,7 +97,7 @@ __all__ = [
     # customer discovery schedule
     "compute_discovery_months",
 
-    # global per-month plan (Phase 2)
+    # global per-month plan
     "compute_month_distinct_targets",
     "build_month_customer_pool",
     "assign_orders_to_customers",
@@ -108,5 +108,5 @@ __all__ = [
 #   _normalize_end_month, _eligible_customer_mask_for_month, _sample_customers,
 #   _stable_row_hash. The global per-month plan helpers
 #   (compute_month_distinct_targets / build_month_customer_pool /
-#   assign_orders_to_customers) are the Phase 2 live path.
+#   assign_orders_to_customers) are the live path.
 # (_yyyymmdd_from_days is retained for test coverage only — no prod caller.)

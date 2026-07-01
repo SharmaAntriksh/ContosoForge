@@ -1,4 +1,4 @@
-"""Phase 3.3 — order-level basket-theme correlation.
+"""Order-level basket-theme correlation.
 
 Each order is assigned a hash-seeded *theme* (a group of product subcategories);
 a configurable share of its lines whose sampled product falls outside that theme
@@ -11,7 +11,7 @@ product are all pure SplitMix64 hashes of the globally-unique
 ``(OrderNumber, OrderLineNumber)`` — never the chunk RNG. So the bias is
 identical regardless of chunk_size or worker count, and it only changes *which*
 product a line carries (never row counts or customer assignment). Distinct
-salts keep it independent of the fulfillment-friction latent (Phase 3.4).
+salts keep it independent of the fulfillment-friction latent.
 """
 from __future__ import annotations
 
