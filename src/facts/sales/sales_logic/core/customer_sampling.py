@@ -552,15 +552,22 @@ def compute_month_distinct_targets(
     per-month distinct target (it replaced the per-chunk inline target in
     chunk_builder and the removed ``_participation_distinct_target`` duplicate).
     Returns an int64 array of length ``T`` with ``D[m] <= orders_per_month[m]``.
+
+    ``distinct_ratio <= 0`` means "no participation throttle" → maximum diversity
+    (``D[m] = min(orders, eligible)``), matching the pre-Phase-2 organic behavior
+    where a non-positive ratio meant *no distinct target*. It must NOT collapse to
+    zero, which would leave every month with an empty pool and silently drop all
+    rows (the chunk skips months whose pool is empty).
     """
     T = int(T)
     out = np.zeros(T, dtype=np.int64)
-    if T <= 0 or float(distinct_ratio) <= 0.0:
+    if T <= 0:
         return out
 
     ec = np.asarray(eligible_counts, dtype=np.int64)
     om = np.asarray(orders_per_month, dtype=np.int64)
     cal = np.asarray(month_cal_index, dtype=np.int64)
+    ratio = float(distinct_ratio)
     # One RNG for the whole plan; drawing T normals in order keeps D[m]
     # deterministic and chunk/worker-invariant (never the per-chunk rng).
     rng = np.random.default_rng(_stable_seed(seed, "distinct_target", T))
@@ -572,7 +579,11 @@ def compute_month_distinct_targets(
         o = int(om[m])
         if e <= 0 or o <= 0:
             continue
-        k = float(distinct_ratio) * e
+        if ratio <= 0.0:
+            # No throttle → every order can be a fresh customer (organic).
+            out[m] = max(1, min(o, e))
+            continue
+        k = ratio * e
         if float(cycle_amplitude) > 0.0:
             k *= 1.0 + float(cycle_amplitude) * float(np.sin(2.0 * np.pi * m / 24.0))
         if seasonal_spike_map:

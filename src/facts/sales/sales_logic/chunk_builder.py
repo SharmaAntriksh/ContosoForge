@@ -707,8 +707,14 @@ def _eligible_counts_fast(
     s = start_month[active]
     e = end_month_norm[active]
 
-    # keep only sane starts
-    valid_start = (s >= 0) & (s < T)
+    # Warm-start customers (start_month < 0) joined before the window, so they are
+    # eligible from month 0 — clamp to 0 to match the chunk's eligibility predicate
+    # (_eligible_idx_by_month uses ``start_month <= m``). A no-op on the default path
+    # (starts already clamped to >= 0), it keeps the coordinator's global plan and
+    # the chunk's month pool computed against the SAME eligible base. Then drop
+    # starts at/after the window (never eligible in [0, T-1]).
+    s = np.where(s < 0, np.int64(0), s)
+    valid_start = s < T
     s = s[valid_start]
     e = e[valid_start]
     if s.size == 0:

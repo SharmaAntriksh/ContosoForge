@@ -56,7 +56,11 @@ from src.facts.sales.sales_logic.core.customer_sampling import (
     compute_discovery_months,
     compute_month_distinct_targets,
 )
-from src.facts.sales.sales_logic.chunk_builder import _chunk_month_band
+from src.facts.sales.sales_logic.chunk_builder import (
+    _chunk_month_band,
+    _eligible_counts_fast,
+    _eligible_idx_by_month,
+)
 from src.facts.sales.sales_logic.globals import State
 from src.facts.budget.accumulator import BudgetAccumulator
 from src.engine.config.config_schema import AppConfig
@@ -952,13 +956,14 @@ class TestBuildMonthCustomerPool:
 
 
 class TestComputeMonthDistinctTargets:
-    def test_zero_ratio_is_all_zero(self):
+    def test_empty_horizon_returns_empty(self):
         out = compute_month_distinct_targets(
-            seed=1, T=6, eligible_counts=np.full(6, 100),
-            orders_per_month=np.full(6, 50), month_cal_index=np.arange(1, 7),
-            distinct_ratio=0.0, cycle_amplitude=0.0, participation_noise=0.0,
+            seed=1, T=0, eligible_counts=np.zeros(0, dtype=np.int64),
+            orders_per_month=np.zeros(0, dtype=np.int64),
+            month_cal_index=np.zeros(0, dtype=np.int64),
+            distinct_ratio=0.55, cycle_amplitude=0.0, participation_noise=0.0,
             seasonal_spike_map={}, max_distinct_ratio=0.7, min_distinct_customers=0)
-        assert out.tolist() == [0] * 6
+        assert out.shape == (0,)
 
     def test_capped_by_orders_and_eligible(self):
         # target never exceeds orders-per-month or eligible count.
@@ -986,6 +991,46 @@ class TestComputeMonthDistinctTargets:
         np.testing.assert_array_equal(a, b)
         assert not np.array_equal(a, c)
         assert np.all(a <= 300)     # never exceeds orders
+
+    def test_nonpositive_ratio_is_max_diversity_not_zero(self):
+        # Regression: distinct_ratio <= 0 must mean "no throttle" (D = min(o, e)),
+        # NOT all-zeros — which would leave every month's pool empty and silently
+        # drop every sales row. Zero is allowed only where there are no orders.
+        for ratio in (0.0, -0.5):
+            out = compute_month_distinct_targets(
+                seed=3, T=4, eligible_counts=np.array([500, 500, 10, 500]),
+                orders_per_month=np.array([300, 300, 300, 0]),
+                month_cal_index=np.arange(1, 5), distinct_ratio=ratio,
+                cycle_amplitude=0.0, participation_noise=0.0,
+                seasonal_spike_map={}, max_distinct_ratio=0.7,
+                min_distinct_customers=250)
+            assert out.tolist() == [300, 300, 10, 0]   # min(orders, eligible); 0 iff orders==0
+
+
+class TestEligibleCountsConsistency:
+    """The coordinator's plan (``_eligible_counts_fast``) and the chunk's month
+    pool (``_eligible_idx_by_month``) MUST count the same eligible customers, or
+    the global distinct target is computed against a different base than the pool
+    is drawn from. They must agree even for warm-start (start_month < 0) and
+    out-of-window (start_month >= T) customers."""
+
+    def test_counts_match_index_sizes_with_warm_start_and_out_of_window(self):
+        from src.facts.sales.sales_logic.chunk_builder import reset_worker_cdf_cache
+        # _eligible_idx_by_month memoizes by T alone (arrays are worker-constant in
+        # prod); clear it so this test's ad-hoc arrays aren't served from a stale
+        # cache entry left by another test at the same T.
+        reset_worker_cdf_cache()
+        T = 12
+        rng = np.random.default_rng(0)
+        n = 3000
+        active = rng.integers(0, 2, size=n).astype(np.int32)
+        start = rng.integers(-5, T + 3, size=n).astype(np.int64)   # negatives + >= T
+        end = np.where(rng.random(n) < 0.3,
+                       rng.integers(0, T, size=n), -1).astype(np.int64)
+        counts = _eligible_counts_fast(T, active, start, end)
+        idx = _eligible_idx_by_month(T, active, start, end)
+        idx_sizes = np.array([a.size for a in idx], dtype=np.int64)
+        np.testing.assert_array_equal(counts, idx_sizes)
 
 
 # ===================================================================
