@@ -370,11 +370,32 @@ intended behavior change** (use Phase 0 tests as the safety net).
     cross-chunk mutable state *impossible*, not just conventional); remove the
     `_get_state_attr` dual-name resolver (standardize on one canonical attr name);
     wire-or-delete `SalesContext`.
-- [ ] **5.2 Decompose the `sales.py` orchestrator** — `Finding #1` · `E:L R:med`
-  Extract `DimensionBundle.load`, `CorrelationLookups.build`, `SCD2GridBuilder`,
-  `SalesMemoryModel`, `OutputAssembler`. `generate_sales_fact` shrinks to a readable
-  sequence of named calls.
-  - *Acceptance:* each unit unit-testable with a small fixture (no full parquet dim set).
+- [x] **5.2 Decompose the `sales.py` orchestrator** — `Finding #1` · `E:L R:med` — **DONE**
+  The 2749-line god-module was split into an 868-line `sales.py` (orchestrator +
+  small resolve/config helpers + `generate_sales_fact`) plus 7 focused modules:
+  `sales_helpers.py` (leaf: pure helpers everything imports — extracted FIRST to
+  avoid `unit → sales.py → unit` cycles), `memory_model.py` (RAM-aware chunk sizing),
+  `scd2_grid.py` (SCD2 version-grid builders), `dimension_loaders.py` (the 6 loaders +
+  `_compute_promo_salience`), `correlation_lookups.py` (`_build_correlation_lookups` +
+  `_prebuild_shared_structures`), `worker_cfg_builder.py` (`_build_worker_cfg` +
+  `_setup_accumulators` + the 4 optional-accumulator import blocks), `output_assembler.py`
+  (merge helpers + `_assemble_output` + the result dataclasses). Ordered leaf-first;
+  each extraction is its own commit.
+  - *Method:* an analyze→plan workflow mapped every unit's exact module-level deps,
+    side effects, callers, and cycle risks; an AST-based mover did each relocation
+    verbatim. `_prebuild_shared_structures`'s `.sales_worker.init` imports stayed
+    function-local (else a real import cycle); `_merge_parquet_job` stayed top-level
+    (pool picklability); lazy imports (`write_delta_partitioned`, `PoolRunSpec`,
+    `tempfile`) kept lazy. Final pass removed 47 now-unused imports (ruff F401).
+  - *Acceptance — met (verified 3 ways):* (1) the small-fact **digest is byte-identical**
+    to the pre-5.2 baseline for both `workers=2/chunk=1000` and `workers=1/chunk=4000`
+    after **every** step; (2) full suite **1942 passed** after each risky step;
+    (3) an adversarial fidelity check proved all **36 moved symbols are
+    character-identical** to their pre-5.2 source. Each unit is now importable/testable
+    in isolation from its own module.
+  - *Commits:* `1ba99b2` (sales_helpers) → `1ac3959` (memory_model) → `0c9f134` (scd2_grid)
+    → `0e78dcf` (dimension_loaders) → `278cb91` (correlation_lookups) → `63b0963`
+    (worker_cfg_builder) → `5b127be` (output_assembler) → `dd7ca6f` (import/comment cleanup).
 - [x] **5.3 Dedupe the two SCD2 grid builders** — `Finding #26` · `E:M R:lo` — **DONE**
   Extracted the shared index machinery into `_scd2_version_index(source, id_col,
   pool_ids, payload_cols)` → `(starts, _Scd2VersionCtx)`; `_build_scd2_product_versions`
