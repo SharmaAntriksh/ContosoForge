@@ -559,7 +559,7 @@ def _month_noise(month_int: int, seed: int, sigma: float) -> float:
 
 
 def _reset_caches() -> None:
-    """Reset all module-level caches.  Call from State.reset() or tests."""
+    """Reset all module-level caches.  Called from init_sales_worker() and tests."""
     global _MD_CFG_VERSION, _MD_CFG_CACHE
     global _APPEAR_CFG_VERSION, _APPEAR_CFG_CACHE
     _MD_CFG_VERSION = -1

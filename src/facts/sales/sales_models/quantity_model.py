@@ -202,7 +202,7 @@ def _propensity_factor(product_row_idx, el: dict) -> np.ndarray | float:
 
 
 def _reset_cache() -> None:
-    """Reset module cache.  Call from State.reset() or tests."""
+    """Reset module cache.  Called from init_sales_worker() and tests."""
     global _CFG_VERSION, _CFG_CACHE
     _CFG_VERSION = -1
     _CFG_CACHE = None
