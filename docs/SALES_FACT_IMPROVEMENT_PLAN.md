@@ -352,24 +352,36 @@ rather than documenting around it.)
 **Goal:** concerns become objects with contracts. Pure structure/testability — **zero
 intended behavior change** (use Phase 0 tests as the safety net).
 
-- [~] **5.1 Split State into frozen bundle + scratch; delete sealing theater** — `Finding #16 #7` · `E:L R:med` — **IN PROGRESS**
-  A `frozen=True` dimension/config bundle (built once per worker) + a plain mutable
-  `WorkerScratch` (caches, anything currently reassigned). Delete `_SealableMeta`,
-  `seal()`, `_sealed`, `validate()` ceremony, and `_get_state_attr` dual-name resolver.
-  Either finish wiring `SalesContext` or delete it — no third dead copy.
-  - *Files:* `sales_logic/globals.py`, `sales_logic/chunk_builder.py`, `sales_logic/columns.py`.
-  - *Acceptance:* "cross-chunk mutable state" is impossible to write; `tests/test_state.py`
-    rewritten; determinism tests still pass.
-  - **Done so far:** (a) deleted the sealing theater — `_SealableMeta` metaclass,
-    `seal()`, `_sealed`, and `State.validate()` (its one real caller in
-    `init_sales_worker` is now an inline `chunk_size` presence check); `test_state.py`
-    rewritten; behavior unchanged in prod (seal() was never called — gotcha #3). (b)
-    deleted the dead `_sample_customers` + `_concat_and_shuffle` (no prod caller since
-    the per-month plan went global) and their tests.
-  - **Remaining:** the frozen dimension/config bundle + `WorkerScratch` split (make
-    cross-chunk mutable state *impossible*, not just conventional); remove the
-    `_get_state_attr` dual-name resolver (standardize on one canonical attr name);
-    wire-or-delete `SalesContext`.
+- [x] **5.1 Split State into frozen bundle + scratch; delete sealing theater** — `Finding #16 #7` · `E:L R:med` — **DONE**
+  Goal: separate the immutable bound dimension/config data from mutable per-worker
+  scratch, kill the dead abstractions, so cross-chunk mutable state can't sneak onto
+  `State`. Delivered across five commits (each verified byte-identical via the small-fact
+  digest + guardrails):
+  - **5.1a** (`7e52c41`) deleted the **sealing theater** — `_SealableMeta` metaclass,
+    `seal()`, `_sealed`, and `State.validate()` (its one real caller inlined as a
+    `chunk_size` presence check). Never called in prod; behavior unchanged.
+  - **5.1b** (`c897460`) deleted the dead `_sample_customers` + `_concat_and_shuffle`
+    (+ tests) — no prod caller since the per-month plan went global.
+  - **A** (`6ae7bcf`) removed the **`_get_state_attr` dual-name resolver** — 13 call
+    sites → direct `getattr(State, name, None)`; the legacy alt names
+    (`customers`/`is_active_in_sales`) were never bound, so the fallback was dead.
+  - **B** (`f12d5a4`) deleted the dead **`SalesContext`** dataclass (a third copy of
+    State's shape; exported + documented but never instantiated) + its exports.
+  - **C** (`74fad87`) **externalized the last per-worker State scratch**
+    (`State._sales_channels_cache` → a module-global in `columns.py` reset at worker
+    init, matching every other cache). Now within a worker `State` is written **only
+    inside `bind_globals`** — bound-once then read-only; all scratch is external.
+  - *Frozen enforcement — deliberately declined:* a runtime freeze/seal was evaluated
+    and NOT added. Rationale: determinism is already enforced by the Phase-0 guardrails
+    + the static-schedule design (discovery/plan/pools computed once, broadcast
+    read-only); a seal is fragile since the coordinator (`generate_sales_fact`) and
+    in-process workers share one `State`; and re-adding the metaclass just removed as
+    theater is churn for low marginal value. The bound/scratch **separation** (the real
+    goal) is achieved; "impossible to write" is enforced by the guardrails, not a seal.
+    New cross-chunk mutable state must be a module-global reset in `init_sales_worker`,
+    not a `State` attr (CLAUDE.md gotcha #3).
+  - *Acceptance — met:* determinism guardrails + full suite (**1942**) green throughout;
+    `test_state.py` rewritten; digest byte-identical for both configs after every step.
 - [x] **5.2 Decompose the `sales.py` orchestrator** — `Finding #1` · `E:L R:med` — **DONE**
   The 2749-line god-module was split into an 868-line `sales.py` (orchestrator +
   small resolve/config helpers + `generate_sales_fact`) plus 7 focused modules:
