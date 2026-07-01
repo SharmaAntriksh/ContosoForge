@@ -65,6 +65,29 @@ class TestAnalyzeCoverage:
         assert rep.has_avoidable_loss
         assert rep.n_fully_open_gaps == 2
 
+    def test_interior_mid_month_hole_detected(self):
+        # Store 1 is staffed on Jan 1 (assignment ends Jan 10) and on Jan 31
+        # (next assignment starts Jan 20), but Jan 11-19 has no salesperson.
+        # The first/last-day test alone marks January covered; interval-union
+        # catches the interior hole (those days would drop to EmployeeKey=-1).
+        b = _bridge([("2020-06-01", "2021-01-10"), ("2021-01-20", "2021-12-31")])
+        rep = analyze_coverage(_stores(), b, *WIN, ROLES)
+        gap_months = sorted({m.strftime("%Y-%m") for _, m, *_ in rep.gap_cells})
+        assert gap_months == ["2021-01"]
+        assert rep.n_fully_open_gaps == 1
+        assert rep.interior_hole_gaps == 1
+        # Feb-Jun are fully covered by the second assignment: no false positives.
+        assert rep.n_gap_cells == 1
+
+    def test_contiguous_two_assignments_no_hole(self):
+        # Two back-to-back assignments (adjacent days) fully cover the window —
+        # interval-union must NOT report a phantom gap at the seam.
+        b = _bridge([("2020-06-01", "2021-03-15"), ("2021-03-16", "2021-12-31")])
+        rep = analyze_coverage(_stores(), b, *WIN, ROLES)
+        assert rep.n_gap_cells == 0
+        assert rep.interior_hole_gaps == 0
+        assert not rep.has_avoidable_loss
+
     def test_online_and_physical_checked_independently(self):
         # An online store with its OWN online rep is covered; a separate physical
         # gap is still flagged (online reps do not staff physical stores).

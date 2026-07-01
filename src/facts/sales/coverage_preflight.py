@@ -45,6 +45,7 @@ class CoverageReport:
     uncovered_months: List[pd.Timestamp] = field(default_factory=list)  # whole month would be dropped
     n_months: int = 0
     n_stores: int = 0
+    interior_hole_gaps: int = 0  # gaps found only by interval-union (mid-month holes)
 
     @property
     def n_gap_cells(self) -> int:
@@ -59,6 +60,41 @@ class CoverageReport:
     @property
     def has_avoidable_loss(self) -> bool:
         return self.n_fully_open_gaps > 0
+
+
+_ONE_DAY = np.timedelta64(1, "D")
+
+
+def _uncovered_days_in_span(intervals, fd, ld) -> int:
+    """Days in ``[fd, ld]`` (inclusive) NOT covered by the UNION of *intervals*.
+
+    ``intervals`` is a list of ``(start, end)`` ``datetime64[D]`` pairs (inclusive).
+    The first/last-day coverage test can mark a store-month "covered" when one
+    assignment spans the first day and a *different* one spans the last day, even
+    if the middle of the month has no salesperson — and those interior days emit
+    ``EmployeeKey = -1`` (dropped) downstream. This detects that hole by unioning
+    the clipped intervals and counting the days left over.
+    """
+    total = int((ld - fd) / _ONE_DAY) + 1
+    clipped = []
+    for s, e in intervals:
+        a = s if s > fd else fd
+        b = e if e < ld else ld
+        if a <= b:
+            clipped.append((a, b))
+    if not clipped:
+        return total
+    clipped.sort()
+    covered = 0
+    cur_s, cur_e = clipped[0]
+    for a, b in clipped[1:]:
+        if a > cur_e + _ONE_DAY:            # a genuine gap between intervals
+            covered += int((cur_e - cur_s) / _ONE_DAY) + 1
+            cur_s, cur_e = a, b
+        elif b > cur_e:                      # overlap/adjacency: extend the run
+            cur_e = b
+    covered += int((cur_e - cur_s) / _ONE_DAY) + 1
+    return total - covered
 
 
 def analyze_coverage(
@@ -105,6 +141,12 @@ def analyze_coverage(
         sp_start = sp_end = np.array([], dtype="datetime64[D]")
         sp_local = np.array([], dtype=np.int64)
 
+    # Group salesperson intervals by store-local index so interval-union can find
+    # interior mid-month coverage holes the first/last-day test cannot see.
+    store_intervals: dict[int, list] = {}
+    for li, s, e in zip(sp_local.tolist(), sp_start, sp_end):
+        store_intervals.setdefault(int(li), []).append((s, e))
+
     months = pd.date_range(global_start, global_end, freq="MS")
     gs = np.datetime64(pd.Timestamp(global_start).normalize(), "D")
     gd = np.datetime64(pd.Timestamp(global_end).normalize(), "D")
@@ -133,13 +175,23 @@ def analyze_coverage(
                 np.logical_or.at(cov_last, sp_local[cle], True)
         covered = cov_first & cov_last
 
+        fully_open_all = (op <= fd) & (isnat_cl | (cl > ld))
         gap = eligible & ~covered
         if gap.any():
-            fully_open_all = (op <= fd) & (isnat_cl | (cl > ld))
             for i in np.where(gap)[0]:
                 rep.gap_cells.append(
                     (int(sk_arr[i]), pd.Timestamp(m), fd, ld, bool(fully_open_all[i]))
                 )
+        # Interval-union: a store can pass the first/last-day test yet have an
+        # interior hole (rep A covers the 1st, rep B the last day, nobody the
+        # middle). Those days would drop to EmployeeKey=-1, so count them too.
+        # Disjoint from `gap` above (`covered` here means first+last both staffed).
+        for i in np.where(eligible & covered)[0]:
+            if _uncovered_days_in_span(store_intervals.get(int(i), ()), fd, ld) > 0:
+                rep.gap_cells.append(
+                    (int(sk_arr[i]), pd.Timestamp(m), fd, ld, bool(fully_open_all[i]))
+                )
+                rep.interior_hole_gaps += 1
         open_here = int(eligible.sum())
         staffed_here = int((eligible & covered).sum())
         # A month where every open store lacks coverage would lose all its sales.
@@ -182,6 +234,9 @@ def format_diagnostic(report: CoverageReport, cfg) -> str:
         f"  ({report.n_stores} stores, {report.n_months} months)",
         "  Suggested fixes:",
     ]
+    if report.interior_hole_gaps:
+        lines.insert(3, f"  ({report.interior_hole_gaps} are mid-month coverage holes — "
+                        "staffed on the 1st/last day but not throughout the month)")
     lines += [f"    - {t}" for t in suggest_adjustments(report, cfg)]
     lines.append("  Or set sales.coverage_policy: skip (accept the missing sales) or "
                  "repair (auto-extend assignments to fill the gaps).")
