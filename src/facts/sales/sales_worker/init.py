@@ -591,6 +591,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         customer_start_month = worker_cfg.get("customer_start_month")
         customer_end_month = worker_cfg.get("customer_end_month")
         customer_base_weight = worker_cfg.get("customer_base_weight")
+        customer_discovery_month = worker_cfg.get("customer_discovery_month")
 
         date_pool = worker_cfg["date_pool"]
         date_prob = worker_cfg["date_prob"]
@@ -1003,6 +1004,11 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         if customer_base_weight.shape[0] != customer_keys.shape[0]:
             raise RuntimeError("customer_base_weight must align with customer_keys length")
 
+    if customer_discovery_month is not None:
+        customer_discovery_month = as_int64(customer_discovery_month)
+        if customer_discovery_month.shape[0] != customer_keys.shape[0]:
+            raise RuntimeError("customer_discovery_month must align with customer_keys length")
+
     # Use pre-built brand_prob_by_month from shared memory if available
     _prebuilt_bp = worker_cfg.get("_prebuilt_brand_prob_by_month")
     if _prebuilt_bp is not None:
@@ -1094,6 +1100,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "customer_start_month": customer_start_month,
             "customer_end_month": customer_end_month,
             "customer_base_weight": customer_base_weight,
+            "customer_discovery_month": customer_discovery_month,
             "store_to_geo_arr": store_to_geo_arr,
             "geo_to_currency_arr": geo_to_currency_arr,
             "date_pool": date_pool,

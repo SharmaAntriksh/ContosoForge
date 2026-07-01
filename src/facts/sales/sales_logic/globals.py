@@ -18,7 +18,7 @@ Migration path:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -95,7 +95,7 @@ class SalesContext:
     customer_start_month: Any = None
     customer_end_month: Any = None
     customer_base_weight: Any = None
-    seen_customers: Any = field(default_factory=set)
+    customer_discovery_month: Any = None   # int64 pool-aligned: month each customer first enters sales
     date_pool: Any = None
     date_prob: Any = None
     store_keys: Any = None
@@ -231,8 +231,11 @@ class State(metaclass=_SealableMeta):
     customer_end_month = None  # int64 with -1 meaning "no end"
     customer_base_weight = None  # optional float64
 
-    # Discovery persistence (optional)
-    seen_customers = None
+    # Closed-form discovery schedule (optional): int64 array aligned with
+    # customer_keys giving the month each customer first enters the sales
+    # population. Built once per run and broadcast read-only; replaces the old
+    # mutable per-worker ``seen_customers`` accumulator.
+    customer_discovery_month = None
 
     date_pool = None
     date_prob = None
@@ -422,17 +425,6 @@ def bind_globals(gdict: dict):
     # Bind raw values (allow injecting additional attrs for debugging)
     for k, v in gdict.items():
         setattr(State, k, v)
-
-    # Ensure seen_customers exists (chunk_builder will only use it if discovery enabled)
-    sc = getattr(State, "seen_customers", None)
-    if sc is None:
-        State.seen_customers = set()
-    elif not isinstance(sc, set):
-        # tolerate list/tuple/np arrays being passed by caller
-        try:
-            State.seen_customers = set(sc)
-        except (TypeError, ValueError):
-            State.seen_customers = set()
 
     # --------------------------------------------------------------
     # Bind Sales schema ONCE, respecting skip_order_cols

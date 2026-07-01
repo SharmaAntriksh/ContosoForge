@@ -30,8 +30,7 @@ from .customer_sampling import (
     _eligible_customer_mask_for_month,
     _participation_distinct_target,
     _sample_customers,
-    _make_seen_lookup,
-    _update_seen_lookup,
+    compute_discovery_months,
 )
 
 # Re-export: promotions
@@ -92,6 +91,9 @@ __all__ = [
     # month planning
     "macro_month_weights",
     "build_rows_per_month",
+
+    # customer discovery schedule
+    "compute_discovery_months",
 ]
 
 # Internal symbols re-exported for chunk_builder and tests (not part of the

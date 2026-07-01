@@ -384,11 +384,11 @@ class TestExpandedDeterminism:
         mask = np.ones(100, dtype=bool)
 
         r1 = _sample_customers(
-            np.random.default_rng(42), keys, mask, set(), 50,
-            use_discovery=False, discovery_cfg={},
+            np.random.default_rng(42), keys, mask, None, 50,
+            use_discovery=False,
         )
         r2 = _sample_customers(
-            np.random.default_rng(42), keys, mask, set(), 50,
-            use_discovery=False, discovery_cfg={},
+            np.random.default_rng(42), keys, mask, None, 50,
+            use_discovery=False,
         )
         np.testing.assert_array_equal(r1, r2)

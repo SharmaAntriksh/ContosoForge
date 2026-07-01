@@ -28,6 +28,7 @@ from src.utils.config_helpers import int_or as _int_or, float_or as _float_or, b
 from src.utils.logging_utils import debug, info, skip, warn, work
 from src.utils.shared_arrays import SharedArrayGroup
 from .sales_logic import State
+from .sales_logic.core import compute_discovery_months
 from .sales_worker import PoolRunSpec, iter_imap_unordered, _worker_task, init_sales_worker
 from .sales_writer import merge_parquet_files, optimize_parquet
 from .output_paths import (
@@ -1471,6 +1472,7 @@ def _build_worker_cfg(
         customer_start_month=cust["customer_start_month"],
         customer_end_month=cust["customer_end_month"],
         customer_base_weight=cust["customer_base_weight"],
+        customer_discovery_month=cust.get("customer_discovery_month"),
         customer_first_eff_start_by_key=cust["customer_first_eff_start_by_key"],
 
         store_to_geo=stores["store_to_geo"],
@@ -2427,9 +2429,9 @@ def generate_sales_fact(
         configured_max_frac = float(_cust_mdl.max_new_fraction_per_month)
 
         total_active = int((is_active_in_sales == 1).sum())
-        # Customers with negative start_month are backdated (pre-existing)
-        # and will be pre-seeded into seen_customers by chunk_builder.
-        # Only customers with start_month >= 0 need discovery.
+        # Customers with negative start_month are backdated (pre-existing): the
+        # discovery schedule debuts them in month 0 (no lag). Only customers with
+        # start_month >= 0 need to be discovered within the window.
         warm_start = int(((is_active_in_sales == 1) & (customer_start_month < 0)).sum())
         undiscovered = max(0, total_active - warm_start)
 
@@ -2471,6 +2473,28 @@ def generate_sales_fact(
                 _models_copy = _models.model_copy(update={"customers": new_cust})
                 State.models_cfg = _models_copy
 
+    # ------------------------------------------------------------
+    # Closed-form customer discovery schedule (Finding #5/#6).
+    # Assign every customer the month they first enter the sales population as a
+    # pure function of (CustomerKey, seed) and their eligibility window. Built
+    # ONCE here and broadcast read-only, so the sales fact is independent of
+    # worker count / chunk order (replaces the old mutable seen_customers set).
+    # ------------------------------------------------------------
+    _dp_months = np.asarray(date_pool).astype("datetime64[M]").astype("int64")
+    _T_months = int(_dp_months.max() - _dp_months.min() + 1) if _dp_months.size else 0
+    _cust_mdl_final = getattr(State.models_cfg, "customers", None)
+    _discovery_lag_scale = float(getattr(_cust_mdl_final, "discovery_lag_scale", 1.0)) \
+        if _cust_mdl_final is not None else 1.0
+    _cust["customer_discovery_month"] = compute_discovery_months(
+        customer_keys=_cust["customer_keys"],
+        is_active_in_sales=_cust["is_active_in_sales"],
+        start_month=_cust["customer_start_month"],
+        end_month=_cust["customer_end_month"],
+        T=_T_months,
+        run_seed=int(seed),
+        lag_scale=_discovery_lag_scale,
+    )
+
     # Worker configuration
     worker_cfg = _build_worker_cfg(
         _cust, _prod, _stores, _emps, _corr, _promos,
@@ -2508,6 +2532,7 @@ def generate_sales_fact(
         "customer_start_month",
         "customer_end_month",
         "customer_base_weight",
+        "customer_discovery_month",
         "customer_first_eff_start_by_key",
         "product_subcat_key",
         "product_popularity",

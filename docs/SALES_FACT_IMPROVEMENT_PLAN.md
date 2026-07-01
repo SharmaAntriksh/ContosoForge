@@ -117,17 +117,36 @@ xfail→hard-assert protocol is documented (0.4) so later phases flip them delib
 **Goal:** every stated guarantee ("deterministic, idempotent, independent of worker
 count") becomes true. These are the *foundational* fixes.
 
-- [ ] **1.1 Closed-form customer discovery** — `Finding #5 #6 #18` · `E:L R:hi`
-  Replace the mutable per-worker `State.seen_customers` accumulator with a deterministic
-  `discovery_month(CustomerKey) = f(hash(CustomerKey, run_seed), acquisition_curve)`.
-  Broadcast a `customer_discovery_month` array into shared memory like other dims;
-  force-discover where `assigned_month == m`.
-  - *Files:* `sales_logic/core/customer_sampling.py`, `sales_logic/chunk_builder.py:1421/1909`,
-    `sales.py` (coordinator pre-pass), `sales_logic/globals.py` (drop `seen_customers`).
-  - *Delete:* `_make_seen_lookup`, `_update_seen_lookup`, `_build_seen_mask`, the
-    `State.seen_customers` carve-out.
-  - *Acceptance:* test **0.1 flips to hard pass**; acquisition curve still matches the
-    trend preset's shape within tolerance; `--workers` no longer affects output.
+- [x] **1.1 Closed-form customer discovery** — `Finding #5 #6 #18` · `E:L R:hi` — **DONE**
+  Replaced the mutable per-worker `State.seen_customers` accumulator with a deterministic
+  `customer_discovery_month[i] = clip(start_month_i + hash_lag(CustomerKey_i, run_seed), start_i, end_i)`
+  computed **once** in the coordinator and broadcast read-only into shared memory like the
+  other customer arrays. In month `m` the chunk builder now force-introduces the cohort
+  scheduled exactly at `m` (`discovery_month == m`), treats `discovery_month <= m` as the
+  repeat pool, and never samples not-yet-introduced customers. Discovery is now a pure
+  function of each chunk's own inputs, so worker count no longer affects output.
+  - *Files:* `sales_logic/core/customer_sampling.py` (`compute_discovery_months`,
+    `_hash_uniform`, rewritten `_sample_customers` discovery branch),
+    `sales_logic/chunk_builder.py` (read schedule, drop per-chunk target/shape math),
+    `sales.py` (coordinator pre-pass + publish), `sales_worker/init.py` (bind),
+    `sales_logic/globals.py` (drop `seen_customers`, add `customer_discovery_month`),
+    `worker_cfg_schema.py`, `config_schema.py` (new `discovery_lag_scale` knob, default 1.0).
+  - *Deleted:* `_make_seen_lookup`, `_update_seen_lookup`, `_build_seen_mask`,
+    `_SPARSE_KEY_RATIO`, the `State.seen_customers` carve-out, the old `discovery_cfg`/
+    `_target_new_customers`/`stochastic_discovery`/bootstrap/`discovery_shape` per-chunk path.
+  - *Acceptance — met:* test **0.1 flipped to a hard pass** (marker removed; now asserts
+    workers 1/2/4 agree). Empirically verified worker-invariance across 3 seeds × workers
+    {1,3,5} × `skip_order_cols` {False,True} (18 configs, all byte-identical). The emergent
+    acquisition curve tracks the shipped one within tolerance (m=0 clip-spike smoothed
+    308→187 exactly as before; total coverage identical at 3800/4000; mid-peak ~208) with a
+    mild, benign right-censoring bump in the final month.
+  - *Companion fix (uncovered by the stress once discovery stopped masking it):* the
+    worker-lifetime product CDF cache in `_sample_brand_aware` was keyed by **calendar**
+    month while its brand-mix value depended on the **absolute** month; when month-skipping
+    chunks landed on different workers the first chunk to touch a calendar month fixed the
+    wrong brand mix for later same-calendar-month months (~0.2% of rows on some seeds).
+    Re-keyed the cache by `m_offset`. Guarded by `test_multi_chunk_worker_invariance_second_seed`
+    (seed 20250701, which triggers it; seed 1234 does not).
 - [ ] **1.2 Single OrderNumber int64 decision** — `Finding #21` · `E:M R:med`
   Compute the int64-vs-int32 choice **once** from the real emitted ID ceiling, store it
   on the run manifest, and have **both** the Arrow builder and SQL DDL generator read

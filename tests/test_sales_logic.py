@@ -41,15 +41,14 @@ from src.facts.sales.sales_logic.core.allocation import (
     macro_month_weights,
 )
 from src.facts.sales.sales_logic.core.customer_sampling import (
-    _build_seen_mask,
     _eligible_customer_mask_for_month,
-    _make_seen_lookup,
+    _hash_uniform,
     _normalize_end_month,
     _normalize_weights,
     _participation_distinct_target,
     _sample_customers,
-    _update_seen_lookup,
     _urgency_pick,
+    compute_discovery_months,
 )
 from src.facts.sales.sales_logic.globals import State
 from src.facts.budget.accumulator import BudgetAccumulator
@@ -723,35 +722,69 @@ class TestNormalizeWeights:
         assert abs(result.sum() - 1.0) < 1e-12
 
 
-class TestBuildSeenMask:
-    def test_empty_seen_all_false(self):
+class TestComputeDiscoveryMonths:
+    def test_anchored_and_within_window(self):
+        keys = np.arange(1, 11, dtype=np.int32)
+        active = np.ones(10, dtype=np.int64)
+        start = np.array([0, 0, 1, 2, 3, 4, 5, 6, 7, 8], dtype=np.int64)
+        end = np.full(10, -1, dtype=np.int64)
+        disc = compute_discovery_months(keys, active, start, end, T=12,
+                                        run_seed=7, lag_scale=1.0)
+        # Never before eligibility, never past the last month, never the sentinel.
+        assert np.all(disc >= start)
+        assert np.all(disc <= 11)
+        assert not np.any(disc == 12)
+
+    def test_lag_zero_debuts_at_start(self):
+        keys = np.arange(1, 8, dtype=np.int32)
+        active = np.ones(7, dtype=np.int64)
+        start = np.array([0, 1, 2, 3, 4, 5, 6], dtype=np.int64)
+        end = np.full(7, -1, dtype=np.int64)
+        disc = compute_discovery_months(keys, active, start, end, T=12,
+                                        run_seed=7, lag_scale=0.0)
+        np.testing.assert_array_equal(disc, start)
+
+    def test_warm_start_debuts_month_zero(self):
         keys = np.array([1, 2, 3], dtype=np.int32)
-        mask = _build_seen_mask(keys, set())
-        np.testing.assert_array_equal(mask, [False, False, False])
+        active = np.ones(3, dtype=np.int64)
+        start = np.array([-5, -1, 0], dtype=np.int64)   # pre-existing customers
+        end = np.full(3, -1, dtype=np.int64)
+        disc = compute_discovery_months(keys, active, start, end, T=12,
+                                        run_seed=7, lag_scale=2.0)
+        assert disc[0] == 0 and disc[1] == 0
 
-    def test_some_seen(self):
-        keys = np.array([1, 2, 3, 4], dtype=np.int32)
-        mask = _build_seen_mask(keys, {2, 4})
-        np.testing.assert_array_equal(mask, [False, True, False, True])
-
-    def test_numpy_lookup(self):
+    def test_inactive_and_out_of_window_never(self):
         keys = np.array([1, 2, 3], dtype=np.int32)
-        lookup = np.array([False, True, False, True], dtype=bool)  # index 1=True, 3=True
-        mask = _build_seen_mask(keys, lookup)
-        np.testing.assert_array_equal(mask, [True, False, True])
+        active = np.array([0, 1, 1], dtype=np.int64)     # #1 inactive
+        start = np.array([0, 15, 2], dtype=np.int64)      # #2 joins after T
+        end = np.full(3, -1, dtype=np.int64)
+        disc = compute_discovery_months(keys, active, start, end, T=12,
+                                        run_seed=7, lag_scale=1.0)
+        assert disc[0] == 12     # inactive → sentinel
+        assert disc[1] == 12     # start_month >= T → sentinel
+        assert disc[2] < 12
+
+    def test_deterministic_and_seed_sensitive(self):
+        keys = np.arange(1, 200, dtype=np.int32)
+        active = np.ones(199, dtype=np.int64)
+        start = (keys % 10).astype(np.int64)
+        end = np.full(199, -1, dtype=np.int64)
+        a = compute_discovery_months(keys, active, start, end, T=24, run_seed=1)
+        b = compute_discovery_months(keys, active, start, end, T=24, run_seed=1)
+        c = compute_discovery_months(keys, active, start, end, T=24, run_seed=2)
+        np.testing.assert_array_equal(a, b)          # same seed → identical
+        assert not np.array_equal(a, c)              # different seed → reshuffled
 
 
-class TestMakeUpdateSeenLookup:
-    def test_create_and_update(self):
-        keys = np.array([1, 2, 5], dtype=np.int32)
-        lookup = _make_seen_lookup(keys)
-        assert lookup.shape == (6,)  # max key is 5
-        assert not lookup.any()
-
-        _update_seen_lookup(lookup, np.array([2, 5], dtype=np.int32))
-        assert lookup[2] is np.True_
-        assert lookup[5] is np.True_
-        assert not lookup[1]
+class TestHashUniform:
+    def test_range_and_determinism(self):
+        keys = np.arange(1, 1000, dtype=np.int64)
+        u1 = _hash_uniform(keys, 1234)
+        u2 = _hash_uniform(keys, 1234)
+        np.testing.assert_array_equal(u1, u2)
+        assert u1.min() >= 0.0 and u1.max() < 1.0
+        # Roughly uniform mean for a large sample.
+        assert abs(float(u1.mean()) - 0.5) < 0.05
 
 
 class TestSampleCustomers:
@@ -759,8 +792,7 @@ class TestSampleCustomers:
         keys = np.arange(1, 11, dtype=np.int32)
         eligible = np.ones(10, dtype=bool)
         result = _sample_customers(
-            _rng(), keys, eligible, set(), 20,
-            use_discovery=False, discovery_cfg={},
+            _rng(), keys, eligible, None, 20, use_discovery=False,
         )
         assert result.shape == (20,)
 
@@ -768,8 +800,7 @@ class TestSampleCustomers:
         keys = np.arange(1, 6, dtype=np.int32)
         eligible = np.ones(5, dtype=bool)
         result = _sample_customers(
-            _rng(), keys, eligible, set(), 0,
-            use_discovery=False, discovery_cfg={},
+            _rng(), keys, eligible, None, 0, use_discovery=False,
         )
         assert result.shape == (0,)
 
@@ -777,30 +808,31 @@ class TestSampleCustomers:
         keys = np.arange(1, 6, dtype=np.int32)
         eligible = np.zeros(5, dtype=bool)
         result = _sample_customers(
-            _rng(), keys, eligible, set(), 10,
-            use_discovery=False, discovery_cfg={},
+            _rng(), keys, eligible, None, 10, use_discovery=False,
         )
         assert result.shape == (0,)
 
-    def test_discovery_includes_new_customers(self):
+    def test_discovery_forces_debut_cohort(self):
+        # discovery_month is pool-aligned; customers scheduled to debut in the
+        # current month must appear, and not-yet-introduced ones must not.
         keys = np.arange(1, 21, dtype=np.int32)
         eligible = np.ones(20, dtype=bool)
-        seen = {1, 2, 3}
+        discovery_month = np.full(20, 5, dtype=np.int64)   # everyone future by default
+        discovery_month[:3] = 0        # customers 1,2,3 introduced earlier
+        discovery_month[3:6] = 2       # customers 4,5,6 debut this month
         result = _sample_customers(
-            _rng(), keys, eligible, seen, 50,
-            use_discovery=True,
-            discovery_cfg={"_target_new_customers": 5, "stochastic_discovery": False},
+            _rng(), keys, eligible, discovery_month, 50, use_discovery=True,
+            m_offset=2,
         )
-        # Should include some customers not in seen
-        new_customers = set(result) - seen
-        assert len(new_customers) > 0
+        got = set(int(x) for x in result)
+        assert {4, 5, 6} <= got                       # debut cohort forced in
+        assert got <= {1, 2, 3, 4, 5, 6}              # future customers excluded
 
     def test_target_distinct_limits_unique(self):
         keys = np.arange(1, 101, dtype=np.int32)
         eligible = np.ones(100, dtype=bool)
         result = _sample_customers(
-            _rng(), keys, eligible, set(), 50,
-            use_discovery=False, discovery_cfg={},
+            _rng(), keys, eligible, None, 50, use_discovery=False,
             target_distinct=5,
         )
         assert len(np.unique(result)) <= 5

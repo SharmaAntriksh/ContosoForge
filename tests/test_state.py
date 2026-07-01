@@ -68,16 +68,17 @@ class TestBindGlobals:
         with pytest.raises(TypeError, match="expects a dict"):
             bind_globals("not a dict")
 
-    def test_seen_customers_initialized(self):
+    def test_discovery_month_binds_through(self):
+        # Discovery is a static broadcast array now (no mutable seen_customers).
+        arr = np.array([0, 1, 2, 5], dtype=np.int64)
+        bind_globals({"skip_order_cols": False, "customer_discovery_month": arr})
+
+        np.testing.assert_array_equal(State.customer_discovery_month, arr)
+
+    def test_discovery_month_defaults_none(self):
         bind_globals({"skip_order_cols": False})
 
-        assert isinstance(State.seen_customers, set)
-
-    def test_seen_customers_list_converted_to_set(self):
-        bind_globals({"skip_order_cols": False, "seen_customers": [1, 2, 3]})
-
-        assert isinstance(State.seen_customers, set)
-        assert State.seen_customers == {1, 2, 3}
+        assert State.customer_discovery_month is None
 
 
 # ===================================================================

@@ -1008,6 +1008,10 @@ class CustomersDemandConfig(_Base):
     max_new_fraction_per_month: float = 0.015
     cycle_amplitude: float = 0.35
     discovery_shape: float = 0.0
+    # Mean forward lag (in months) between a customer becoming eligible and
+    # first transacting, in the closed-form discovery schedule. 0 = customers
+    # debut the month they become eligible; larger spreads discovery later.
+    discovery_lag_scale: float = 1.0
     participation_noise: float = 0.10
     seasonal_spikes: Optional[List[SeasonalSpikeConfig]] = None
 

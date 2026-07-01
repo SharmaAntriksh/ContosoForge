@@ -20,9 +20,14 @@ the full roadmap and finding numbers.
 
 | File | Asserts | Today | Flips green when |
 |---|---|---|---|
-| `test_sales_determinism_workers.py` | sales fact is identical regardless of `--workers` | 2 pass, 1 **xfail** (multi-chunk) | **Phase 1.1** (closed-form discovery) |
+| `test_sales_determinism_workers.py` | sales fact is identical regardless of `--workers` | **all pass** (multi-chunk now a hard guard) | ✅ **Phase 1.1 landed** (closed-form discovery) |
 | `test_sales_determinism_chunksize.py` | sales fact shape is independent of `chunk_size` | 1 pass, 1 **xfail** (per-month distinct) | **Phase 2** (global per-month plan) |
 | `test_sales_schema_consistency.py` | Arrow (parquet) and SQL (DDL) Sales schemas agree | 2 pass, 1 **xfail** (exact dtypes) ×params | **Phase 5.5** (one canonical schema) |
+
+`test_sales_determinism_workers.py` also carries `test_multi_chunk_worker_invariance_second_seed`
+(seed 20250701) — a second seed that exercises the worker-lifetime product-CDF cache path the
+Phase 1.1 stress uncovered (the cache was keyed by calendar month but its brand mix depends on the
+absolute month). Keep it: seed 1234 alone does not trigger that path.
 
 The `_workers`/`_chunksize` tests run the real pipeline on a tiny dataset (a few
 seconds each, spawn a worker pool). `test_sales_schema_consistency.py` is a fast

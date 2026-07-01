@@ -17,11 +17,9 @@ from src.exceptions import SalesError
 from src.utils.config_helpers import int_or as _int_or, float_or as _float_or
 from .globals import PA_AVAILABLE, State
 from .core import (
-    _make_seen_lookup,
     _normalize_cdf,
     _normalize_end_month,
     _sample_customers,
-    _update_seen_lookup,
     apply_promotions,
     build_orders,
     build_rows_per_month,
@@ -128,9 +126,10 @@ _worker_cdf_cache: dict = {}
 # The eligibility predicate depends only on the lifecycle arrays
 # (is_active / start_month / end_month), which bind_globals sets once per
 # worker and never reassigns — so the same masks would otherwise be rebuilt
-# for every chunk the worker processes.  seen_customers (discovery) changes
-# across chunks but does NOT enter the eligibility predicate, so caching the
-# eligible index set is safe.  Keyed on the month count T alone: the lifecycle
+# for every chunk the worker processes.  The discovery schedule
+# (customer_discovery_month) is likewise static and does NOT enter the
+# eligibility predicate, so caching the eligible index set is safe.  Keyed on
+# the month count T alone: the lifecycle
 # arrays are invariant within a worker and this cache is cleared at each worker
 # init, so no per-chunk array key is needed (and end_month_norm is reallocated
 # every chunk, so an id()-based key would never hit).
@@ -423,7 +422,7 @@ def _sample_products_per_store(
             if _has_brand:
                 _sample_brand_aware(
                     rng, out, orig_idx, count, pool,
-                    brand_probs, B, product_weight, _cdf_cache, _cal_month,
+                    brand_probs, B, product_weight, _cdf_cache, m_offset,
                 )
             elif _has_weight and pool_sz > 1:
                 cache_key = (id(pool), -1, _cal_month)
@@ -457,7 +456,7 @@ def _sample_products_per_store(
 
 def _sample_brand_aware(
     rng, out, orig_idx, count, pool, brand_probs, B,
-    product_weight, _cdf_cache, _cal_month,
+    product_weight, _cdf_cache, m_offset,
 ):
     """Sample products using merged brand × popularity CDF (no brand loop).
 
@@ -466,9 +465,16 @@ def _sample_brand_aware(
     One vectorized RNG + searchsorted call per store instead of looping over
     ~200 brands.  Produces the same marginal distribution as the two-stage
     "pick brand, then pick within brand" approach.
+
+    The merged CDF depends on ``brand_probs``, which is the *absolute*-month
+    brand mix (``brand_prob_by_month[m_offset]``), so the worker-lifetime cache
+    MUST be keyed by ``m_offset`` — not the calendar month. Keying by calendar
+    month lets the first chunk a worker happens to run fix the CDF for every
+    later same-calendar-month absolute month (e.g. Jan-2023 reusing Jan-2022's
+    brand mix), which made product sampling depend on chunk→worker scheduling.
     """
     pool_set_key = id(pool)
-    merged_key = (pool_set_key, "_merged_", _cal_month)
+    merged_key = (pool_set_key, "_merged_", int(m_offset))
 
     if _cdf_cache is not None and merged_key in _cdf_cache:
         merged_pool, merged_cdf = _cdf_cache[merged_key]
@@ -1198,8 +1204,9 @@ def build_chunk_table(
     Guarantees:
     - Customer lifecycle controls eligibility (IsActiveInSales + Start/End month)
     - Month loop generates orders within that month (date_pool sliced)
-    - Optional discovery forcing (persistable across chunks via State.seen_customers)
-      - IMPORTANT: discovery is OFF if customer_discovery block is absent
+    - Discovery forcing follows a static per-run schedule
+      (State.customer_discovery_month); it is worker/chunk-order independent
+      - IMPORTANT: discovery is OFF if new_customer_share == 0
     - All per-order arrays remain aligned
     """
 
@@ -1372,8 +1379,6 @@ def build_chunk_table(
         cust_cfg.get("distinct_ratio", 0.55), 0.0, 1.0))
     cycle_amplitude = float(np.clip(
         cust_cfg.get("cycle_amplitude", 0.35), 0.0, 1.0))
-    discovery_shape = float(np.clip(
-        cust_cfg.get("discovery_shape", 0.0), -1.0, 1.0))
 
     participation_noise = float(np.clip(
         cust_cfg.get("participation_noise", 0.10), 0.0, 1.0))
@@ -1398,19 +1403,11 @@ def build_chunk_table(
             if 1 <= cal_month <= 12:
                 seasonal_spike_map[cal_month] = float(boost)
 
+    # Discovery is on whenever new customers are expected. Its per-month shape
+    # is no longer computed here: it is baked into the static
+    # customer_discovery_month schedule built once in the coordinator.
     use_discovery = new_customer_share > 0.0
 
-    # Precompute per-month discovery shape multipliers (normalized to mean=1)
-    if use_discovery and T > 1 and discovery_shape != 0.0:
-        progress = np.linspace(0.0, 1.0, T)
-        shape_mult = 1.0 + discovery_shape * (2.0 * progress - 1.0)
-        shape_mult = np.maximum(shape_mult, 0.1)
-        shape_mult /= shape_mult.mean()
-    else:
-        shape_mult = np.ones(T, dtype=np.float64)
-
-    _BOOTSTRAP_MONTHS = _int_or(macro_cfg.get("bootstrap_months"), 6)
-    _MAX_FRAC_PER_MONTH = _float_or(cust_cfg.get("max_new_fraction_per_month"), 0.015)
     _MAX_DISTINCT_RATIO = _float_or(macro_cfg.get("max_distinct_ratio"), 0.70)
     _MIN_DISTINCT_CUSTOMERS = _int_or(macro_cfg.get("min_distinct_customers"), 250)
 
@@ -1418,15 +1415,14 @@ def build_chunk_table(
     brand_cfg = State.models_cfg.get("brand_popularity", None)
     use_brand_popularity = bool(brand_cfg) and bool(brand_cfg.get("enabled", True))
 
+    # Closed-form discovery schedule: pool-aligned month each customer first
+    # enters sales, computed once per run in the coordinator and broadcast
+    # read-only. Being static (never mutated per chunk), it makes the output
+    # independent of worker count / chunk order (Finding #5/#6).
     if use_discovery:
-        seen_customers = getattr(State, "seen_customers", None)
-        if seen_customers is None:
-            seen_customers = _make_seen_lookup(customer_keys)
-        elif isinstance(seen_customers, set):
-            seen_customers = _make_seen_lookup(customer_keys, existing_set=seen_customers)
-        # else: already a numpy boolean lookup from a previous chunk
+        discovery_month = _get_state_attr("customer_discovery_month")
     else:
-        seen_customers = None
+        discovery_month = None
 
     # ------------------------------------------------------------
     # Generate month-by-month
@@ -1485,22 +1481,6 @@ def build_chunk_table(
             continue
 
         # --------------------------------------------------------
-        # DISCOVERY TARGET
-        # --------------------------------------------------------
-        disc_cfg_local = {}
-        if use_discovery:
-            target_new = int(round(
-                new_customer_share * m_rows * float(shape_mult[m_offset])))
-
-            # Bootstrap: smooth ramp over first months
-            if m_offset < _BOOTSTRAP_MONTHS:
-                target_new = int(round(
-                    target_new * (m_offset + 1) / _BOOTSTRAP_MONTHS))
-
-            disc_cfg_local["_target_new_customers"] = max(0, target_new)
-            disc_cfg_local["max_fraction_per_month"] = _MAX_FRAC_PER_MONTH
-
-        # --------------------------------------------------------
         # DETERMINE SAMPLING COUNT
         # --------------------------------------------------------
         # In order mode (skip_cols=False, max_lines > 1): sample fewer
@@ -1542,10 +1522,9 @@ def build_chunk_table(
             rng=rng,
             customer_keys=customer_keys,
             eligible_mask=None,
-            seen_set=seen_customers,
+            discovery_month=discovery_month,
             n=int(n_sample),
             use_discovery=use_discovery,
-            discovery_cfg=disc_cfg_local,
             base_weight=base_weight,
             target_distinct=target_distinct,
             end_month_norm=end_month_norm,
@@ -1906,12 +1885,8 @@ def build_chunk_table(
             else:
                 salesperson_key_arr = np.full(s_ids.size, -1, dtype=np.int32)
 
-        # UPDATE DISCOVERY STATE (persist)
-        # --------------------------------------------------------
-        if use_discovery:
-            # track customers that actually appeared in this month
-            _update_seen_lookup(seen_customers, np.unique(customer_keys_out))
-            State.seen_customers = seen_customers
+        # Discovery is a static closed-form schedule (State.customer_discovery_month),
+        # so there is no per-chunk "seen" state to persist here anymore.
 
         # --------------------------------------------------------
         # QUANTITY + PRICING
