@@ -12,6 +12,7 @@ Output columns:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,9 @@ from src.defaults import ONLINE_EMP_KEY_BASE, ONLINE_STORE_KEY_BASE
 from src.utils.logging_utils import info, skip, stage, warn
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning import should_regenerate, save_version
+if TYPE_CHECKING:
+    from src.engine.config.config_schema import AppConfig
+
 from src.utils.config_helpers import (
     as_dict,
     str_or,
@@ -193,7 +197,7 @@ def _infer_home_store_key(employees: pd.DataFrame) -> pd.Series:
     if online_mask.any():
         out.loc[online_mask] = (ek.loc[online_mask] - ONLINE_EMP_KEY_BASE).astype("Int32")
 
-    mgr_mask = (ek >= STORE_MGR_KEY_BASE) & (ek < STAFF_KEY_BASE) & ~online_mask
+    mgr_mask = (ek >= STORE_MGR_KEY_BASE) & (ek < STAFF_KEY_BASE)
     if mgr_mask.any():
         out.loc[mgr_mask] = (ek.loc[mgr_mask] - STORE_MGR_KEY_BASE).astype("Int32")
 
@@ -300,7 +304,7 @@ def generate_employee_store_assignments(
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_employee_store_assignments(cfg, parquet_folder: Path, out_path: Path = None) -> None:
+def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_path: Path = None) -> None:
     """Generate and write the EmployeeStoreAssignments bridge table."""
     if out_path is None:
         out_path = parquet_folder / "employee_store_assignments.parquet"

@@ -431,4 +431,18 @@ largest, riskiest phase.
 
 ## Standing TODO (bugs found later go here, not into unrelated phases)
 
-- (empty)
+- **The Phase 1 "duplicate cast pass" was a false premise — no action taken.**
+  The plan called for deleting the integer casts at the end of
+  `generate_employee_dimension` as redundant with `_finalize_employee_integer_cols`.
+  Adversarial verification showed they are *not* redundant: those casts are the
+  only place the seven key/int columns get integer-typed *inside*
+  `generate_employee_dimension`, which is a public, directly-tested API (called in
+  `tests/test_dimensions.py` without `_finalize_employee_integer_cols`). Removing
+  them flips its return dtype `int32 → object`. The two cast sites live in
+  different functions / pipeline stages; the later one operates on the enriched
+  frame in `run_employees`. Left as-is; the `# Final integer casts` comment is
+  accurate for that function.
+- **Re-home `_check_coverage_invariant`.** Defined in `employees/transfers.py`,
+  currently called only by tests. Phase 5 wires it as an unconditional runner
+  post-condition; the physical move is deferred to that phase to keep Phase 1
+  byte-identical.

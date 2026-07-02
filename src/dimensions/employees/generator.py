@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Tuple
+
+if TYPE_CHECKING:
+    from src.engine.config.config_schema import AppConfig
 
 import numpy as np
 import pandas as pd
@@ -60,8 +63,8 @@ assert abs(float(_STAFF_TITLES_P.sum()) - 1.0) < 1e-9, (
 # ---------------------------------------------------------
 
 def _stores_signature(stores: pd.DataFrame) -> Dict[str, Any]:
-    """Version signature for stores — excludes EmployeeCount to avoid churn
-    when run_employees updates stores.parquet with actual counts."""
+    """Version signature for stores — excludes EmployeeCount to avoid
+    unnecessary version churn when store employee counts change."""
     if stores.empty:
         return {"rows": 0, "min_store": None, "max_store": None}
     sk = stores["StoreKey"].to_numpy()
@@ -246,7 +249,7 @@ def _enrich_employee_hr_columns(
     ).astype(object)
 
     # TerminationReason (only for terminated employees)
-    # Preserve values already set by attrition ("Voluntary") or closures ("Involuntary")
+    # Preserve reasons already set by store closures; assign a random reason for the rest
     term_mask = df["TerminationDate"].notna() & (df["IsActive"].astype(int) == 0)
     if "TerminationReason" not in df.columns:
         df["TerminationReason"] = pd.array([pd.NA] * len(df), dtype="object")
@@ -342,13 +345,9 @@ def generate_employee_dimension(
     """
     Build a parent-child employee hierarchy with stable keys.
 
-    Sales Associate lifecycle:
-      - ALL Sales Associates are hired at or before *global_start*.
-      - SAs are subject to natural attrition: after a random tenure they
-        depart and are replaced by a new hire (with overlap for training).
-        The last SA in each chain serves until ``global_end`` (NaT).
-      - This ensures the bridge table always has at least one SA per store
-        covering any date in ``[global_start, global_end]``.
+    Static model: all employees are hired before global_start and remain
+    active (IsActive=True, TerminationDate=NaT) for the full window, except
+    those at stores that close (ClosingDate triggers termination).
     """
     if stores.empty:
         raise DimensionError("stores dataframe is empty; cannot generate employees")
@@ -687,7 +686,7 @@ def generate_employee_dimension(
     df["FTE"] = fte
 
     # ------------------------------------------------------------------
-    # Dates — with Sales Associate full-window guarantee
+    # Dates — hire/termination window assignment
     # ------------------------------------------------------------------
     n = len(df)
     ps_role_str = str(primary_sales_role or "Sales Associate")
@@ -834,8 +833,7 @@ def generate_employee_dimension(
 # Pipeline entrypoint
 # ---------------------------------------------------------
 
-def run_employees(cfg: Dict[str, Any], parquet_folder: Path) -> None:
-    cfg = cfg or {}
+def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
     emp_cfg = cfg.employees
 
     parquet_folder = Path(parquet_folder)

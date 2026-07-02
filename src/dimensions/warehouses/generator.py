@@ -17,7 +17,10 @@ Output columns:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple
+
+if TYPE_CHECKING:
+    from src.engine.config.config_schema import AppConfig
 
 import numpy as np
 import pandas as pd
@@ -387,7 +390,7 @@ def generate_warehouse_table(
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_warehouses(cfg, parquet_folder: Path) -> None:
+def run_warehouses(cfg: AppConfig, parquet_folder: Path) -> None:
     """Generate and write the Warehouses dimension + update Stores with FK."""
     parquet_folder = Path(parquet_folder)
     out_path = parquet_folder / "warehouses.parquet"
@@ -427,7 +430,10 @@ def run_warehouses(cfg, parquet_folder: Path) -> None:
             compression="snappy",
         )
 
-        # Add WarehouseKey FK to stores and overwrite
+        # Add WarehouseKey FK to stores and overwrite.
+        # NOTE: this rewrite hardcodes cast_all_datetime=True + compression="snappy",
+        # ignoring stores' configured parquet_compression / force_date32. Consolidating
+        # stores.parquet under a single writer is tracked in docs/EMPLOYEES_REFACTOR_PLAN.md.
         stores_df["WarehouseKey"] = (
             stores_df["StoreKey"].astype(int).map(store_to_wh).astype("Int32")
         )

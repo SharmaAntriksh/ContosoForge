@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
+
+if TYPE_CHECKING:
+    from src.engine.config.config_schema import AppConfig, StoresConfig
 
 import numpy as np
 import pandas as pd
@@ -145,7 +148,7 @@ def _build_location_maps(geo: pd.DataFrame) -> tuple[dict[int, str], dict[int, s
     return short_map, full_map
 
 
-def _require_cfg(cfg: Dict) -> Dict:
+def _require_cfg(cfg: AppConfig) -> StoresConfig:
     stores_cfg = cfg.stores if hasattr(cfg, "stores") else None
     if not isinstance(stores_cfg, Mapping):
         raise DimensionError("config missing required block: stores")
@@ -1221,7 +1224,7 @@ def generate_store_table(
 # Pipeline entrypoint
 # ---------------------------------------------------------
 
-def run_stores(cfg: Dict, parquet_folder: Path) -> None:
+def run_stores(cfg: AppConfig, parquet_folder: Path) -> None:
     """
     Pipeline wrapper for stores dimension generation.
     """
@@ -1335,9 +1338,9 @@ def run_stores(cfg: Dict, parquet_folder: Path) -> None:
         df = generate_store_table(
             geo=geo_ctx,
             num_stores=int_or(store_cfg.num_stores, 200),
-            opening_start=opening_cfg.get("start") or "2018-01-01",
-            opening_end=opening_cfg.get("end") or "2025-12-31",
-            closing_end=store_cfg.closing_end or "2025-12-31",
+            opening_start=opening_cfg.get("start"),
+            opening_end=opening_cfg.get("end"),
+            closing_end=store_cfg.closing_end,
             seed=seed,
             square_footage_cfg=sqft_cfg,
             staffing_overrides=staffing_overrides,
