@@ -410,10 +410,10 @@ def _decode_home_store(ek: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Layer 3: bug-pinning tests (each asserts the desired POST-FIX behavior)
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(strict=True, reason="Phase 1.5: IsSalesperson must honor primary_sales_role")
 def test_bugpin_1_issalesperson_honors_configured_role(tmp_path):
-    """With a non-default ``primary_sales_role`` the flag is all-False today
-    (it hardcodes 'Sales Associate'); post-fix, physical sales staff are flagged."""
+    """With a non-default ``primary_sales_role`` the IsSalesperson flag and the
+    Sales department must track the configured role, not the hardcoded literal
+    (regression guard)."""
     role = "Retail Specialist"
     with _isolated_version_dir(tmp_path / "versioning"):
         folder = tmp_path / "data"
@@ -428,6 +428,9 @@ def test_bugpin_1_issalesperson_honors_configured_role(tmp_path):
     assert len(physical_staff) > 0, "fixture should produce staff with the configured role"
     assert physical_staff["IsSalesperson"].astype(bool).any(), (
         "physical staff in the configured sales role must be flagged IsSalesperson"
+    )
+    assert (physical_staff["DepartmentName"].astype(str) == "Sales").any(), (
+        "physical staff in the configured sales role must be in the Sales department"
     )
 
 

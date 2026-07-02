@@ -897,6 +897,67 @@ class TestGenerateEmployeeDimension:
         assert df["EmployeeName"].notna().all()
         assert (df["EmployeeName"].str.len() > 0).all()
 
+    def test_nan_identity_key_raises(self):
+        """A NaN identity key must raise DimensionError, not silently become 0.
+
+        EmployeeKey is never legitimately NaN. StoreKey is NaN only for
+        corporate/region/district rows (OrgUnitType != 'Store'); a store-level
+        row with a NaN StoreKey is corruption.
+        """
+        from src.dimensions.employees.generator import _assert_identity_keys
+
+        # NaN EmployeeKey -> always raises
+        with pytest.raises(DimensionError, match="EmployeeKey"):
+            _assert_identity_keys(pd.DataFrame({
+                "EmployeeKey": [1.0, np.nan],
+                "StoreKey": [5, 6],
+                "OrgUnitType": ["Store", "Store"],
+            }))
+
+        # NaN StoreKey on a store-level row -> raises
+        with pytest.raises(DimensionError, match="StoreKey"):
+            _assert_identity_keys(pd.DataFrame({
+                "EmployeeKey": [1, 2],
+                "StoreKey": [5.0, np.nan],
+                "OrgUnitType": ["Store", "Store"],
+            }))
+
+        # NaN StoreKey on a corporate row is legitimate -> no raise
+        _assert_identity_keys(pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "StoreKey": [5.0, np.nan],
+            "OrgUnitType": ["Store", "Corporate"],
+        }))
+
+    def test_birthdate_at_least_18_at_hire(self):
+        """Every employee must be >= 18 years old at their HireDate.
+
+        Whole-year age subtraction leaves age-18 rows whose random birthday
+        falls after the hire month/day only 17 at hire; the clamp fixes that.
+        An early-in-year hire maximizes the exposure.
+        """
+        from src.dimensions.employees.generator import _enrich_employee_hr_columns
+
+        n = 3000
+        hire = pd.Timestamp("2020-01-10")
+        df = pd.DataFrame({
+            "EmployeeKey": np.arange(1, n + 1, dtype=np.int64),
+            "Title": ["Sales Associate"] * n,
+            "OrgLevel": np.full(n, 6, dtype=np.int64),  # youngest cohort -> most age-18 clips
+            "HireDate": [hire] * n,
+            "TerminationDate": [pd.NaT] * n,
+            "IsActive": [True] * n,
+            "FirstName": ["Test"] * n,
+            "LastName": ["Person"] * n,
+        })
+        out = _enrich_employee_hr_columns(
+            df, np.random.default_rng(7), global_end=pd.Timestamp("2025-12-31"),
+        )
+        latest_birth = pd.to_datetime(out["HireDate"]) - pd.DateOffset(years=18)
+        assert (pd.to_datetime(out["BirthDate"]) <= latest_birth).all(), (
+            "some employees are younger than 18 at hire"
+        )
+
 
 # ===================================================================
 # SALESPERSON COVERAGE INVARIANT (employees -> bridge)

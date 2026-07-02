@@ -148,10 +148,15 @@ cross-references stay valid).
    downstream salesperson filter. Derive both flag and department from the
    configured role. Flips Phase 0 xfail #1.
 2. **Key columns crash on corruption** (employees final cast pass ~lines
-   822/827). Replace `fillna(0)` on `EmployeeKey`/`StoreKey` with a raise
+   822/827). Replace `fillna(0)` on the identity keys with a raise
    (`DimensionError`) — a NaN key silently coerced to 0 corrupts every key-band
-   decode and the sales/bridge joins. Byte-identical for valid inputs; changes
-   behavior only on already-corrupt data. New regression test.
+   decode and the sales/bridge joins. Implemented as a testable
+   `_assert_identity_keys(df)` guard called before the cast: `EmployeeKey` raises
+   unconditionally (never legitimately NaN); `StoreKey` raises **only for
+   store-level rows** (`OrgUnitType == "Store"`), because corporate/region/district
+   rows legitimately have a NaN `StoreKey` that the intentional 0-fill maps to 0 —
+   a blanket `StoreKey` raise would break every run. Byte-identical for valid
+   inputs; changes behavior only on already-corrupt data. New regression test.
 3. **Manager BirthDate ≥ 18-at-hire clamp** (employees hr logic). Clamp so no
    employee is born fewer than 18 years before their hire date. New regression
    test (a seed that today produces an under-age hire).

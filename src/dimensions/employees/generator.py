@@ -164,6 +164,7 @@ def _enrich_employee_hr_columns(
     rng: np.random.Generator,
     global_end: pd.Timestamp,
     email_domain: str = "contoso.com",
+    primary_sales_role: str = "Sales Associate",
 ) -> pd.DataFrame:
     """
     Adds Contoso-like HR columns.
@@ -192,6 +193,13 @@ def _enrich_employee_hr_columns(
     df["BirthDate"] = pd.to_datetime(
         {"year": birth_year, "month": birth_month, "day": birth_day}
     ).dt.normalize()
+    # Guarantee >= 18 years old at HireDate: birth_year is a whole-year
+    # subtraction, so a row with age == 18 whose random (month, day) falls after
+    # the hire's (month, day) would be only 17 at the hire date. Clamp such rows
+    # to exactly 18-at-hire. Vectorized, NaT-safe, and consumes no RNG so every
+    # subsequent random column stays byte-identical.
+    _min_birth = hire - pd.DateOffset(years=18)
+    df["BirthDate"] = df["BirthDate"].where(df["BirthDate"] <= _min_birth, _min_birth)
 
     is_married = rng.random(n) < np.clip((ages - 22) / 25.0, 0.05, 0.75)
     df["MaritalStatus"] = np.where(is_married, "M", "S").astype(object)
@@ -264,11 +272,11 @@ def _enrich_employee_hr_columns(
         df.loc[needs_reason, "TerminationReason"] = reasons
 
     # IsSalesperson
-    df["IsSalesperson"] = title.isin(["Sales Associate", ONLINE_SALES_REP_ROLE]).astype(bool)
+    df["IsSalesperson"] = title.isin([primary_sales_role, ONLINE_SALES_REP_ROLE]).astype(bool)
 
     # DepartmentName
     dept = np.where(
-        title.isin(["Sales Associate", "Store Manager"]),
+        title.isin([primary_sales_role, "Store Manager"]),
         "Sales",
         np.where(
             title.isin([ONLINE_SALES_REP_ROLE]),
@@ -287,6 +295,35 @@ def _enrich_employee_hr_columns(
     df["DepartmentName"] = pd.Series(dept, dtype="object")
 
     return df
+
+
+def _assert_identity_keys(df: pd.DataFrame) -> None:
+    """Raise on a NaN identity key rather than silently coercing it to 0.
+
+    A null ``EmployeeKey`` or (for store-level rows) ``StoreKey`` indicates
+    upstream corruption; ``fillna(0)`` would hide it behind a duplicate 0 key
+    and break every key-band decode and FK join. Corporate/region/district
+    rows (``OrgUnitType != "Store"``) legitimately have no store, so their NaN
+    ``StoreKey`` is left for the intentional 0-fill.
+    """
+    if df.empty:
+        return
+    ek = pd.to_numeric(df["EmployeeKey"], errors="coerce")
+    if ek.isna().any():
+        raise DimensionError(
+            f"{int(ek.isna().sum())} employee row(s) have a null/non-numeric "
+            "EmployeeKey; an identity key cannot be NaN (upstream corruption). "
+            "Refusing to coerce to 0."
+        )
+    if "OrgUnitType" in df.columns and "StoreKey" in df.columns:
+        store_row = df["OrgUnitType"].astype(str) == "Store"
+        bad_sk = store_row & pd.to_numeric(df["StoreKey"], errors="coerce").isna()
+        if bad_sk.any():
+            raise DimensionError(
+                f"{int(bad_sk.sum())} store-level employee row(s) have a "
+                "null/non-numeric StoreKey; a store employee must reference a "
+                "concrete store. Refusing to coerce to 0."
+            )
 
 
 def _finalize_employee_integer_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -817,7 +854,9 @@ def generate_employee_dimension(
                 df.loc[vi, "MiddleName"] = middle_arr
                 df.loc[vi, "EmployeeName"] = vn
 
-    # Final integer casts (single consolidated pass)
+    # Final integer casts (single consolidated pass). Guard first: a NaN identity
+    # key is corruption, not something to silently fillna(0) into a duplicate 0.
+    _assert_identity_keys(df)
     df["EmployeeKey"] = pd.to_numeric(df["EmployeeKey"], errors="coerce").fillna(0).astype(np.int32)
     df["ParentEmployeeKey"] = pd.to_numeric(df["ParentEmployeeKey"], errors="coerce").astype("Int32")
     df["OrgLevel"] = pd.to_numeric(df["OrgLevel"], errors="coerce").fillna(0).astype(np.int32)
@@ -863,7 +902,7 @@ def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
         )
 
     version_cfg = as_dict(emp_cfg)
-    version_cfg["schema_version"] = 11  # v11: resolved seed folded into version key
+    version_cfg["schema_version"] = 12  # v12: IsSalesperson honors role; birthdate >=18-at-hire clamp
     version_cfg["seed"] = int(seed)
     version_cfg["_stores_sig"] = _stores_signature(stores)
     version_cfg["_stores_cfg"] = as_dict(cfg.stores)
@@ -964,6 +1003,7 @@ def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
             rng=np.random.default_rng(int(seed) ^ 0x9E3779B1),
             global_end=global_end,
             email_domain=str(email_domain),
+            primary_sales_role=primary_sales_role,
         )
 
         df = _finalize_employee_integer_cols(df)
