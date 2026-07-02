@@ -904,7 +904,7 @@ class TestGenerateEmployeeDimension:
         corporate/region/district rows (OrgUnitType != 'Store'); a store-level
         row with a NaN StoreKey is corruption.
         """
-        from src.dimensions.employees.generator import _assert_identity_keys
+        from src.dimensions.employees.hr import _assert_identity_keys
 
         # NaN EmployeeKey -> always raises
         with pytest.raises(DimensionError, match="EmployeeKey"):
@@ -936,7 +936,7 @@ class TestGenerateEmployeeDimension:
         falls after the hire month/day only 17 at hire; the clamp fixes that.
         An early-in-year hire maximizes the exposure.
         """
-        from src.dimensions.employees.generator import _enrich_employee_hr_columns
+        from src.dimensions.employees.hr import _enrich_employee_hr_columns
 
         n = 3000
         hire = pd.Timestamp("2020-01-10")
