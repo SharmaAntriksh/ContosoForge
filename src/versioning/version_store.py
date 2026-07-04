@@ -3,6 +3,9 @@ import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 # -----------------------------------------------------------
 # Absolute versioning folder under project root
 # -----------------------------------------------------------
@@ -38,6 +41,27 @@ def _compute_hash(obj) -> str:
         # Last resort: should be unreachable given the default handler above.
         data = str(obj).encode("utf-8")
     return hashlib.sha256(data).hexdigest()
+
+
+def frame_content_hash(df: "pd.DataFrame", columns) -> str:
+    """Order-independent digest of the given columns' actual content.
+
+    Folds the data a downstream dimension consumes into its version key, so a
+    change to any consumed *value* (not just row count / min / max, which weak
+    ``_emp_key_min/max/sum``-style fingerprints missed) triggers a regeneration.
+
+    Cheap and order-independent: pandas' vectorized row hasher produces a per-row
+    ``uint64``, then a commutative (count, xor, sum) combine makes the result
+    invariant to the incidental row order a parquet round-trip may introduce.
+    Missing columns are skipped so a legacy frame degrades rather than raising.
+    """
+    present = [c for c in columns if c in df.columns]
+    if not present or len(df) == 0:
+        return f"empty:{len(df)}:{','.join(present)}"
+    row_hashes = pd.util.hash_pandas_object(df[present], index=False).to_numpy(dtype=np.uint64)
+    xor = int(np.bitwise_xor.reduce(row_hashes))
+    total = int(row_hashes.sum(dtype=np.uint64))
+    return f"{','.join(present)}:{len(df)}:{xor:016x}:{total:016x}"
 
 
 def _version_file(name: str) -> Path:

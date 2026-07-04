@@ -22,14 +22,14 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
 
-from src.defaults import ONLINE_STORE_KEY_BASE, ONLINE_SALES_REP_ROLE
 from src.exceptions import SalesError
 from src.utils.logging_utils import info, warn
+from src.facts.sales.prep.sales_helpers import resolve_salesperson_roles
 
 # TransferReason value stamped on assignments the repair policy synthetically
 # extends, so a repaired bridge is auditable (which rows are original vs filled).
@@ -359,20 +359,6 @@ def repair_bridge(
     df["AssignmentKey"] = np.arange(1, len(df) + 1, dtype=np.int32)
     df["AssignmentSequence"] = (df.groupby("EmployeeKey").cumcount() + 1).astype(np.int32)
     return df, len(repaired_rows)
-
-
-def resolve_salesperson_roles(cfg) -> List[str]:
-    """Mirror the role resolution in sales.py."""
-    roles = None
-    sales = getattr(cfg, "sales", None)
-    if sales is not None:
-        roles = getattr(sales, "salesperson_roles", None)
-    if not (isinstance(roles, list) and roles):
-        emp = getattr(cfg, "employees", None)
-        sa = getattr(emp, "store_assignments", None) if emp is not None else None
-        primary = getattr(sa, "primary_sales_role", None) if sa is not None else None
-        roles = [str(primary or "Sales Associate"), ONLINE_SALES_REP_ROLE]
-    return roles
 
 
 def run_coverage_preflight(cfg, parquet_dims: Path, global_start, global_end) -> None:

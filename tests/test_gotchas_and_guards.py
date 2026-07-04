@@ -377,3 +377,47 @@ class TestExpandedDeterminism:
         r1 = _normalize_cdf(w.copy())
         r2 = _normalize_cdf(w.copy())
         np.testing.assert_array_equal(r1, r2)
+
+
+# ===================================================================
+# Boundary predicate: no raw ONLINE_STORE_KEY_BASE comparisons
+# ===================================================================
+
+class TestOnlineBoundaryPredicate:
+    """The online/physical store boundary must be spelled exactly one way.
+
+    It was previously spelled four different ways across the cluster (``>``,
+    ``>=``, ``<``, ``<=``), disagreeing at ``ONLINE_STORE_KEY_BASE`` itself.
+    The constant now lives in ``src/defaults.py`` behind
+    ``is_online_store_key`` / ``is_physical_store_key``; consumers must ask the
+    predicate. Only the stores key allocator (which mints the keys) may hold the
+    raw constant. This gate keeps a future edit from hand-rolling the boundary.
+    """
+
+    def test_raw_constant_only_in_predicate_and_allocator(self):
+        import tokenize
+        from pathlib import Path
+
+        src_root = Path(__file__).resolve().parents[1] / "src"
+        allowed = {
+            Path("defaults.py"),                     # defines the constant + predicates
+            Path("dimensions/stores/generator.py"),  # the key allocator mints keys
+        }
+        offenders = []
+        for py in src_root.rglob("*.py"):
+            rel = py.relative_to(src_root)
+            if rel in allowed:
+                continue
+            with open(py, "rb") as f:
+                # NAME tokens exclude comments, strings and docstrings, so a
+                # doc mention of the constant is not a false positive.
+                names = {
+                    t.string for t in tokenize.tokenize(f.readline)
+                    if t.type == tokenize.NAME
+                }
+            if "ONLINE_STORE_KEY_BASE" in names:
+                offenders.append(str(rel).replace("\\", "/"))
+        assert not offenders, (
+            "these modules reference the raw ONLINE_STORE_KEY_BASE instead of the "
+            f"is_online_store_key / is_physical_store_key predicate: {sorted(offenders)}"
+        )

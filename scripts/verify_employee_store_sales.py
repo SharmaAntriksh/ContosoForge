@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -25,12 +25,32 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # ---------------------------------------------------------------------------
-# Key ranges (mirror src/defaults.py and employees/generator.py)
+# Online store key threshold (mirrors src/defaults.ONLINE_STORE_KEY_BASE).
+# EmployeeKeys are opaque surrogates — classify employees by columns, not ranges.
 # ---------------------------------------------------------------------------
 ONLINE_STORE_KEY_BASE = 10_000
-STORE_MGR_KEY_BASE = 30_000_000
-STAFF_KEY_BASE = 40_000_000
-ONLINE_EMP_KEY_BASE = 50_000_000
+
+
+def _classify_employee_keys(employees: pd.DataFrame):
+    """Return (manager_keys, online_keys, store_level_keys) as sets of EmployeeKey.
+
+    Opaque keys carry no tier/home-store, so classify by column: managers are
+    ``Title == 'Store Manager'``; online reps have an online home store;
+    store-level is any employee with a real (non-zero) home StoreKey.
+    """
+    ek = employees["EmployeeKey"].astype(np.int64)
+    if "Title" in employees.columns:
+        title = employees["Title"].astype(str)
+    else:
+        title = pd.Series("", index=employees.index)
+    if "StoreKey" in employees.columns:
+        sk = pd.to_numeric(employees["StoreKey"], errors="coerce").fillna(0)
+    else:
+        sk = pd.Series(0, index=employees.index)
+    manager_keys = set(ek[title == "Store Manager"].tolist())
+    online_keys = set(ek[sk > ONLINE_STORE_KEY_BASE].tolist())
+    store_level_keys = set(ek[sk > 0].tolist())
+    return manager_keys, online_keys, store_level_keys
 
 
 # ============================================================================
@@ -186,7 +206,6 @@ def check_stores(stores: pd.DataFrame) -> None:
 
 def check_employees(employees: pd.DataFrame) -> None:
     cat = "Employees"
-    n = len(employees)
 
     # --- Duplicate EmployeeKey ---
     dup_ek = employees["EmployeeKey"].duplicated().sum()
@@ -230,8 +249,7 @@ def check_employees(employees: pd.DataFrame) -> None:
 
     # --- No managers should be flagged as salespeople ---
     if "IsSalesperson" in employees.columns:
-        mgr_mask = (employees["EmployeeKey"].astype(np.int64) >= STORE_MGR_KEY_BASE) & \
-                   (employees["EmployeeKey"].astype(np.int64) < STAFF_KEY_BASE)
+        mgr_mask = employees["Title"].astype(str) == "Store Manager"
         mgr_sp = (mgr_mask & (employees["IsSalesperson"].astype(int) == 1)).sum()
         _add(cat, "No managers flagged as salespeople",
              mgr_sp == 0,
@@ -310,17 +328,12 @@ def check_esa(
             _emp_to_reno_store.setdefault(ek_val, sk_val)
 
     def _find_source_reno_store(ek: int) -> int:
-        """Find which renovating store an employee came from."""
-        cached = _emp_to_reno_store.get(ek)
-        if cached is not None:
-            return cached
-        # Manager key encoding: 30_000_000 + StoreKey
-        if STORE_MGR_KEY_BASE <= ek < STAFF_KEY_BASE:
-            return ek - STORE_MGR_KEY_BASE
-        # Staff key encoding: 40_000_000 + StoreKey * multiplier
-        if STAFF_KEY_BASE <= ek < ONLINE_EMP_KEY_BASE:
-            return (ek - STAFF_KEY_BASE) // 1000
-        return -1
+        """Find which renovating store an employee came from (via the bridge).
+
+        Opaque keys can't be decoded, so this relies on the ESA StoreKey cache;
+        an employee not currently mapped to a renovating store returns -1.
+        """
+        return _emp_to_reno_store.get(ek, -1)
 
     # --- Renovation Reassignment IsPrimary rules ---
     # Temporary renovation (store reopens): IsPrimary must be False.
@@ -422,10 +435,12 @@ def check_esa(
          f"{len(orphan_sk)} orphan key(s)")
 
     # --- Online/physical ESA cross-channel isolation ---
+    _, online_keys, store_level_keys = _classify_employee_keys(employees)
     esa_ek = esa["EmployeeKey"].astype(np.int64)
     esa_sk = esa["StoreKey"].astype(np.int64)
-    online_emp_at_phys = ((esa_ek >= ONLINE_EMP_KEY_BASE) & (esa_sk < ONLINE_STORE_KEY_BASE)).sum()
-    phys_emp_at_online = ((esa_ek < ONLINE_EMP_KEY_BASE) & (esa_sk >= ONLINE_STORE_KEY_BASE)).sum()
+    esa_online_emp = esa_ek.isin(online_keys)
+    online_emp_at_phys = (esa_online_emp & (esa_sk < ONLINE_STORE_KEY_BASE)).sum()
+    phys_emp_at_online = (~esa_online_emp & (esa_sk >= ONLINE_STORE_KEY_BASE)).sum()
     _add(cat, "ESA: online employees only at online stores",
          online_emp_at_phys == 0,
          f"{online_emp_at_phys} online employee row(s) assigned to a physical store")
@@ -435,14 +450,13 @@ def check_esa(
 
     # --- Online employee count matches online store count ---
     n_online_stores = int((stores["StoreKey"].astype(int) >= ONLINE_STORE_KEY_BASE).sum())
-    n_online_emps   = int((employees["EmployeeKey"].astype(np.int64) >= ONLINE_EMP_KEY_BASE).sum())
+    n_online_emps   = len(online_keys)
     _add(cat, "Online employee count matches online store count",
          n_online_emps == n_online_stores,
          f"{n_online_emps} online employee(s), {n_online_stores} online store(s)")
 
     # --- Every store-level employee has at least 1 assignment ---
-    ek_all = employees["EmployeeKey"].astype(np.int64)
-    store_level_set = set(ek_all[ek_all >= STORE_MGR_KEY_BASE].astype(int))
+    store_level_set = store_level_keys
     in_esa = set(esa["EmployeeKey"].astype(int))
     missing_from_esa = store_level_set - in_esa
     _add(cat, "Every store-level employee has an assignment",
@@ -672,6 +686,7 @@ def check_sales(
     sales: pd.DataFrame,
     esa: pd.DataFrame,
     stores: pd.DataFrame,
+    employees: pd.DataFrame,
 ) -> None:
     cat = "Sales"
     n = len(sales)
@@ -704,8 +719,9 @@ def check_sales(
          orphan_emp == 0,
          f"{orphan_emp} sale(s) referencing unknown EmployeeKey")
 
-    # --- No manager keys in sales (30M-40M range) ---
-    mgr_in_sales = ((ek >= STORE_MGR_KEY_BASE) & (ek < STAFF_KEY_BASE)).sum()
+    # --- No manager keys in sales ---
+    manager_keys, online_keys, _ = _classify_employee_keys(employees)
+    mgr_in_sales = ek.isin(manager_keys).sum()
     _add(cat, "No manager keys in sales",
          mgr_in_sales == 0,
          f"{mgr_in_sales} sale(s) with manager EmployeeKey")
@@ -713,7 +729,7 @@ def check_sales(
     # --- Online/physical channel alignment ---
     sk_int = sales["StoreKey"].astype(np.int64)
     online_store_sales = sk_int >= ONLINE_STORE_KEY_BASE
-    online_emp_sales = ek >= ONLINE_EMP_KEY_BASE
+    online_emp_sales = ek.isin(online_keys)
     phys_emp_at_online = (online_store_sales & ~online_emp_sales & (ek > 0)).sum()
     online_emp_at_phys = (~online_store_sales & online_emp_sales).sum()
     _add(cat, "Online/physical channel alignment",
@@ -970,9 +986,6 @@ def main() -> int:
         print(f"Folder not found: {folder}")
         return 2
 
-    dims = folder / "dimensions"
-    facts = folder / "facts"
-
     t0 = time.perf_counter()
 
     # --- Load ---
@@ -1019,7 +1032,7 @@ def main() -> int:
     print("=" * 60)
     print("SALES ALIGNMENT")
     print("=" * 60)
-    check_sales(sales, esa, stores)
+    check_sales(sales, esa, stores, employees)
 
     # --- Summary ---
     elapsed = time.perf_counter() - t0

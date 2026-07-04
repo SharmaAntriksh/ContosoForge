@@ -125,10 +125,28 @@ STORE_STAFFING_DEFAULT: Tuple[int, int] = (2, 6)
 # are exempt (fixed at 1 — they get a dedicated online sales representative).
 MIN_PHYSICAL_EMPLOYEE_COUNT: int = 2
 
-# Online store key ranges — easily distinguishable from physical stores
-ONLINE_STORE_KEY_BASE: int = 10_000    # Online StoreKeys: 10_001, 10_002, ...
-ONLINE_EMP_KEY_BASE: int = 50_000_000  # Online EmployeeKeys: 50_000_901, 50_000_902, ...
+# Online store key range — easily distinguishable from physical stores. Online
+# StoreKeys are 10_001, 10_002, ...; is_online_store_key() is the predicate.
+# (EmployeeKeys are now opaque surrogates — no band offsets to encode home store
+# or tier; classify employees by the OrgLevel/OrgUnitType/StoreKey columns.)
+ONLINE_STORE_KEY_BASE: int = 10_000
 ONLINE_SALES_REP_ROLE: str = "Online Sales Representative"
+
+
+def is_online_store_key(sk):
+    """Online iff StoreKey > ONLINE_STORE_KEY_BASE (online keys start at BASE+1).
+
+    Polymorphic: a scalar int yields a plain ``bool``; a pandas Series or numpy
+    array yields an elementwise bool mask. Physical store keys are 1..N and
+    ONLINE_STORE_KEY_BASE itself never occurs as a real StoreKey, so every
+    ``<`` / ``<=`` / ``>`` / ``>=`` spelling agrees on the reachable domain.
+    """
+    return sk > ONLINE_STORE_KEY_BASE
+
+
+def is_physical_store_key(sk):
+    """Physical iff StoreKey <= ONLINE_STORE_KEY_BASE. Polymorphic (see above)."""
+    return sk <= ONLINE_STORE_KEY_BASE
 
 # Warehouse dimension
 ONLINE_WAREHOUSE_KEY: int = 9_000      # Dedicated online fulfillment warehouse
@@ -221,6 +239,43 @@ EMPLOYEE_PART_TIME_RATE_BY_ROLE: Dict[str, float] = {
 
 # FTE values for part-time employees (chosen at hire)
 EMPLOYEE_PART_TIME_FTE_VALUES = np.array([0.50, 0.75], dtype=np.float64)
+
+# Base pay scales with org level (executives out-earn staff). Salaried levels
+# (1–5) draw an annual salary within their band; BaseRate is the hourly
+# equivalent (annual / EMPLOYEE_ANNUAL_HOURS). Store staff (level 6) draw an
+# hourly BaseRate directly. The bands are non-overlapping in hourly-rate terms
+# so compensation is monotonic in org level — validated at import below.
+EMPLOYEE_ANNUAL_HOURS: float = 2080.0
+EMPLOYEE_SALARY_BAND_BY_LEVEL: Dict[int, Tuple[float, float]] = {
+    1: (460_000.0, 640_000.0),   # Chief Executive Officer
+    2: (250_000.0, 340_000.0),   # VP Operations
+    3: (155_000.0, 205_000.0),   # Regional Manager
+    4: (108_000.0, 142_000.0),   # District Manager
+    5: (64_000.0, 96_000.0),     # Store Manager / Online Sales Representative
+}
+EMPLOYEE_STAFF_HOURLY_BAND: Tuple[float, float] = (15.0, 28.0)  # org level 6
+
+
+def _validate_employee_comp_bands() -> None:
+    """Bands must be non-overlapping in hourly terms so BaseRate is monotonic in
+    org level (the min hourly of each level exceeds the max hourly below it)."""
+    hourly = {
+        lvl: (lo / EMPLOYEE_ANNUAL_HOURS, hi / EMPLOYEE_ANNUAL_HOURS)
+        for lvl, (lo, hi) in EMPLOYEE_SALARY_BAND_BY_LEVEL.items()
+    }
+    hourly[6] = EMPLOYEE_STAFF_HOURLY_BAND
+    for lvl in sorted(hourly)[:-1]:
+        cur_lo = hourly[lvl][0]
+        below_hi = hourly[lvl + 1][1]
+        if cur_lo <= below_hi:
+            raise ValidationError(
+                f"Employee comp band for org level {lvl} (>= {cur_lo:.2f}/hr) must "
+                f"exceed level {lvl + 1} (<= {below_hi:.2f}/hr) to keep BaseRate "
+                "monotonic in org level."
+            )
+
+
+_validate_employee_comp_bands()
 
 # Termination reasons with weights
 EMPLOYEE_TERMINATION_REASON_LABELS = np.array(

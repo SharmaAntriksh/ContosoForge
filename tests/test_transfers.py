@@ -8,19 +8,16 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from src.dimensions.employees.transfers import (
-    CoverageBudget,
+from src.dimensions.employees.assignment_core import (
     _adjust_budget,
-    _affected_dest_months,
-    _affected_source_months,
     _budget_violations,
     _build_coverage_budget,
-    _check_coverage_invariant,
     _is_transfer_feasible,
     _select_rollback_indices,
+    _surgical_rollback,
     _TransferRecord,
+    check_coverage_invariant,
 )
 
 
@@ -360,6 +357,94 @@ class TestRollbackSelection:
 
 
 # ---------------------------------------------------------------------------
+# Chain-aware rollback (an inner hop must not be rolled back on its own)
+# ---------------------------------------------------------------------------
+
+class TestRollbackChain:
+    """A rolled-back inner hop of a transfer chain must not orphan a later hop.
+
+    Regression guard: employee 101 is transferred 1->2->3 (a two-hop chain).
+    Only store 1's coverage collapses (its lone salesperson left), so the greedy
+    picker on its own would roll back just the first hop (1->2) — restoring the
+    full-length row at store 1 while the primary row at store 3 still exists,
+    i.e. two primaries and an overlapping window. The chain-aware rollback must
+    cascade and unwind the whole chain from its tail.
+    """
+
+    def _setup(self):
+        stores = _stores([1, 2, 3])
+        gstart, gend = pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31")
+        td1, td2 = pd.Timestamp("2024-02-15"), pd.Timestamp("2024-08-15")
+        open_d, close_d, rs, re_ = _date_dicts(stores)
+        # Pre-transfer bridge: 101 alone at store 1; fillers keep 2 and 3 covered.
+        base = _assignments([
+            (101, 1, "2024-01-01", "2024-12-31"),
+            (500, 2, "2024-01-01", "2024-12-31"),
+            (600, 3, "2024-01-01", "2024-12-31"),
+        ])
+        budget = _build_coverage_budget(
+            base, stores, ROLE, gstart, gend, open_d, close_d, rs, re_,
+        )
+        one_day = pd.Timedelta(days=1)
+
+        def _row(ek, sk, start, end, primary, status):
+            return {
+                "EmployeeKey": ek, "StoreKey": sk, "StartDate": start, "EndDate": end,
+                "FTE": 1.0, "RoleAtStore": "Sales Associate",
+                "IsPrimary": primary, "Status": status,
+            }
+
+        # Post-transfer bridge state for employee 101 (source rows truncated).
+        df = pd.DataFrame([
+            _row(101, 1, gstart, td1 - one_day, False, "Transferred"),
+            _row(101, 2, td1, td2 - one_day, False, "Transferred"),
+            _row(101, 3, td2, gend, True, "Active"),
+            _row(500, 2, gstart, gend, True, "Active"),
+            _row(600, 3, gstart, gend, True, "Active"),
+        ])
+        t1 = _TransferRecord(
+            employee_key=101, src_key=1, dst_key=2,
+            employee_start=gstart, transfer_date=td1,
+            original_end=gend, dst_end=gend, chain_next=1,
+        )
+        t2 = _TransferRecord(
+            employee_key=101, src_key=2, dst_key=3,
+            employee_start=td1, transfer_date=td2,
+            original_end=gend, dst_end=gend,
+        )
+        for rec in (t1, t2):
+            _adjust_budget(
+                budget, src_key=rec.src_key, dst_key=rec.dst_key,
+                employee_start=rec.employee_start, transfer_date=rec.transfer_date,
+                original_end_date=rec.original_end, dst_end_date=rec.dst_end,
+                direction=1,
+            )
+        return df, budget, [t1, t2]
+
+    def test_selection_cascades_whole_chain(self):
+        _df, budget, records = self._setup()
+        violations = _budget_violations(budget)
+        assert violations, "store 1 must be under-covered after the chain"
+        rb = _select_rollback_indices(records, budget, violations)
+        assert rb == [0, 1], "both hops of the chain must be selected, not just the inner one"
+
+    def test_rollback_leaves_one_primary_no_overlap(self):
+        df, budget, records = self._setup()
+        n = _surgical_rollback(df, budget, records)
+        assert n == 2
+        assert _budget_violations(budget) == []
+        emp = df[df["EmployeeKey"] == 101]
+        # Whole chain unwound: employee restored to a single full-length row at store 1.
+        assert len(emp) == 1
+        assert int(emp["StoreKey"].iloc[0]) == 1
+        assert bool(emp["IsPrimary"].iloc[0]) is True
+        assert pd.Timestamp(emp["EndDate"].iloc[0]) == pd.Timestamp("2024-12-31")
+        # Exactly one primary per employee, no overlaps left behind.
+        for _ek, grp in df.groupby("EmployeeKey"):
+            assert int(grp["IsPrimary"].astype(bool).sum()) == 1
+
+
+# ---------------------------------------------------------------------------
 # _check_coverage_invariant (now month-end aware)
 # ---------------------------------------------------------------------------
 
@@ -368,7 +453,7 @@ class TestCheckCoverageInvariant:
         stores = _stores([1])
         assigns = _assignments([(101, 1, "2024-01-01", "2024-12-31")])
         open_d, close_d, rs, re_ = _date_dicts(stores)
-        violations = _check_coverage_invariant(
+        violations = check_coverage_invariant(
             assigns, stores, ROLE,
             pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31"),
             open_d, close_d, rs, re_,
@@ -380,7 +465,7 @@ class TestCheckCoverageInvariant:
         stores = _stores([1])
         assigns = _assignments([(101, 1, "2024-01-01", "2024-06-15")])
         open_d, close_d, rs, re_ = _date_dicts(stores)
-        violations = _check_coverage_invariant(
+        violations = check_coverage_invariant(
             assigns, stores, ROLE,
             pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31"),
             open_d, close_d, rs, re_,

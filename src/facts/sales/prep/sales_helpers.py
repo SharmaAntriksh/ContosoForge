@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.exceptions import SalesError
+from src.defaults import ONLINE_SALES_REP_ROLE
 from src.utils.config_helpers import int_or as _int_or
 
 
@@ -58,6 +59,22 @@ def _cfg_get(cfg: Any, path: Sequence[str], default: Any = None) -> Any:
         else:
             return default
     return cur
+
+
+def resolve_salesperson_roles(cfg: Any) -> list:
+    """Single source of truth for which ``RoleAtStore`` values count as salespeople.
+
+    Prefers an explicit ``sales.salesperson_roles`` list; otherwise falls back to
+    the employees dimension's ``primary_sales_role`` plus the online rep role. Both
+    the coverage preflight and the sales dimension loader call this so they can
+    never disagree on the eligible set (which would desync coverage checks from the
+    bridge filter).
+    """
+    roles = _cfg_get(cfg, ["sales", "salesperson_roles"], None)
+    if isinstance(roles, list) and roles:
+        return list(roles)
+    primary = _cfg_get(cfg, ["employees", "store_assignments", "primary_sales_role"], None)
+    return [str(primary or "Sales Associate"), ONLINE_SALES_REP_ROLE]
 
 
 def _apply_cfg_default(current: Any, default: Any, cfg_value: Any) -> Any:

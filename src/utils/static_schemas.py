@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
-import re
 
 from src.tools.sql.dialect import ColumnSpec, SqlType
 
@@ -442,11 +441,17 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("StoreFormat", VARCHAR(20, not_null=True)),
         ("OwnershipType", VARCHAR(20, not_null=True)),
         ("RevenueClass", CHAR(1, not_null=True)),
+        # Status is an as-of-dataset-end snapshot (Open/Renovating/Closed). It is
+        # NOT valid for point-in-time queries — use the lifecycle date columns
+        # (OpeningDate, ClosingDate, RenovationStartDate/RenovationEndDate), which
+        # are the source of truth for a store's state on any given date.
         ("Status", VARCHAR(12, not_null=False)),
         ("GeographyKey", INT_NN),
         ("StoreZone", VARCHAR(20, not_null=True)),
         ("StoreDistrict", VARCHAR(20, not_null=True)),
         ("StoreRegion", VARCHAR(20, not_null=True)),
+        ("StoreDistrictId", INT(not_null=True)),
+        ("StoreRegionId", INT(not_null=True)),
         ("OpeningDate", DATE(not_null=False)),
         ("ClosingDate", DATE(not_null=False)),
         ("RenovationStartDate", DATE(not_null=False)),
@@ -455,6 +460,8 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("SquareFootage", INT(not_null=False)),
         ("EmployeeCount", INT(not_null=False)),
         ("StoreManager", VARCHAR(200, not_null=False)),
+        ("StoreManagerFirstName", VARCHAR(100, not_null=False)),
+        ("StoreManagerLastName", VARCHAR(100, not_null=False)),
         ("Phone", VARCHAR(24, not_null=False)),
         ("StoreEmail", VARCHAR(120, not_null=False)),
         ("StoreDescription", VARCHAR("MAX", not_null=False)),
@@ -675,6 +682,9 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("PayFrequency", INT_NN),
         ("BaseRate", DECIMAL(10, 2, not_null=True)),
         ("VacationHours", INT_NN),
+        # Status is an as-of-dataset-end snapshot (Active/Terminated). It is NOT
+        # valid for point-in-time queries — use HireDate/TerminationDate, which
+        # are the source of truth for whether an employee was active on a date.
         ("Status", VARCHAR(20, not_null=True)),
         ("IsSalesperson", BIT(not_null=True)),
         ("DepartmentName", VARCHAR(50, not_null=True)),

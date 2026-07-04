@@ -1,19 +1,60 @@
 """Tests for the dimension version store."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-import pytest
+import pandas as pd
 
 from src.versioning.version_store import (
     _compute_hash,
-    _version_file,
     delete_version,
+    frame_content_hash,
     load_version,
     save_version,
     should_regenerate,
 )
+
+
+# ===================================================================
+# frame_content_hash
+# ===================================================================
+
+class TestFrameContentHash:
+    def _frame(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            "StoreKey": pd.array([1, 2, 3, 10001], dtype="int32"),
+            "EmployeeCount": pd.array([5, 7, None, 1], dtype="Int64"),
+            "OpeningDate": pd.to_datetime(
+                ["2020-01-01", "2021-06-01", "2019-03-15", "2022-01-01"]
+            ),
+            "Name": ["a", "b", "c", "d"],
+        })
+
+    _COLS = ["StoreKey", "EmployeeCount", "OpeningDate", "Name", "Missing"]
+
+    def test_deterministic(self):
+        df = self._frame()
+        assert frame_content_hash(df, self._COLS) == frame_content_hash(df.copy(), self._COLS)
+
+    def test_row_order_independent(self):
+        df = self._frame()
+        shuffled = df.iloc[::-1].reset_index(drop=True)
+        assert frame_content_hash(df, self._COLS) == frame_content_hash(shuffled, self._COLS)
+
+    def test_content_sensitive(self):
+        df = self._frame()
+        changed = df.copy()
+        changed.loc[0, "EmployeeCount"] = 6
+        assert frame_content_hash(df, self._COLS) != frame_content_hash(changed, self._COLS)
+
+    def test_missing_columns_are_skipped(self):
+        df = self._frame()
+        # "Missing" absent from the frame must not raise; hash covers present cols.
+        h = frame_content_hash(df, self._COLS)
+        h_present = frame_content_hash(df, ["StoreKey", "EmployeeCount", "OpeningDate", "Name"])
+        assert h == h_present
+
+    def test_empty_frame(self):
+        empty = self._frame().iloc[:0]
+        assert frame_content_hash(empty, self._COLS).startswith("empty:0:")
 
 
 # ===================================================================

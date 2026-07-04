@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from src.engine.config.config import skip_order_blocks_feature
 from src.exceptions import DimensionError
 from src.utils.config_precedence import _is_random_mode
-from src.utils.logging_utils import info, skip, stage
+from src.utils.logging_utils import info, stage
 from src.versioning import delete_version
 
 from src.dimensions.geography import run_geography
@@ -176,7 +176,9 @@ DIM_SPECS: List[DimensionSpec] = [
         outputs_all=("stores.parquet",),
     ),
 
-    # 3.25) Warehouses (depends on stores + geography; modifies stores.parquet)
+    # 3.25) Warehouses — co-produced by the stores flow (single-writer
+    # stores.parquet); this spec keeps ordering + the --regen-dimensions
+    # warehouses entry point (run_warehouses re-invokes stores when stale).
     DimensionSpec(
         name="warehouses",
         cfg_key="warehouses",
@@ -437,10 +439,11 @@ def generate_dimensions(
     if force_set.intersection(date_dependent_names):
         force_set.update(date_dependent_names)
 
-    # Downstream cascade: if A is forced, force all dependents of A.
-    # This also handles the case where warehouses must regenerate when
-    # stores regenerates (warehouses modifies stores.parquet to add
-    # WarehouseKey — a fresh stores.parquet without it breaks inventory).
+    # Downstream cascade: if A is forced, force all dependents of A so consumers
+    # rebuild on fresh upstream data (e.g. forcing stores also forces employees).
+    # stores co-produces warehouses.parquet in a single write, so forcing stores
+    # keeps warehouses fresh too: run_stores re-stamps the warehouse version and
+    # the warehouses guard then skips.
     dependents = _dependents_map(DIM_SPECS)
     queue = list(force_set)
     while queue:
@@ -489,14 +492,18 @@ def generate_dimensions(
 
             regenerated[spec.name] = bool(regen)
 
+        # stores co-produces warehouses.parquet in its single write (WarehouseKey
+        # stamped inline), so a stores regen already refreshed the warehouse
+        # output — mark it regenerated so the propagation below neither re-runs
+        # the warehouse guard nor drops its just-written version.
+        if regenerated.get("stores"):
+            regenerated["warehouses"] = True
+
         # Propagate to downstream dims that consume a regenerated upstream but
-        # were skipped (their own version hash didn't change). The canonical
-        # case: warehouses MODIFIES stores.parquet to add WarehouseKey, so a
-        # stores regen (hash change, not force) leaves a fresh stores.parquet
-        # without WarehouseKey unless warehouses re-runs — which then breaks
-        # inventory. Other consumers (employees, ESA) likewise need fresh
-        # upstream data. Walk in topological order so each re-run cascades to
-        # its own dependents (stores -> warehouses -> employees -> ESA).
+        # were skipped (their own version hash didn't change) — e.g. employees
+        # and ESA need fresh stores data even when their own signature didn't
+        # move. Walk in topological order so each re-run cascades to its own
+        # dependents (stores -> employees -> ESA).
         for spec in specs_ordered:
             if regenerated.get(spec.name):
                 continue

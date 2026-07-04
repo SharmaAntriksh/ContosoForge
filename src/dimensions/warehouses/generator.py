@@ -23,18 +23,15 @@ import numpy as np
 import pandas as pd
 
 from src.defaults import (
-    ONLINE_STORE_KEY_BASE,
     ONLINE_WAREHOUSE_KEY,
     US_STATE_REGIONS,
     WAREHOUSE_TYPES,
     WAREHOUSE_TYPES_P,
+    is_online_store_key,
+    is_physical_store_key,
 )
 from src.exceptions import DimensionError
-from src.utils.logging_utils import info, skip, stage
-from src.utils.output_utils import write_parquet_with_date32
-from src.versioning import should_regenerate, save_version
-from src.utils.config_helpers import as_dict
-from src.utils.config_precedence import resolve_seed
+from src.utils.logging_utils import info
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +54,16 @@ def _enrich_with_geography(
     if not geo_path.exists():
         raise FileNotFoundError(f"Missing geography parquet: {geo_path}")
 
-    geo = pd.read_parquet(
-        str(geo_path), columns=["GeographyKey", "Country", "State"],
-    )
+    required = ["GeographyKey", "Country", "State"]
+    geo_all = pd.read_parquet(str(geo_path))
+    missing = [c for c in required if c not in geo_all.columns]
+    if missing:
+        raise DimensionError(
+            f"geography.parquet is missing column(s) required for warehouse "
+            f"geography enrichment: {missing}. Present: {sorted(geo_all.columns)}."
+        )
+
+    geo = geo_all[required]
     merged = stores_df.merge(geo, on="GeographyKey", how="left")
     merged["Country"] = merged["Country"].astype(str).fillna("Unknown")
     merged["State"] = merged["State"].astype(str).fillna("Unknown")
@@ -289,8 +293,8 @@ def generate_warehouse_table(
     rng = np.random.default_rng(seed)
 
     sk = stores_df["StoreKey"].astype(np.int64)
-    physical = stores_df[sk < ONLINE_STORE_KEY_BASE].copy()
-    online = stores_df[sk >= ONLINE_STORE_KEY_BASE].copy()
+    physical = stores_df[is_physical_store_key(sk)].copy()
+    online = stores_df[is_online_store_key(sk)].copy()
 
     if "StoreZone" not in physical.columns:
         raise DimensionError("stores.parquet missing StoreZone column")
@@ -344,6 +348,20 @@ def generate_warehouse_table(
         all_rows.extend(rows)
         all_store_to_wh.update(s2w)
 
+    # Physical warehouse keys are allocated contiguously from 1; the online FC
+    # below claims the reserved ONLINE_WAREHOUSE_KEY. On a large-enough store
+    # estate the running counter can reach that reserved key and silently
+    # collide (a duplicate WarehouseKey). `wk` is the next free key here, so the
+    # highest physical key emitted is `wk - 1`; guard against overlap loudly.
+    if wk > ONLINE_WAREHOUSE_KEY:
+        raise DimensionError(
+            f"Physical warehouse key allocation reached {wk - 1}, colliding with "
+            f"the reserved online fulfillment key ONLINE_WAREHOUSE_KEY="
+            f"{ONLINE_WAREHOUSE_KEY}. The store estate is too large for the "
+            f"current key layout; raise ONLINE_WAREHOUSE_KEY above the physical "
+            f"warehouse count."
+        )
+
     # --- Online fulfillment warehouse ---
     online_geo = _rep_geo_key(online.get("GeographyKey", pd.Series(dtype="int64")))
     all_rows.append({
@@ -383,60 +401,6 @@ def generate_warehouse_table(
     return warehouses_df, all_store_to_wh
 
 
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
-
-def run_warehouses(cfg, parquet_folder: Path) -> None:
-    """Generate and write the Warehouses dimension + update Stores with FK."""
-    parquet_folder = Path(parquet_folder)
-    out_path = parquet_folder / "warehouses.parquet"
-    stores_path = parquet_folder / "stores.parquet"
-
-    if not stores_path.exists():
-        raise FileNotFoundError(f"Missing stores parquet: {stores_path}")
-
-    stores_df = pd.read_parquet(str(stores_path))
-
-    wh_cfg = as_dict(getattr(cfg, "warehouses", None)) or {}
-    seed = resolve_seed(cfg, wh_cfg, fallback=42)
-    min_spw = int(wh_cfg.get("min_stores_per_warehouse", 15))
-    min_sow = int(wh_cfg.get("min_stores_for_own_warehouse", 5))
-
-    version_cfg = dict(wh_cfg)
-    version_cfg["schema_version"] = 3  # v3: resolved seed folded into version key
-    version_cfg["seed"] = int(seed)
-    version_cfg["_n_stores"] = len(stores_df)
-    if "StoreZone" in stores_df.columns:
-        version_cfg["_zones"] = sorted(stores_df["StoreZone"].unique().tolist())
-
-    if not should_regenerate("warehouses", version_cfg, out_path):
-        skip("Warehouses up-to-date")
-        return
-
-    with stage("Generating Warehouses"):
-        warehouses_df, store_to_wh = generate_warehouse_table(
-            stores_df, parquet_folder, seed=seed,
-            min_stores_per_warehouse=min_spw,
-            min_stores_for_own_warehouse=min_sow,
-        )
-
-        write_parquet_with_date32(
-            warehouses_df, out_path,
-            cast_all_datetime=False,
-            compression="snappy",
-        )
-
-        # Add WarehouseKey FK to stores and overwrite
-        stores_df["WarehouseKey"] = (
-            stores_df["StoreKey"].astype(int).map(store_to_wh).astype("Int32")
-        )
-        write_parquet_with_date32(
-            stores_df, stores_path,
-            cast_all_datetime=True,
-            compression="snappy",
-        )
-        info(f"Updated {stores_path.name} with WarehouseKey column")
-
-    save_version("warehouses", version_cfg, out_path)
-    info(f"Warehouses written: {out_path.name}")
+# ``run_warehouses`` lives in runner.py; re-exported here so
+# ``warehouses.generator.run_warehouses`` keeps resolving for existing importers.
+from src.dimensions.warehouses.runner import run_warehouses  # noqa: E402,F401

@@ -13,9 +13,6 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as _pq
 
-from src.defaults import (
-    ONLINE_SALES_REP_ROLE,
-)
 from src.exceptions import SalesError
 from src.utils.config_helpers import float_or as _float_or
 from src.utils.logging_utils import info, warn
@@ -27,6 +24,7 @@ from .sales_helpers import (
     _normalize_nullable_int_month,
     build_weighted_date_pool,
     load_parquet_df,
+    resolve_salesperson_roles,
 )
 from .scd2_grid import _build_scd2_customer_versions, _build_scd2_product_versions
 
@@ -658,10 +656,7 @@ def _load_employees(parquet_folder_p, cfg, end_date):
             f"Run dimension generation first."
         )
 
-    salesperson_roles = _cfg_get(cfg, ["sales", "salesperson_roles"], default=None)
-    if not (isinstance(salesperson_roles, list) and salesperson_roles):
-        primary = _cfg_get(cfg, ["employees", "store_assignments", "primary_sales_role"], default="Sales Associate")
-        salesperson_roles = [str(primary), ONLINE_SALES_REP_ROLE]
+    salesperson_roles = resolve_salesperson_roles(cfg)
 
     _esa_base_cols = [
         "EmployeeKey", "StoreKey", "StartDate", "EndDate",

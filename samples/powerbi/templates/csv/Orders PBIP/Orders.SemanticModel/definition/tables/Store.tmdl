@@ -100,6 +100,22 @@ table Store
 
 		annotation SummarizationSetBy = Automatic
 
+	column StoreManagerFirstName
+		dataType: string
+		lineageTag: a587f504-b29f-56ea-bb10-8913fc5814b8
+		summarizeBy: none
+		sourceColumn: StoreManagerFirstName
+
+		annotation SummarizationSetBy = Automatic
+
+	column StoreManagerLastName
+		dataType: string
+		lineageTag: c20b7b4b-3914-527f-bf22-5b40d1f4e743
+		summarizeBy: none
+		sourceColumn: StoreManagerLastName
+
+		annotation SummarizationSetBy = Automatic
+
 	column Phone
 		dataType: string
 		lineageTag: 8bfa479e-183c-47ca-8a2b-e23a1c8d3592
@@ -252,7 +268,7 @@ table Store
 		source =
 				let
 				    Source = FxReadCSVFile ( "dimensions", "stores" ),
-				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"StoreKey", Int64.Type}, {"StoreNumber", type text}, {"StoreName", type text}, {"StoreType", type text}, {"StoreFormat", type text}, {"OwnershipType", type text}, {"RevenueClass", type text}, {"Status", type text}, {"GeographyKey", Int64.Type}, {"StoreZone", type text}, {"StoreDistrict", type text}, {"StoreRegion", type text}, {"OpeningDate", type date}, {"ClosingDate", type date}, {"OpenFlag", Int64.Type}, {"SquareFootage", Int64.Type}, {"EmployeeCount", Int64.Type}, {"StoreManager", type text}, {"Phone", type text}, {"StoreEmail", type text}, {"StoreDescription", type text}, {"CloseReason", type text}, {"AvgTransactionValue", type number}, {"CustomerSatisfactionScore", type number}, {"InventoryTurnoverTarget", type number}, {"LastAuditScore", Int64.Type}, {"ShrinkageRatePct", type number}, {"WarehouseKey", Int64.Type}})
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"StoreKey", Int64.Type}, {"StoreNumber", type text}, {"StoreName", type text}, {"StoreType", type text}, {"StoreFormat", type text}, {"OwnershipType", type text}, {"RevenueClass", type text}, {"Status", type text}, {"GeographyKey", Int64.Type}, {"StoreZone", type text}, {"StoreDistrict", type text}, {"StoreRegion", type text}, {"OpeningDate", type date}, {"ClosingDate", type date}, {"OpenFlag", Int64.Type}, {"SquareFootage", Int64.Type}, {"EmployeeCount", Int64.Type}, {"StoreManager", type text}, {"StoreManagerFirstName", type text}, {"StoreManagerLastName", type text}, {"Phone", type text}, {"StoreEmail", type text}, {"StoreDescription", type text}, {"CloseReason", type text}, {"AvgTransactionValue", type number}, {"CustomerSatisfactionScore", type number}, {"InventoryTurnoverTarget", type number}, {"LastAuditScore", Int64.Type}, {"ShrinkageRatePct", type number}, {"WarehouseKey", Int64.Type}})
 				in
 				    #"Changed Type"
 

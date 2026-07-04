@@ -14,6 +14,7 @@ from .version_store import (
     load_version,
     delete_version,
     should_regenerate,
+    frame_content_hash,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "load_version",
     "delete_version",
     "should_regenerate",
+    "frame_content_hash",
 ]

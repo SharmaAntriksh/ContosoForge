@@ -103,10 +103,13 @@ class TestGenerateStoreTable:
         "StoreKey", "StoreNumber", "StoreName", "StoreType", "StoreFormat",
         "OwnershipType", "RevenueClass", "Status", "GeographyKey",
         "StoreZone", "StoreDistrict", "StoreRegion",
+        "StoreDistrictId", "StoreRegionId",
         "OpeningDate", "ClosingDate",
         "RenovationStartDate", "RenovationEndDate",
         "OpenFlag", "SquareFootage",
-        "EmployeeCount", "StoreManager", "Phone", "StoreEmail",
+        "EmployeeCount", "StoreManager",
+        "StoreManagerFirstName", "StoreManagerLastName",
+        "Phone", "StoreEmail",
         "StoreDescription", "CloseReason",
         "AvgTransactionValue", "CustomerSatisfactionScore",
         "InventoryTurnoverTarget", "LastAuditScore", "ShrinkageRatePct",
@@ -724,25 +727,24 @@ class TestGenerateEmployeeDimension:
         )
         assert df["EmployeeKey"].is_unique
 
-    def test_over_1000_staff_raises_not_silent_collision(self, people_pools):
-        """EMP-1: a store with >= STAFF_KEY_STORE_MULT staff would spill into the
-        next store's EmployeeKey band. Guard must raise loudly, not corrupt."""
+    def test_over_1000_staff_no_longer_collides(self, people_pools):
+        """Opaque sequential keys have no per-store slot band, so a store with
+        >1000 staff (which the old encoding rejected) now generates cleanly with
+        unique keys."""
         stores = self._make_stores(n=3)
-        # EmployeeCount includes the manager, so 1002 -> 1001 staff -> idx hits 1001.
-        stores.loc[1, "EmployeeCount"] = 1002
+        stores.loc[1, "EmployeeCount"] = 1002  # 1001 staff at one store
         stores["StoreType"] = "Supermarket"  # ensure all physical
-        with pytest.raises(DimensionError, match="slots per store"):
-            generate_employee_dimension(
-                stores=stores,
-                seed=42,
-                global_start=pd.Timestamp("2021-01-01"),
-                global_end=pd.Timestamp("2025-12-31"),
-                people_pools=people_pools,
-            )
+        df = generate_employee_dimension(
+            stores=stores,
+            seed=42,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+            people_pools=people_pools,
+        )
+        assert df["EmployeeKey"].is_unique
 
     def test_just_under_1000_staff_stays_unique(self, people_pools):
-        """EMP-1 boundary: 999 staff/store (idx max 999) stays within the per-store
-        slot band -> no collision, keys still unique."""
+        """Large per-store staff counts (999 each) still produce unique keys."""
         stores = self._make_stores(n=3)
         stores["EmployeeCount"] = 1000  # 999 staff each
         stores["StoreType"] = "Supermarket"
@@ -848,7 +850,6 @@ class TestGenerateEmployeeDimension:
 
     def test_every_store_has_sa_hired_before_start(self, people_pools):
         """Every store should have at least one SA hired at or before global_start."""
-        from src.dimensions.employees import STAFF_KEY_BASE
         global_start = pd.Timestamp("2021-01-01")
         stores = self._make_stores()
         df = generate_employee_dimension(
@@ -858,7 +859,7 @@ class TestGenerateEmployeeDimension:
             global_end=pd.Timestamp("2025-12-31"),
             people_pools=people_pools,
         )
-        sa = df[(df["Title"] == "Sales Associate") & (df["EmployeeKey"] >= STAFF_KEY_BASE)]
+        sa = df[df["Title"] == "Sales Associate"]
         if len(sa) > 0:
             for sk in sa["StoreKey"].unique():
                 store_sa = sa[sa["StoreKey"] == sk]
@@ -897,6 +898,98 @@ class TestGenerateEmployeeDimension:
         assert df["EmployeeName"].notna().all()
         assert (df["EmployeeName"].str.len() > 0).all()
 
+    def test_nan_identity_key_raises(self):
+        """A NaN identity key must raise DimensionError, not silently become 0.
+
+        EmployeeKey is never legitimately NaN. StoreKey is NaN only for
+        corporate/region/district rows (OrgUnitType != 'Store'); a store-level
+        row with a NaN StoreKey is corruption.
+        """
+        from src.dimensions.employees.hr import _assert_identity_keys
+
+        # NaN EmployeeKey -> always raises
+        with pytest.raises(DimensionError, match="EmployeeKey"):
+            _assert_identity_keys(pd.DataFrame({
+                "EmployeeKey": [1.0, np.nan],
+                "StoreKey": [5, 6],
+                "OrgUnitType": ["Store", "Store"],
+            }))
+
+        # NaN StoreKey on a store-level row -> raises
+        with pytest.raises(DimensionError, match="StoreKey"):
+            _assert_identity_keys(pd.DataFrame({
+                "EmployeeKey": [1, 2],
+                "StoreKey": [5.0, np.nan],
+                "OrgUnitType": ["Store", "Store"],
+            }))
+
+        # NaN StoreKey on a corporate row is legitimate -> no raise
+        _assert_identity_keys(pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "StoreKey": [5.0, np.nan],
+            "OrgUnitType": ["Store", "Corporate"],
+        }))
+
+    def test_birthdate_at_least_18_at_hire(self):
+        """Every employee must be >= 18 years old at their HireDate.
+
+        Whole-year age subtraction leaves age-18 rows whose random birthday
+        falls after the hire month/day only 17 at hire; the clamp fixes that.
+        An early-in-year hire maximizes the exposure.
+        """
+        from src.dimensions.employees.hr import _enrich_employee_hr_columns
+
+        n = 3000
+        hire = pd.Timestamp("2020-01-10")
+        df = pd.DataFrame({
+            "EmployeeKey": np.arange(1, n + 1, dtype=np.int64),
+            "Title": ["Sales Associate"] * n,
+            "OrgLevel": np.full(n, 6, dtype=np.int64),  # youngest cohort -> most age-18 clips
+            "HireDate": [hire] * n,
+            "TerminationDate": [pd.NaT] * n,
+            "IsActive": [True] * n,
+            "FirstName": ["Test"] * n,
+            "LastName": ["Person"] * n,
+        })
+        out = _enrich_employee_hr_columns(
+            df, np.random.default_rng(7), global_end=pd.Timestamp("2025-12-31"),
+        )
+        latest_birth = pd.to_datetime(out["HireDate"]) - pd.DateOffset(years=18)
+        assert (pd.to_datetime(out["BirthDate"]) <= latest_birth).all(), (
+            "some employees are younger than 18 at hire"
+        )
+
+    def test_vacation_accrual_stops_at_termination(self):
+        """A terminated employee accrues vacation only through TerminationDate,
+        not to the end of the dataset window."""
+        from src.dimensions.employees.hr import _enrich_employee_hr_columns
+
+        hire = pd.Timestamp("2010-01-01")
+        global_end = pd.Timestamp("2025-12-31")
+        n = 400
+        # Alternate active / early-terminated rows, identical otherwise.
+        term = [pd.NaT if i % 2 == 0 else pd.Timestamp("2011-01-01") for i in range(n)]
+        df = pd.DataFrame({
+            "EmployeeKey": np.arange(1, n + 1, dtype=np.int64),
+            "Title": ["Store Manager"] * n,
+            "OrgLevel": np.full(n, 5, dtype=np.int64),
+            "HireDate": [hire] * n,
+            "TerminationDate": term,
+            "IsActive": [i % 2 == 0 for i in range(n)],
+            "FirstName": ["Test"] * n,
+            "LastName": ["Person"] * n,
+        })
+        out = _enrich_employee_hr_columns(
+            df, np.random.default_rng(3), global_end=global_end,
+        )
+        vac = out["VacationHours"].astype(float).to_numpy()
+        active = vac[0::2]
+        terminated = vac[1::2]
+        # ~16 years of accrual vs ~1 year: terminated employees bank far less,
+        # and the tenure gap dwarfs the ±10h noise so the bands never overlap.
+        assert terminated.mean() < active.mean()
+        assert terminated.max() < active.min()
+
 
 # ===================================================================
 # SALESPERSON COVERAGE INVARIANT (employees -> bridge)
@@ -908,8 +1001,8 @@ class TestSalespersonCoverageInvariant:
     Without this, the Sales fact has no eligible salesperson for those
     (store, date) rows and emits EmployeeKey=-1 — an orphan FK that breaks the
     generated SQL constraints. Exercises the employee-generator backstop
-    (Layer 2) end-to-end through the assignments bridge, including the
-    production EmployeeKey->StoreKey decode path.
+    (Layer 2) end-to-end through the assignments bridge, which reads the
+    authoritative StoreKey column.
     """
 
     def _physical_stores(self, n=6, seed=7):
@@ -935,11 +1028,8 @@ class TestSalespersonCoverageInvariant:
             global_end=global_end,
             people_pools=people_pools,
         )
-        # Drop StoreKey to force the production decode path (run_employee_store_
-        # assignments reads employees.parquet without the StoreKey column).
-        emp_for_bridge = emp.drop(columns=["StoreKey"])
         bridge = generate_employee_store_assignments(
-            employees=emp_for_bridge,
+            employees=emp,
             global_start=global_start,
             global_end=global_end,
         )
@@ -947,8 +1037,6 @@ class TestSalespersonCoverageInvariant:
         covered = set(sp["StoreKey"].astype(int).unique())
         for sk in stores["StoreKey"].astype(int):
             assert sk in covered, f"Physical store {sk} has no salesperson in bridge"
-        # No salesperson row should ever resolve to a Store Manager key band.
-        assert (sp["EmployeeKey"].astype(np.int64) >= 40_000_000).all()
 
     def test_employee_count_matches_roster_size(self, people_pools):
         """Regression: through the normal store->employee path, every store's

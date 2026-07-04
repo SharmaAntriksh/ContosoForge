@@ -291,7 +291,7 @@ CLI flags > config.yaml values (one-time, not persisted).
 
 6. **Shared arrays:** Dimensions are loaded into numpy shared memory for zero-copy worker access. If adding new dimension columns, update `SharedArrayGroup` initialization.
 
-7. **Cross-dimension file writes:** Two places modify another dimension's output: (a) `warehouses/generator.py` adds `WarehouseKey` to `stores.parquet` — the dimension runner auto-forces warehouses when stores regenerates to prevent a missing-column crash in inventory; (b) `inventory/runner.py` overwrites `product_profile.parquet` to update ABCClassification from actual sales volume (fact-to-dimension write, safe due to sequential execution). Do not add more cross-writes without updating the cascade logic in `dimensions_runner.py`.
+7. **Cross-dimension file writes:** `inventory/runner.py` overwrites `product_profile.parquet` to update ABCClassification from actual sales volume (fact-to-dimension write, safe due to sequential execution). Do not add more cross-writes without updating the cascade logic in `dimensions_runner.py`. (Warehouses no longer cross-writes `stores.parquet`: the stores flow (`run_stores`) allocates warehouses on the in-memory store frame, stamps `WarehouseKey` inline, and writes both `stores.parquet` and `warehouses.parquet` once with the stores-configured writer settings. `run_warehouses` is a thin guard that re-invokes the stores flow when `warehouses.parquet` is stale, e.g. `--regen-dimensions warehouses`.)
 
 8. **Scratch vs final output:** Workers write to scratch (`data/`), then packaging copies to final timestamped folder (`generated_datasets/`). Interrupted runs may leave scratch behind.
 

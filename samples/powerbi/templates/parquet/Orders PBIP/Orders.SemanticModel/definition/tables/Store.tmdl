@@ -160,6 +160,22 @@ table Store
 
 		annotation SummarizationSetBy = Automatic
 
+	column StoreManagerFirstName
+		dataType: string
+		lineageTag: bc24bb57-9b94-5f06-9bc6-3620344846e0
+		summarizeBy: none
+		sourceColumn: StoreManagerFirstName
+
+		annotation SummarizationSetBy = Automatic
+
+	column StoreManagerLastName
+		dataType: string
+		lineageTag: 6b0cf1fd-13cb-56df-ac33-e4d65156c824
+		summarizeBy: none
+		sourceColumn: StoreManagerLastName
+
+		annotation SummarizationSetBy = Automatic
+
 	column Phone
 		dataType: string
 		lineageTag: 0b009cf0-68ba-4462-a6b4-f2c89103e23c

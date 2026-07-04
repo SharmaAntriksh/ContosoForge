@@ -9,11 +9,14 @@ Design invariants:
   - No date gaps: old assignment ends the day before new one starts.
   - Managers (30M), online reps (50M), and corporate hierarchy never transfer.
   - Only staff in ``salesperson_roles`` are eligible.
+
+The coverage bookkeeping and surgical rollback live in
+``src.dimensions.employees.assignment_core``; the "is this store open" rule
+lives in ``src.dimensions.stores.lifecycle`` (dates are truth).
 """
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -22,57 +25,28 @@ import pandas as pd
 from src.defaults import (
     EMPLOYEE_TRANSFER_REASON_LABELS,
     EMPLOYEE_TRANSFER_REASON_PROBS,
-    ONLINE_STORE_KEY_BASE,
-    ONLINE_EMP_KEY_BASE,
+    is_physical_store_key,
 )
-from src.dimensions.employees.generator import STAFF_KEY_BASE
+from src.dimensions.employees.assignment_core import (
+    CoverageBudget,
+    _TransferRecord,
+    _adjust_budget,
+    _budget_violations,
+    _build_coverage_budget,
+    _is_transfer_feasible,
+    _surgical_rollback,
+)
+from src.dimensions.stores.lifecycle import (
+    build_region_store_map,
+    build_store_date_maps,
+    store_open_on,
+)
 from src.utils.logging_utils import info, warn
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _store_is_open(
-    store_key: int,
-    on_date: pd.Timestamp,
-    open_dates: Dict[int, pd.Timestamp],
-    close_dates: Dict[int, pd.Timestamp],
-    reno_start_dates: Optional[Dict[int, pd.Timestamp]] = None,
-    reno_end_dates: Optional[Dict[int, pd.Timestamp]] = None,
-) -> bool:
-    """True if *store_key* is open on *on_date*.
-
-    A store is closed if it hasn't opened yet, has permanently closed,
-    or is within its renovation window [reno_start, reno_end).
-    """
-    opened = open_dates.get(store_key)
-    if opened is not None and on_date < opened:
-        return False
-    closed = close_dates.get(store_key)
-    if closed is not None and on_date >= closed:
-        return False
-    # Renovation window: store is closed during [start, end)
-    if reno_start_dates and reno_end_dates:
-        rs = reno_start_dates.get(store_key)
-        re = reno_end_dates.get(store_key)
-        if rs is not None and re is not None and rs <= on_date < re:
-            return False
-    return True
-
-
-def _build_region_store_map(
-    stores: pd.DataFrame,
-) -> Dict[str, List[int]]:
-    """Map StoreRegion -> list of physical StoreKeys."""
-    physical = stores[stores["StoreKey"] <= ONLINE_STORE_KEY_BASE]
-    if "StoreRegion" not in physical.columns:
-        return {}
-    result: Dict[str, List[int]] = {}
-    for region, grp in physical.groupby("StoreRegion"):
-        result[str(region)] = grp["StoreKey"].tolist()
-    return result
-
 
 def _build_open_store_candidates(
     region_stores: Dict[str, List[int]],
@@ -93,8 +67,8 @@ def _build_open_store_candidates(
     """
     all_open = np.array([
         sk for sk in all_physical_keys
-        if _store_is_open(sk, year_start, open_dates, close_dates, reno_start_dates, reno_end_dates)
-        and _store_is_open(sk, year_end, open_dates, close_dates, reno_start_dates, reno_end_dates)
+        if store_open_on(sk, year_start, open_dates, close_dates, reno_start_dates, reno_end_dates)
+        and store_open_on(sk, year_end, open_dates, close_dates, reno_start_dates, reno_end_dates)
     ], dtype=np.int32)
     all_open_set = set(all_open)
 
@@ -105,207 +79,6 @@ def _build_open_store_candidates(
             region_open[region] = arr
 
     return region_open, all_open
-
-
-# ---------------------------------------------------------------------------
-# Coverage budget — replaces the per-candidate guard with constraint-aware
-# selection. The budget tracks per-(physical_store, month) salesperson coverage
-# and per-cell constrained mask. Each candidate transfer is rejected if it
-# would drop a constrained source-month below ``min_coverage``.
-# ---------------------------------------------------------------------------
-
-@dataclass
-class CoverageBudget:
-    """Per-(store, month) salesperson coverage matrix used to gate transfers.
-
-    A salesperson assignment counts toward ``cov[s, m]`` only when it covers
-    the *full* month — ``StartDate <= month_start AND EndDate >= month_end``,
-    with the last month_end clamped to ``global_end``. This single condition
-    enforces both month-start and month-end staffing in one matrix.
-
-    A cell is *constrained* when the store is open through that month and is
-    not within a renovation window. Renovation, pre-open, and post-close
-    cells are unconstrained — coverage may be 0 there without violation.
-    """
-    cov: np.ndarray
-    constrained: np.ndarray
-    store_idx_to_key: np.ndarray
-    key_to_store_idx: Dict[int, int]
-    month_starts: np.ndarray
-    month_ends: np.ndarray
-    min_coverage: int = 1
-
-
-def _build_coverage_budget(
-    assignments: pd.DataFrame,
-    stores: pd.DataFrame,
-    salesperson_roles: List[str],
-    global_start: pd.Timestamp,
-    global_end: pd.Timestamp,
-    open_dates: Dict[int, pd.Timestamp],
-    close_dates: Dict[int, pd.Timestamp],
-    reno_start_dates: Optional[Dict[int, pd.Timestamp]] = None,
-    reno_end_dates: Optional[Dict[int, pd.Timestamp]] = None,
-    min_coverage: int = 1,
-) -> CoverageBudget:
-    """Build the initial coverage matrix from the pre-transfer assignments."""
-    month_starts_ts = pd.date_range(global_start, global_end, freq="MS")
-    if len(month_starts_ts) == 0:
-        month_starts_ts = pd.DatetimeIndex([pd.Timestamp(global_start).normalize()])
-
-    # last day of each month, clamping the final month to global_end
-    month_ends_ts_raw = month_starts_ts + pd.offsets.MonthEnd(0)
-    global_end_ts = pd.Timestamp(global_end).normalize()
-    if month_ends_ts_raw[-1] > global_end_ts:
-        month_ends_ts = pd.DatetimeIndex(
-            list(month_ends_ts_raw[:-1]) + [global_end_ts]
-        )
-    else:
-        month_ends_ts = month_ends_ts_raw
-
-    month_starts = month_starts_ts.values.astype("datetime64[ns]")
-    month_ends = month_ends_ts.values.astype("datetime64[ns]")
-    n_months = len(month_starts)
-
-    # Physical store axis (online stores excluded from coverage matrix)
-    physical_mask = stores["StoreKey"].to_numpy() <= ONLINE_STORE_KEY_BASE
-    physical_keys = stores.loc[physical_mask, "StoreKey"].astype(np.int32).to_numpy()
-    n_stores = len(physical_keys)
-    key_to_store_idx: Dict[int, int] = {int(k): i for i, k in enumerate(physical_keys)}
-
-    cov = np.zeros((n_stores, n_months), dtype=np.int32)
-
-    # Vectorised cov build: for each salesperson row, the run of months it
-    # fully covers is contiguous — its first month_idx is the smallest m where
-    # m_start >= start, last is the largest m where m_end <= end. Use
-    # searchsorted on both axes and accumulate via np.add.at.
-    sp_rows = assignments[assignments["RoleAtStore"].isin(salesperson_roles)]
-    if not sp_rows.empty and n_stores > 0 and n_months > 0:
-        sp_start = sp_rows["StartDate"].values.astype("datetime64[ns]")
-        sp_end = sp_rows["EndDate"].values.astype("datetime64[ns]")
-        sp_sk = sp_rows["StoreKey"].astype(int).to_numpy()
-        sidx_arr = np.fromiter(
-            (key_to_store_idx.get(int(k), -1) for k in sp_sk),
-            dtype=np.int64, count=len(sp_sk),
-        )
-        first_m = np.searchsorted(month_starts, sp_start, side="left")
-        last_m = np.searchsorted(month_ends, sp_end, side="right") - 1
-        valid = (sidx_arr >= 0) & (first_m <= last_m) & (last_m < n_months) & (first_m >= 0)
-        for i in np.where(valid)[0]:
-            cov[sidx_arr[i], first_m[i]:last_m[i] + 1] += 1
-
-    # Vectorised constrained mask: build per-store dates as 1-D arrays then
-    # broadcast against the month_starts / month_ends 1-D arrays. Sentinels
-    # must stay inside the ns range (~1677-2262) to avoid overflow wraparound.
-    far_past = np.datetime64("1700-01-01", "ns")
-    far_future = np.datetime64("2200-01-01", "ns")
-    open_arr = np.array(
-        [np.datetime64(open_dates[int(k)], "ns") if int(k) in open_dates else far_past
-         for k in physical_keys],
-        dtype="datetime64[ns]",
-    )
-    close_arr = np.array(
-        [np.datetime64(close_dates[int(k)], "ns") if int(k) in close_dates else far_future
-         for k in physical_keys],
-        dtype="datetime64[ns]",
-    )
-    reno_s_arr = np.full(n_stores, far_future, dtype="datetime64[ns]")
-    reno_e_arr = np.full(n_stores, far_past, dtype="datetime64[ns]")
-    if reno_start_dates and reno_end_dates:
-        for i, k in enumerate(physical_keys):
-            ki = int(k)
-            if ki in reno_start_dates and ki in reno_end_dates:
-                reno_s_arr[i] = np.datetime64(reno_start_dates[ki], "ns")
-                reno_e_arr[i] = np.datetime64(reno_end_dates[ki], "ns")
-
-    opened = month_starts[None, :] >= open_arr[:, None]
-    not_closed = month_ends[None, :] < close_arr[:, None]
-    renovating = (month_starts[None, :] < reno_e_arr[:, None]) & (month_ends[None, :] >= reno_s_arr[:, None])
-    constrained = opened & not_closed & ~renovating
-
-    return CoverageBudget(
-        cov=cov,
-        constrained=constrained,
-        store_idx_to_key=physical_keys,
-        key_to_store_idx=key_to_store_idx,
-        month_starts=month_starts,
-        month_ends=month_ends,
-        min_coverage=min_coverage,
-    )
-
-
-def _affected_source_months(
-    budget: CoverageBudget,
-    employee_start: np.datetime64,
-    transfer_date_ns: np.datetime64,
-    original_end_ns: np.datetime64,
-) -> np.ndarray:
-    """Boolean mask of months at the source store that the OLD assignment fully
-    covered but the truncated (post-transfer) assignment no longer covers.
-
-    Old full coverage: ``start <= m_start AND old_end >= m_end``.
-    New coverage stops at ``transfer_date - 1``, so the assignment still fully
-    covers a month iff ``m_end < transfer_date``. Loss = old AND NOT new =
-    ``start <= m_start AND m_end <= old_end AND m_end >= transfer_date``.
-    """
-    return (
-        (budget.month_starts >= employee_start)
-        & (budget.month_ends <= original_end_ns)
-        & (budget.month_ends >= transfer_date_ns)
-    )
-
-
-def _affected_dest_months(
-    budget: CoverageBudget,
-    transfer_date_ns: np.datetime64,
-    dst_end_ns: np.datetime64,
-) -> np.ndarray:
-    """Boolean mask of months at the destination store that the new assignment
-    fully covers (``m_start >= transfer_date AND m_end <= dst_end``)."""
-    return (
-        (budget.month_starts >= transfer_date_ns)
-        & (budget.month_ends <= dst_end_ns)
-    )
-
-
-def _is_transfer_feasible(
-    budget: CoverageBudget,
-    src_key: int,
-    employee_start: pd.Timestamp,
-    transfer_date: pd.Timestamp,
-    original_end_date: pd.Timestamp,
-) -> Tuple[bool, List[Tuple[int, int]]]:
-    """True iff removing one salesperson from ``src_key`` for the months whose
-    coverage is lost would keep every constrained source-month at >= min_coverage.
-
-    Returns ``(feasible, violators)`` where violators is a list of
-    ``(store_idx, month_idx)`` cells that would drop below threshold.
-    """
-    src_idx = budget.key_to_store_idx.get(int(src_key))
-    if src_idx is None:
-        return True, []
-
-    start_ns = np.datetime64(employee_start, "ns")
-    td_ns = np.datetime64(transfer_date, "ns")
-    end_ns = np.datetime64(original_end_date, "ns")
-
-    loss_mask = _affected_source_months(budget, start_ns, td_ns, end_ns)
-    if not loss_mask.any():
-        return True, []
-
-    cov_slice = budget.cov[src_idx, loss_mask]
-    constrained_slice = budget.constrained[src_idx, loss_mask]
-    would_drop_below = (cov_slice - 1 < budget.min_coverage) & constrained_slice
-    if not would_drop_below.any():
-        return True, []
-
-    affected_indices = np.where(loss_mask)[0]
-    violators = [
-        (src_idx, int(affected_indices[i]))
-        for i in range(len(affected_indices))
-        if would_drop_below[i]
-    ]
-    return False, violators
 
 
 def _clamp_dst_end(
@@ -351,156 +124,10 @@ def _clamp_dst_end(
     return new_end, new_status, False
 
 
-def _adjust_budget(
-    budget: CoverageBudget,
-    src_key: int,
-    dst_key: int,
-    employee_start: pd.Timestamp,
-    transfer_date: pd.Timestamp,
-    original_end_date: pd.Timestamp,
-    dst_end_date: pd.Timestamp,
-    direction: int,
-) -> None:
-    """Apply (``direction=1``) or revert (``direction=-1``) one transfer's
-    effect on the coverage matrix."""
-    start_ns = np.datetime64(employee_start, "ns")
-    td_ns = np.datetime64(transfer_date, "ns")
-    src_end_ns = np.datetime64(original_end_date, "ns")
-    dst_end_ns = np.datetime64(dst_end_date, "ns")
-
-    src_idx = budget.key_to_store_idx.get(int(src_key))
-    if src_idx is not None:
-        loss_mask = _affected_source_months(budget, start_ns, td_ns, src_end_ns)
-        if loss_mask.any():
-            budget.cov[src_idx, loss_mask] -= direction
-
-    dst_idx = budget.key_to_store_idx.get(int(dst_key))
-    if dst_idx is not None:
-        gain_mask = _affected_dest_months(budget, td_ns, dst_end_ns)
-        if gain_mask.any():
-            budget.cov[dst_idx, gain_mask] += direction
-
-
-def _budget_violations(budget: CoverageBudget) -> List[Tuple[int, int]]:
-    """Return list of constrained (store_idx, month_idx) cells with cov < min."""
-    bad = budget.constrained & (budget.cov < budget.min_coverage)
-    if not bad.any():
-        return []
-    s_idx, m_idx = np.where(bad)
-    return list(zip(s_idx.tolist(), m_idx.tolist()))
-
-
-@dataclass
-class _TransferRecord:
-    """Per-transfer book-keeping used for surgical rollback."""
-    employee_key: int
-    src_key: int
-    dst_key: int
-    employee_start: pd.Timestamp
-    transfer_date: pd.Timestamp
-    original_end: pd.Timestamp
-    dst_end: pd.Timestamp
-    rolled_back: bool = False
-
-
-def _select_rollback_indices(
-    transfer_records: List[_TransferRecord],
-    budget: CoverageBudget,
-    violations: List[Tuple[int, int]],
-) -> List[int]:
-    """Pick the smallest set of transfers whose rollback covers all violations.
-
-    Greedy: walk transfers most-recent-first and pick any whose source-loss
-    months intersect a remaining violation. Transfers whose source store has
-    no violations are skipped without computing the loss mask.
-    """
-    if not violations:
-        return []
-    violation_set = set(violations)
-    violated_src_idx = {s for s, _ in violation_set}
-    rollback: set[int] = set()
-    for ti in range(len(transfer_records) - 1, -1, -1):
-        rec = transfer_records[ti]
-        if rec.rolled_back:
-            continue
-        src_idx = budget.key_to_store_idx.get(int(rec.src_key))
-        if src_idx is None or src_idx not in violated_src_idx:
-            continue
-        loss_mask = _affected_source_months(
-            budget,
-            np.datetime64(rec.employee_start, "ns"),
-            np.datetime64(rec.transfer_date, "ns"),
-            np.datetime64(rec.original_end, "ns"),
-        )
-        loss_months = np.where(loss_mask)[0]
-        hit = any((src_idx, int(m)) in violation_set for m in loss_months)
-        if not hit:
-            continue
-        rollback.add(ti)
-        for m in loss_months:
-            violation_set.discard((src_idx, int(m)))
-        if not violation_set:
-            break
-    return sorted(rollback)
-
-
 def _format_rejection_summary(rejections: Dict[str, int], fallback: str) -> str:
     if not rejections:
         return fallback
     return ", ".join(f"{count} {reason}" for reason, count in sorted(rejections.items()))
-
-
-def _surgical_rollback(
-    df: pd.DataFrame,
-    budget: CoverageBudget,
-    transfer_records: List[_TransferRecord],
-    max_attempts: int = 3,
-) -> int:
-    """Roll back the smallest set of transfers needed to clear violations.
-
-    Mutates ``df`` in place and updates ``budget``/``transfer_records``.
-    Returns the number of transfers that were rolled back.
-    """
-    rolled_back_count = 0
-    for _ in range(max_attempts):
-        violations = _budget_violations(budget)
-        if not violations:
-            break
-        rb_indices = _select_rollback_indices(transfer_records, budget, violations)
-        if not rb_indices:
-            break
-
-        # Build a once-per-attempt index for O(1) source-row and dest-row lookup
-        # instead of repeated full-DataFrame boolean scans.
-        sig_to_idx: Dict[Tuple[int, int, pd.Timestamp], int] = {}
-        for idx, row in zip(df.index, df.itertuples(index=False)):
-            sig_to_idx[(int(row.EmployeeKey), int(row.StoreKey), row.StartDate)] = idx
-
-        drop_idx: List[int] = []
-        for ti in rb_indices:
-            rec = transfer_records[ti]
-            if rec.rolled_back:
-                continue
-            _adjust_budget(
-                budget, rec.src_key, rec.dst_key,
-                rec.employee_start, rec.transfer_date, rec.original_end, rec.dst_end,
-                direction=-1,
-            )
-            src_row = sig_to_idx.get((rec.employee_key, rec.src_key, rec.employee_start))
-            if src_row is not None:
-                df.at[src_row, "EndDate"] = rec.original_end
-                df.at[src_row, "IsPrimary"] = True
-                df.at[src_row, "Status"] = "Active"
-            dst_row = sig_to_idx.get((rec.employee_key, rec.dst_key, rec.transfer_date))
-            if dst_row is not None:
-                drop_idx.append(dst_row)
-            rec.rolled_back = True
-            rolled_back_count += 1
-
-        if drop_idx:
-            df.drop(index=drop_idx, inplace=True)
-            df.reset_index(drop=True, inplace=True)
-    return rolled_back_count
 
 
 def _log_violation_details(
@@ -565,52 +192,31 @@ def apply_transfers(
     if salesperson_roles is None:
         salesperson_roles = ["Sales Associate"]
 
-    sp_roles_set = set(salesperson_roles)
-
     # --- Store metadata ---------------------------------------------------
     sk_arr = stores["StoreKey"].astype(np.int32).to_numpy()
-    open_dates: Dict[int, pd.Timestamp] = {}
-    close_dates: Dict[int, pd.Timestamp] = {}
+    open_dates, close_dates, reno_start_dates, reno_end_dates = build_store_date_maps(stores)
+
     store_region: Dict[int, str] = {}
-
-    if "OpeningDate" in stores.columns:
-        od = pd.to_datetime(stores["OpeningDate"], errors="coerce")
-        for sk, dt in zip(sk_arr, od):
-            if pd.notna(dt):
-                open_dates[int(sk)] = dt
-
-    if "ClosingDate" in stores.columns:
-        cd = pd.to_datetime(stores["ClosingDate"], errors="coerce")
-        for sk, dt in zip(sk_arr, cd):
-            if pd.notna(dt):
-                close_dates[int(sk)] = dt
-
-    reno_start_dates: Dict[int, pd.Timestamp] = {}
-    reno_end_dates: Dict[int, pd.Timestamp] = {}
-    if "RenovationStartDate" in stores.columns:
-        rs = pd.to_datetime(stores["RenovationStartDate"], errors="coerce")
-        re = pd.to_datetime(stores["RenovationEndDate"], errors="coerce")
-        reno_mask = rs.notna() & re.notna()
-        for sk, rsd, red in zip(sk_arr[reno_mask], rs[reno_mask], re[reno_mask]):
-            reno_start_dates[int(sk)] = rsd
-            reno_end_dates[int(sk)] = red
-
     if "StoreRegion" in stores.columns:
         sr = stores["StoreRegion"].astype(str).to_numpy()
         for sk, region in zip(sk_arr, sr):
             store_region[int(sk)] = region
 
-    region_stores = _build_region_store_map(stores)
+    region_stores = build_region_store_map(stores)
 
     # All physical store keys (for cross-region fallback)
     all_physical_keys = [
-        int(sk) for sk in sk_arr if sk <= ONLINE_STORE_KEY_BASE
+        int(sk) for sk in sk_arr if is_physical_store_key(sk)
     ]
 
     df = assignments.copy()
     transfer_count = 0
     rejections: Dict[str, int] = defaultdict(int)
     transfer_records: List[_TransferRecord] = []
+    # Index of the last transfer appended for each employee, so a new hop links
+    # its predecessor's chain_next (a chain forms when an employee is transferred
+    # again in a later year). Drives chain-aware rollback.
+    last_record_by_emp: Dict[int, int] = {}
 
     budget = _build_coverage_budget(
         df, stores, salesperson_roles, global_start, global_end,
@@ -626,15 +232,22 @@ def apply_transfers(
         year_end = pd.Timestamp(f"{year}-12-31")
 
         # Eligible: staff employees with active primary assignments
-        # and sufficient tenure at current store
+        # and sufficient tenure at current store. In the static model an Active
+        # assignment runs to global_end (EndDate == global_end), so a transfer
+        # date drawn within the year always falls inside [StartDate, EndDate];
+        # the transfer_date <= original_end guard in the loop is the backstop if
+        # that assumption is ever broken (e.g. by a mid-window termination).
         tenure_cutoff = year_start - pd.DateOffset(months=min_tenure_months)
 
+        # Physical-store salespeople only: the salesperson_roles filter already
+        # excludes managers; is_physical_store_key excludes online reps (whose
+        # home store is an online store) — together the staff-at-physical-stores
+        # set the old EmployeeKey-band check selected.
         eligible_mask = (
             (df["IsPrimary"] == 1)
             & (df["Status"] == "Active")
             & (df["RoleAtStore"].isin(salesperson_roles))
-            & (df["EmployeeKey"] >= STAFF_KEY_BASE)
-            & (df["EmployeeKey"] < ONLINE_EMP_KEY_BASE)
+            & is_physical_store_key(df["StoreKey"])
             & (df["StartDate"] <= tenure_cutoff)
             & (df["EndDate"] >= year_start)
         )
@@ -696,6 +309,13 @@ def apply_transfers(
             employee_start = pd.Timestamp(start_ns[idx])
             original_end = pd.Timestamp(end_ns[idx])
 
+            if transfer_date > original_end:
+                # The assignment already ended before the drawn transfer date;
+                # transferring would emit a zero/negative-length destination row.
+                # Should not happen while Active => EndDate == global_end holds.
+                rejections["transfer_after_end"] += 1
+                continue
+
             # Pick destination store
             dest_sk = _pick_destination(
                 rng=rng,
@@ -750,6 +370,10 @@ def apply_transfers(
                 "Status": new_status,
             }
             year_new_rows.append(new_row)
+            new_rec_idx = len(transfer_records)
+            prev_idx = last_record_by_emp.get(emp_key)
+            if prev_idx is not None:
+                transfer_records[prev_idx].chain_next = new_rec_idx
             transfer_records.append(_TransferRecord(
                 employee_key=emp_key,
                 src_key=source_sk,
@@ -759,6 +383,7 @@ def apply_transfers(
                 original_end=original_end,
                 dst_end=new_end,
             ))
+            last_record_by_emp[emp_key] = new_rec_idx
             transfer_count += 1
 
         df["EndDate"] = end_ns
@@ -844,39 +469,3 @@ def _pick_destination(
         return None
 
     return int(rng.choice(candidates))
-
-
-def _check_coverage_invariant(
-    assignments: pd.DataFrame,
-    stores: pd.DataFrame,
-    salesperson_roles: List[str],
-    global_start: pd.Timestamp,
-    global_end: pd.Timestamp,
-    open_dates: Dict[int, pd.Timestamp],
-    close_dates: Dict[int, pd.Timestamp],
-    reno_start_dates: Optional[Dict[int, pd.Timestamp]] = None,
-    reno_end_dates: Optional[Dict[int, pd.Timestamp]] = None,
-    min_coverage: int = 1,
-) -> List[Tuple[int, str]]:
-    """Check that every open physical store has at least ``min_coverage``
-    salespeople active *throughout* every month — i.e. for both first-of-month
-    and last-of-month staffing. The last month_end is clamped to ``global_end``.
-
-    Returns a list of ``(StoreKey, 'YYYY-MM')`` violations (capped at 10).
-    """
-    budget = _build_coverage_budget(
-        assignments, stores, salesperson_roles,
-        global_start, global_end,
-        open_dates, close_dates, reno_start_dates, reno_end_dates,
-        min_coverage=min_coverage,
-    )
-    violations: List[Tuple[int, str]] = []
-    bad = budget.constrained & (budget.cov < budget.min_coverage)
-    if not bad.any():
-        return violations
-    s_idx, m_idx = np.where(bad)
-    for i in range(min(len(s_idx), 10)):
-        sk = int(budget.store_idx_to_key[s_idx[i]])
-        month_iso = pd.Timestamp(budget.month_starts[m_idx[i]]).strftime("%Y-%m")
-        violations.append((sk, month_iso))
-    return violations
