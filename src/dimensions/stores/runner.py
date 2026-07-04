@@ -118,7 +118,7 @@ def run_stores(cfg: AppConfig, parquet_folder: Path) -> None:
     wh_min_sow = int(wh_cfg.get("min_stores_for_own_warehouse", 5))
 
     version_cfg = dict(store_cfg)
-    version_cfg["schema_version"] = 11  # v11: structured StoreDistrictId/StoreRegionId columns
+    version_cfg["schema_version"] = 12  # v12: minimum 1-year operating window (opening cap + closing floor)
     version_cfg["_geography_sig"] = _geography_signature(geo_keys)
     version_cfg["seed"] = int(seed)
     version_cfg["_warehouses"] = {
@@ -191,6 +191,7 @@ def run_stores(cfg: AppConfig, parquet_folder: Path) -> None:
             close_share=close_share,
             closing_enabled=closing_enabled,
             online_stores=online_stores_count,
+            allow_mid_window_openings=bool(store_cfg.allow_mid_window_openings),
         )
 
         # Allocate warehouses on the in-memory store frame and stamp the

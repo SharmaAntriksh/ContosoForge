@@ -5,7 +5,9 @@ This module is the falsifiability harness for the cluster refactor documented in
 
 1. A **golden fingerprint** of all four outputs (``stores`` after warehouse
    enrichment, ``warehouses``, ``employees``, ``employee_store_assignments``) for
-   a fixed fixture.  Behavior-preserving phases must leave every fingerprint
+   two fixtures: the default shifted-window cluster and the mid-window-openings
+   cluster (``midwindow/`` keys, with stores opening — and closing — inside the
+   data window).  Behavior-preserving phases must leave every fingerprint
    unchanged; behavior phases regenerate them once via
    ``REGEN_STORE_CLUSTER_SNAPSHOT=1``.
 2. **Characterization tests** that pin the invariants worth keeping (staffing
@@ -100,6 +102,7 @@ def _cluster_cfg(
     transfers: bool = True,
     stores_compression: str = "snappy",
     force_date32: bool = True,
+    allow_mid_window: bool = False,
 ) -> AppConfig:
     return AppConfig.model_validate({
         "defaults": {"seed": seed, "dates": {"start": DATE_START, "end": DATE_END}},
@@ -109,6 +112,7 @@ def _cluster_cfg(
             "district_size": 6,
             "districts_per_region": 4,
             "closing": {"enabled": True, "close_share": 0.15},
+            "allow_mid_window_openings": allow_mid_window,
             "use_name_pools": True,
             "parquet_compression": stores_compression,
             "force_date32": force_date32,
@@ -175,6 +179,27 @@ def cluster(cluster_dir) -> dict[str, pd.DataFrame]:
 
 
 # ---------------------------------------------------------------------------
+# Second module-scoped fixture: the same chain with mid-window openings ON.
+# This exercises stores that open inside the data window (some of which also
+# close), the opening-aware bridge, and the staggered hire ramp — the paths the
+# default (shifted-window) fixture can never reach. Tuned at seed 202 / 2022-2024
+# so at least one store opens mid-window AND closes with a >= 1-year footprint.
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def cluster_midwindow_dir(tmp_path_factory) -> Path:
+    root = tmp_path_factory.mktemp("store_cluster_midwindow")
+    with _isolated_version_dir(root / "versioning"):
+        folder = root / "data"
+        _build_cluster(folder, _cluster_cfg(allow_mid_window=True))
+        yield folder
+
+
+@pytest.fixture(scope="module")
+def cluster_midwindow(cluster_midwindow_dir) -> dict[str, pd.DataFrame]:
+    return _load_frames(cluster_midwindow_dir)
+
+
+# ---------------------------------------------------------------------------
 # Layer 1: golden fingerprint
 # ---------------------------------------------------------------------------
 def _fingerprint(df: pd.DataFrame, sort_keys: list[str]) -> str:
@@ -197,17 +222,24 @@ def _fingerprint(df: pd.DataFrame, sort_keys: list[str]) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
-def _current_fingerprints(cluster: dict[str, pd.DataFrame]) -> dict[str, str]:
-    return {name: _fingerprint(df, _SORT_KEYS[name]) for name, df in cluster.items()}
+def _current_fingerprints(
+    cluster: dict[str, pd.DataFrame], prefix: str = ""
+) -> dict[str, str]:
+    return {f"{prefix}{name}": _fingerprint(df, _SORT_KEYS[name]) for name, df in cluster.items()}
 
 
-def test_golden_fingerprint(cluster):
+def test_golden_fingerprint(cluster, cluster_midwindow):
     """Every output byte-identical to the recorded baseline.
 
-    First run (or ``REGEN_STORE_CLUSTER_SNAPSHOT=1``) records the baseline and
-    skips; thereafter it asserts equality per table. Behavior phases regenerate.
+    Covers both the default (shifted-window) cluster and the mid-window-openings
+    cluster (``midwindow/`` keys). First run (or ``REGEN_STORE_CLUSTER_SNAPSHOT=1``)
+    records the baseline and skips; thereafter it asserts equality per table.
+    Behavior phases regenerate.
     """
-    current = _current_fingerprints(cluster)
+    current = {
+        **_current_fingerprints(cluster),
+        **_current_fingerprints(cluster_midwindow, "midwindow/"),
+    }
     regen = os.environ.get("REGEN_STORE_CLUSTER_SNAPSHOT") == "1"
 
     if regen or not _SNAPSHOT_FILE.exists():
@@ -459,6 +491,70 @@ class TestEmployeeNameConsistency:
             + mgrs["LastName"].astype(str).str.strip()
         ).str.strip()
         assert (mgrs["EmployeeName"].astype(str) == expected).all()
+
+
+class TestMidWindowCluster:
+    """Invariants for the mid-window-openings cluster (flag ON).
+
+    These exercise stores opening inside the data window — some of which close —
+    a path the default shifted-window fixture never hits. They pin the opening-
+    aware bridge, the minimum operating window, and the closing-store ramp bug
+    (staff hired after their store shut) without a full-scale generation.
+    """
+    _DS_START = pd.Timestamp(DATE_START)
+    _DS_END = pd.Timestamp(DATE_END)
+
+    def test_fixture_has_a_mid_window_store_that_closes(self, cluster_midwindow):
+        """The guard is only meaningful if the fixture actually produces the
+        interesting case: a store that opens inside the window and also closes."""
+        stores = cluster_midwindow["stores"]
+        opened = pd.to_datetime(stores["OpeningDate"])
+        mid = stores[opened > self._DS_START]
+        assert len(mid) > 0, "mid-window fixture must have stores opening in-window"
+        mid_closed = mid[mid["ClosingDate"].notna()]
+        assert len(mid_closed) > 0, (
+            "mid-window fixture must include a store that opens in-window AND closes"
+        )
+
+    def test_min_operating_window(self, cluster_midwindow):
+        """Every store is visibly operating for at least a year."""
+        stores = cluster_midwindow["stores"]
+        o = pd.to_datetime(stores["OpeningDate"])
+        c = pd.to_datetime(stores["ClosingDate"])
+        vis_start = o.clip(lower=self._DS_START)
+        vis_end = c.fillna(self._DS_END).clip(upper=self._DS_END)
+        span = (vis_end - vis_start).dt.days
+        assert span.min() >= 365, (
+            f"a store operates only {int(span.min())} days in-window (< 1 year)"
+        )
+
+    def test_no_assignment_before_store_opens(self, cluster_midwindow):
+        """Opening-aware bridge: no assignment starts before its store opens."""
+        stores = cluster_midwindow["stores"]
+        esa = cluster_midwindow["employee_store_assignments"]
+        open_map = dict(zip(stores["StoreKey"].astype(int), pd.to_datetime(stores["OpeningDate"])))
+        start = pd.to_datetime(esa["StartDate"])
+        open_d = esa["StoreKey"].astype(int).map(open_map)
+        assert (start >= open_d).all(), "an assignment starts before its store's OpeningDate"
+
+    def test_no_hire_after_termination(self, cluster_midwindow):
+        """The closing-store ramp bug: nobody is hired after their store shut."""
+        emp = cluster_midwindow["employees"]
+        hd = pd.to_datetime(emp["HireDate"])
+        td = pd.to_datetime(emp["TerminationDate"])
+        both = hd.notna() & td.notna()
+        assert (hd[both] <= td[both]).all(), "an employee is hired after termination"
+
+    def test_all_store_level_employees_in_bridge(self, cluster_midwindow):
+        """No store-level employee is silently dropped by the start<=end filter."""
+        emp = cluster_midwindow["employees"]
+        esa = cluster_midwindow["employee_store_assignments"]
+        store_level = set(
+            emp.loc[pd.to_numeric(emp["StoreKey"], errors="coerce").fillna(0).astype(int) > 0,
+                    "EmployeeKey"].astype(int)
+        )
+        missing = store_level - set(esa["EmployeeKey"].astype(int))
+        assert not missing, f"{len(missing)} store-level employee(s) missing from the bridge"
 
 
 # ---------------------------------------------------------------------------

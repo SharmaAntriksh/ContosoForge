@@ -73,6 +73,7 @@ def generate_store_table(
     close_share: float = 0.10,
     closing_enabled: bool = True,
     online_stores: Optional[int] = None,
+    allow_mid_window_openings: bool = False,
 ) -> pd.DataFrame:
     """
     Generate synthetic store dimension table.
@@ -299,6 +300,7 @@ def generate_store_table(
         closing_enabled=closing_enabled,
         dataset_start=dataset_start,
         dataset_end=dataset_end,
+        allow_mid_window_openings=allow_mid_window_openings,
     )
 
     # Snapshot Status before the renovation pass may reopen stores; the

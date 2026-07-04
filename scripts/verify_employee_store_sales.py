@@ -1,6 +1,12 @@
 """Comprehensive data-quality checks for stores, employees,
 employee_store_assignments bridge, and sales alignment.
 
+Covers the current store-cluster features: opaque sequential EmployeeKeys,
+structured StoreDistrictId/StoreRegionId + StoreManagerFirstName/LastName
+columns, WarehouseKey allocation, and the mid-window-openings feature
+(allow_mid_window_openings) — no assignment or sale before a store's
+OpeningDate, with mid-window stores staffed from opening day.
+
 Usage:
     python scripts/verify_employee_store_sales.py <dataset_folder>
 
@@ -114,7 +120,12 @@ def _to_dt(series: pd.Series) -> pd.Series:
 # Checks: STORES
 # ============================================================================
 
-def check_stores(stores: pd.DataFrame) -> None:
+def check_stores(
+    stores: pd.DataFrame,
+    warehouses: Optional[pd.DataFrame] = None,
+    ds_start: Optional[pd.Timestamp] = None,
+    ds_end: Optional[pd.Timestamp] = None,
+) -> None:
     cat = "Stores"
     n = len(stores)
 
@@ -199,6 +210,77 @@ def check_stores(stores: pd.DataFrame) -> None:
              bad == 0,
              f"{bad} violation(s)")
 
+    # --- Structured hierarchy id columns (StoreDistrictId/StoreRegionId) ---
+    # The integer ids are the source of truth; StoreDistrict/StoreRegion render
+    # them as "District N"/"Region N". Employees now read the ids directly, so a
+    # mismatch between the id column and the number in the string means the
+    # employee hierarchy would desync from the store display labels.
+    if {"StoreDistrictId", "StoreRegionId", "StoreDistrict", "StoreRegion"} <= set(stores.columns):
+        did_str = stores["StoreDistrict"].astype(str).str.extract(r"(\d+)", expand=False).astype("Int64")
+        rid_str = stores["StoreRegion"].astype(str).str.extract(r"(\d+)", expand=False).astype("Int64")
+        did_bad = int((did_str != stores["StoreDistrictId"].astype("Int64")).sum())
+        rid_bad = int((rid_str != stores["StoreRegionId"].astype("Int64")).sum())
+        _add(cat, "StoreDistrictId/StoreRegionId match display strings",
+             did_bad == 0 and rid_bad == 0,
+             f"{did_bad} district + {rid_bad} region id/string mismatch(es)")
+    else:
+        have_ids = "StoreDistrictId" in stores.columns and "StoreRegionId" in stores.columns
+        _add(cat, "Structured hierarchy id columns present",
+             have_ids,
+             "StoreDistrictId/StoreRegionId " + ("present" if have_ids else "MISSING"))
+
+    # --- Manager name split columns (StoreManagerFirstName/LastName) ---
+    # StoreManager is the display concat; the split columns are the structured
+    # source consumed by the employee dimension. They must recombine exactly, and
+    # every store must carry a manager name.
+    if {"StoreManagerFirstName", "StoreManagerLastName", "StoreManager"} <= set(stores.columns):
+        first = stores["StoreManagerFirstName"].fillna("").astype(str).str.strip()
+        last = stores["StoreManagerLastName"].fillna("").astype(str).str.strip()
+        recombined = (first + " " + last).str.strip()
+        disp = stores["StoreManager"].fillna("").astype(str).str.strip()
+        mism = int((recombined != disp).sum())
+        _add(cat, "StoreManager == First + ' ' + Last",
+             mism == 0,
+             f"{mism} store(s) where StoreManager != StoreManagerFirstName+LastName")
+        blank = int((first == "").sum())
+        _add(cat, "Every store has a manager name",
+             blank == 0,
+             f"{blank} store(s) with blank StoreManagerFirstName")
+
+    # --- WarehouseKey FK -> Warehouses (single-writer warehouse allocation) ---
+    if "WarehouseKey" in stores.columns:
+        wk = pd.to_numeric(stores["WarehouseKey"], errors="coerce")
+        missing_wk = int(wk.isna().sum())
+        _add(cat, "Every store has a WarehouseKey",
+             missing_wk == 0,
+             f"{missing_wk} store(s) with no WarehouseKey")
+        if warehouses is not None and "WarehouseKey" in warehouses.columns:
+            wh_keys = set(warehouses["WarehouseKey"].astype(int))
+            orphan_wk = int((~wk.dropna().astype(int).isin(wh_keys)).sum())
+            _add(cat, "stores.WarehouseKey exists in Warehouses",
+                 orphan_wk == 0,
+                 f"{orphan_wk} store(s) referencing an unknown WarehouseKey")
+
+    # --- Minimum operating window: every store is visibly open >= ~1 year ---
+    # A store's footprint inside the data window is [max(Opening, ds_start),
+    # min(Closing, ds_end)]; the generator guarantees at least a year of it, so a
+    # store opening in the last weeks of the data, or opening+closing within a
+    # year, is a bug. The data window is inferred from the sales OrderDate span; a
+    # month of grace absorbs any inference slack.
+    if ds_start is not None and ds_end is not None and "OpeningDate" in stores.columns:
+        o = _to_dt(stores["OpeningDate"])
+        c = _to_dt(stores["ClosingDate"])
+        vis_start = o.clip(lower=ds_start)
+        vis_end = c.fillna(ds_end).clip(upper=ds_end)
+        span = (vis_end - vis_start).dt.days
+        floor_days = 365 - 31  # ~1 year, minus a month of window-inference grace
+        short = stores[span < floor_days]
+        _add(cat, "Every store operates >= ~1 year (visible window)",
+             len(short) == 0,
+             f"{len(short)} store(s) open < {floor_days}d in-window (min span {int(span.min())}d)",
+             _sample(short.assign(_span=span[span < floor_days].values),
+                     ["StoreKey", "Status", "OpeningDate", "ClosingDate", "_span"]))
+
 
 # ============================================================================
 # Checks: EMPLOYEES
@@ -212,6 +294,29 @@ def check_employees(employees: pd.DataFrame) -> None:
     _add(cat, "No duplicate EmployeeKeys",
          dup_ek == 0,
          f"{dup_ek} duplicate(s)")
+
+    # --- Opaque surrogate keys: a contiguous 1..N sequence in build order ---
+    # EmployeeKeys carry no tier/home-store meaning (opaque surrogates). The
+    # generator assigns np.arange(1, N+1); a gap or off-by-one means the surrogate
+    # assignment or the parent-key wiring regressed.
+    ek_sorted = np.sort(employees["EmployeeKey"].astype(int).to_numpy())
+    n_emp = len(ek_sorted)
+    is_seq = n_emp > 0 and np.array_equal(ek_sorted, np.arange(1, n_emp + 1))
+    _add(cat, "EmployeeKey is a contiguous 1..N surrogate",
+         is_seq,
+         f"range [{ek_sorted[0] if n_emp else '-'}, {ek_sorted[-1] if n_emp else '-'}], n={n_emp}")
+
+    # --- Exactly one hierarchy root (CEO: OrgLevel 1, no parent) ---
+    if "ParentEmployeeKey" in employees.columns and "OrgLevel" in employees.columns:
+        roots = employees[employees["ParentEmployeeKey"].isna()]
+        lvl1 = employees[employees["OrgLevel"].astype(int) == 1]
+        one_root = (
+            len(roots) == 1 and len(lvl1) == 1
+            and set(roots["EmployeeKey"].astype(int)) == set(lvl1["EmployeeKey"].astype(int))
+        )
+        _add(cat, "Exactly one hierarchy root (CEO, no parent)",
+             one_root,
+             f"{len(roots)} root(s) with NA parent, {len(lvl1)} OrgLevel-1 employee(s)")
 
     hd = _to_dt(employees["HireDate"])
     td = _to_dt(employees["TerminationDate"])
@@ -514,6 +619,9 @@ def check_esa(
         _check_no_assignment_gaps(_esa_emp_sorted, _same_emp, cat)
         _check_transfer_reason_consistency(_esa_emp_sorted, _same_emp, cat)
 
+    # --- Opening-aware assignments + mid-window opening feature ---
+    _check_bridge_opening_and_midwindow(esa, stores, cat)
+
     # --- Salesperson coverage per open physical store-month ---
     _check_salesperson_coverage(esa, stores, cat)
 
@@ -598,6 +706,75 @@ def _check_transfer_reason_consistency(
          bad_count == 0,
          f"{bad_count} transition row(s) with invalid TransferReason",
          detail)
+
+
+def _check_bridge_opening_and_midwindow(
+    esa: pd.DataFrame,
+    stores: pd.DataFrame,
+    cat: str,
+) -> None:
+    """Opening-aware assignments and the mid-window-openings feature.
+
+    Hard invariant (holds regardless of the ``allow_mid_window_openings`` flag):
+    no bridge assignment may start before its store's OpeningDate. When the flag
+    is on, some stores open inside the data window; those must still be staffed
+    from opening day, and their rosters ramp in (manager ahead, sales on opening,
+    other staff trickling) — reported for eyeballing. ``global_start`` is inferred
+    as the earliest bridge StartDate (pre-window stores clamp their start to it).
+    """
+    if "OpeningDate" not in stores.columns:
+        _add(cat, "Assignment StartDate >= store OpeningDate", True,
+             "stores frame lacks OpeningDate (skipped)")
+        return
+
+    open_map = dict(zip(stores["StoreKey"].astype(int), _to_dt(stores["OpeningDate"])))
+    esa_open = esa["StoreKey"].astype(int).map(open_map)
+    start = _to_dt(esa["StartDate"])
+
+    # HARD: no assignment starts before its store opens (NaT compares False).
+    before_mask = start < esa_open
+    before = int(before_mask.sum())
+    _add(cat, "Assignment StartDate >= store OpeningDate",
+         before == 0,
+         f"{before} assignment(s) starting before their store's OpeningDate",
+         _sample(esa[before_mask.values],
+                 ["EmployeeKey", "StoreKey", "StartDate", "TransferReason"]))
+
+    # Mid-window feature summary. global_start ~= earliest bridge start.
+    global_start = start.min()
+    mid_sk = {int(sk) for sk, od in open_map.items() if pd.notna(od) and od > global_start}
+    n_mid = len(mid_sk)
+    _add(cat, "Mid-window openings feature",
+         True,
+         f"{n_mid} store(s) open after {global_start.date()} inside the data window "
+         + ("(allow_mid_window_openings ON)" if n_mid else "(flag OFF / window shifted before start)"))
+    if n_mid == 0:
+        return
+
+    mid = esa[esa["StoreKey"].astype(int).isin(mid_sk)].copy()
+    mid["_open"] = mid["StoreKey"].astype(int).map(open_map)
+    mid["_start"] = _to_dt(mid["StartDate"])
+
+    # HARD (scoped to mid-window): each mid-window store has >= 1 assignment
+    # starting exactly on its OpeningDate — the opening-day roster (manager +
+    # sales) is present from day one, so salesperson coverage holds from the
+    # store's first month. A ramp regression that delayed everyone would trip this.
+    gmin = mid.groupby("StoreKey")["_start"].min()
+    gopen = mid.groupby("StoreKey")["_open"].first()
+    no_openingday = int((gmin != gopen).sum())
+    _add(cat, "Mid-window stores staffed on opening day",
+         no_openingday == 0,
+         f"{no_openingday}/{n_mid} mid-window store(s) with no assignment on OpeningDate")
+
+    # DESCRIPTIVE: the staggered ramp shape (always passes; for eyeballing).
+    sa = mid[mid["RoleAtStore"].astype(str) == "Sales Associate"]
+    sa_on_open = int((_to_dt(sa["StartDate"]) == sa["_open"]).sum()) if len(sa) else 0
+    init_spread = mid[mid["TransferReason"] == "Initial"].groupby("StoreKey")["_start"].nunique()
+    staggered = int((init_spread > 1).sum())
+    _add(cat, "Mid-window roster ramp (info)",
+         True,
+         f"sales-assoc rows on opening day: {sa_on_open}/{len(sa)}; "
+         f"stores with staggered initial starts: {staggered}/{len(init_spread)}")
 
 
 def _check_salesperson_coverage(
@@ -748,6 +925,9 @@ def check_sales(
     # --- 100% sales-to-ESA bridge match ---
     _check_sales_esa_match(sales, esa, cat)
 
+    # --- No sales before store opening (mid-window openings) ---
+    _check_no_sales_before_opening(sales, stores, cat)
+
     # --- No sales during renovation ---
     _check_no_sales_during_renovation(sales, stores, cat)
 
@@ -848,6 +1028,39 @@ def _check_sales_esa_match(
          unmatched == 0,
          f"{pct:.2f}% ({total - unmatched:,}/{total:,}). {unmatched:,} unmatched.",
          detail)
+
+
+def _check_no_sales_before_opening(
+    sales: pd.DataFrame,
+    stores: pd.DataFrame,
+    cat: str,
+) -> None:
+    """No sale may be dated before its store's OpeningDate.
+
+    With mid-window openings enabled a store's pre-opening months carry no
+    sales; this is the consuming-side mirror of the bridge opening invariant. It
+    is a no-op (0 violations) for the default shifted window where every store
+    opens before the data begins.
+    """
+    if "OpeningDate" not in stores.columns:
+        _add(cat, "No sales before store OpeningDate", True,
+             "stores frame lacks OpeningDate (skipped)")
+        return
+
+    open_df = stores[["StoreKey", "OpeningDate"]].copy()
+    open_df["OpeningDate"] = _to_dt(open_df["OpeningDate"])
+    merged = sales[["StoreKey", "OrderDate"]].merge(open_df, on="StoreKey", how="inner")
+    if merged.empty:
+        _add(cat, "No sales before store OpeningDate", True, "0 violation(s)")
+        return
+
+    od = _to_dt(merged["OrderDate"])
+    before = od < merged["OpeningDate"]
+    total = int(before.sum())
+    _add(cat, "No sales before store OpeningDate",
+         total == 0,
+         f"{total} sale(s) dated before their store opened",
+         _store_violation_detail(merged, before))
 
 
 def _check_no_sales_during_renovation(
@@ -993,6 +1206,7 @@ def main() -> int:
     stores = _load(folder, "dimensions", "stores")
     employees = _load(folder, "dimensions", "employees")
     esa = _load(folder, "dimensions", "employee_store_assignments")
+    warehouses = _load(folder, "dimensions", "warehouses")
 
     # Sales: try sales.parquet first, then order_header.parquet
     # (sales_output can be "sales", "sales_order", or "both")
@@ -1012,9 +1226,16 @@ def main() -> int:
 
     # --- Run checks ---
     print("=" * 60)
+    # Infer the data window from the sales OrderDate span for the
+    # minimum-operating-window check.
+    ds_start = ds_end = None
+    if sales is not None and "OrderDate" in sales.columns:
+        _od = _to_dt(sales["OrderDate"])
+        ds_start, ds_end = _od.min(), _od.max()
+
     print("STORES")
     print("=" * 60)
-    check_stores(stores)
+    check_stores(stores, warehouses, ds_start, ds_end)
 
     print()
     print("=" * 60)

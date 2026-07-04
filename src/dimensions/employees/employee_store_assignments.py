@@ -264,11 +264,20 @@ def generate_employee_store_assignments(
     employees: pd.DataFrame,
     global_start: pd.Timestamp,
     global_end: pd.Timestamp,
+    store_opening_dates: dict[int, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
     """Generate the employee store assignments bridge table.
 
     One row per employee: home store, global_start → global_end
     (clamped to hire/termination dates).
+
+    ``store_opening_dates`` (StoreKey → OpeningDate) clamps each assignment's
+    StartDate up to its store's opening, so no employee is assigned before the
+    store exists. With the default (shifted) opening window every store opens
+    before ``global_start``, making the clamp a no-op and the bridge
+    byte-identical; it only bites when mid-window openings are enabled. A store
+    opening after ``global_end`` yields StartDate > EndDate and its employees
+    drop out (correct — the store never operates within the window).
     """
     out_cols = [
         "AssignmentKey", "EmployeeKey", "AssignmentSequence",
@@ -302,6 +311,25 @@ def generate_employee_store_assignments(
         return pd.DataFrame(columns=out_cols)
 
     start = emp["HireDate"].clip(lower=global_start)
+
+    # Clamp the assignment start up to the store's OpeningDate: an employee
+    # cannot work at a store before it opens. No-op when the store opened before
+    # global_start (the default shifted window), so the bridge stays
+    # byte-identical unless mid-window openings put an opening inside the window.
+    if store_opening_dates:
+        open_ts = pd.to_datetime(
+            emp["HomeStoreKey"].map(
+                lambda sk: store_opening_dates.get(int(sk)) if pd.notna(sk) else None
+            )
+        ).dt.normalize()
+        has_open = open_ts.notna()
+        if has_open.any():
+            start = start.copy()
+            start.loc[has_open] = np.maximum(
+                start.loc[has_open].to_numpy("datetime64[ns]"),
+                open_ts.loc[has_open].to_numpy("datetime64[ns]"),
+            )
+
     term = emp["TerminationDate"]
     end = term.where(term.notna() & (term < global_end), global_end)
 
@@ -410,13 +438,9 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
         return
 
     with stage("Generating Employee Store Assignments"):
-        df = generate_employee_store_assignments(
-            employees=employees,
-            global_start=global_start,
-            global_end=global_end,
-        )
-
-        # Load stores for renovation handling and transfers
+        # Load stores up front: the bridge clamps each assignment's start to its
+        # store's OpeningDate (mid-window openings), and renovation + transfers
+        # need the same frame downstream.
         stores_path = parquet_folder / "stores.parquet"
         stores_df = None
         if stores_path.exists():
@@ -429,6 +453,22 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
                 stores_df = pd.read_parquet(stores_path, columns=_stores_cols)
             except (KeyError, ValueError):
                 stores_df = pd.read_parquet(stores_path)
+
+        store_opening_dates: dict[int, pd.Timestamp] | None = None
+        if stores_df is not None and "OpeningDate" in stores_df.columns:
+            _od = pd.to_datetime(stores_df["OpeningDate"], errors="coerce")
+            store_opening_dates = {
+                int(sk): d.normalize()
+                for sk, d in zip(stores_df["StoreKey"].astype(int), _od)
+                if pd.notna(d)
+            }
+
+        df = generate_employee_store_assignments(
+            employees=employees,
+            global_start=global_start,
+            global_end=global_end,
+            store_opening_dates=store_opening_dates,
+        )
 
         # Handle renovation reassignments (split assignments at
         # renovating stores into pre/during/post segments)

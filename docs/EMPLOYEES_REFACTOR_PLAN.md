@@ -384,29 +384,55 @@ JSON files differ).
 
 ## Parked decisions (not scheduled — each needs a product call)
 
-- **Mid-window store openings do not exist.** The stores generator shifts the
-  opening window entirely before `dataset_start` (generator ~lines 919–932), so
-  every store opens before the data begins. Consequence: the opened-mid-window
-  machinery maintained across the cluster — `store_opening_dates` hire clamps in
-  employees, `_store_is_open` opened-checks, the coverage budget's `opened`
-  mask — is **pipeline-dead code**, exercised only by tests. Two coherent
-  options: (a) *enable openings as a feature* — stores open mid-window, managers
-  and staff hired at opening (the machinery already exists and would finally
-  run), which also enriches the `new-market-entry` / growth trend stories; or
-  (b) *delete the dead machinery* and document the invariant "all stores open
-  before dataset start". Option (a) is more valuable but is modeling work, not
-  refactoring. Needs an explicit call before or after this plan.
-  **Analysis (2026-07) — this is now the ONLY open parked decision.** Enabling (a)
-  is feasible but is a modeling change, not a config flip: the assignment
-  *generation* must become opening-aware in lockstep. The base bridge builder
-  (`generate_employee_store_assignments`, `StartDate = HireDate.clip(lower=global_start)`)
-  ignores `OpeningDate`, and the SA-vs-manager hire clamps in
-  `assign_employment_dates_status` are asymmetric — both must change together, and
-  a new `StartDate >= OpeningDate` invariant test is essential (the existing 20-seed
-  bridge property tests stay green even with pre-opening assignments, so they would
-  not catch a regression). The *consuming* machinery (coverage invariant, coverage
-  preflight, `store_open_on`, transfer destinations, renovation) is already
-  opening-aware, so only generation is the gap.
+- **Mid-window store openings.** ✅ IMPLEMENTED (option (a), on a flag). Was:
+  the stores generator shifted the opening window entirely before `dataset_start`
+  so every store opened before the data began, and the opened-mid-window machinery
+  (`store_opening_dates` hire clamps, `_store_is_open` checks, the coverage budget
+  `opened` mask) was pipeline-dead, exercised only by tests. Now gated by the
+  `stores.allow_mid_window_openings` config flag (default **false** → old shifted
+  behaviour, byte-identical). When **true**, the opening-window shift is skipped so
+  stores may open inside the data window, and the bridge builder
+  (`generate_employee_store_assignments`) clamps each assignment's `StartDate` up to
+  its store's `OpeningDate` (a `StoreKey → OpeningDate` map threaded from the runner)
+  so no one is assigned before the store exists — the clamp is a no-op when the store
+  opened before `global_start`, which is why flag-off stays byte-identical. The
+  `StartDate >= OpeningDate` invariant is pinned by
+  `tests/test_mid_window_openings.py` (the existing 20-seed bridge property tests
+  stayed green even with pre-opening assignments, so they would not have caught a
+  regression). The *consuming* machinery (coverage invariant, coverage preflight,
+  `store_open_on`, transfer destinations, renovation) was already opening-aware.
+  **Staggered ramp — ✅ DONE.** A mid-window store's roster now ramps up around its
+  opening `O` instead of pre-existing: the manager is hired `O - Uniform[14, 45]`
+  days ahead (store setup), the sales role lands on `O` (so salesperson coverage
+  holds from the store's first month), and the remaining staff trickle in over
+  `[O, O + 60]` days (`MID_WINDOW_*` constants in `defaults.py`). The bridge clamp
+  turns this into staggered assignment StartDates (managers/sales at `O`, other
+  staff spread `O..O+ramp`). The whole ramp is inert (draws no RNG) when no store
+  opens mid-window, so flag-off stays byte-identical. Pinned by
+  `tests/test_mid_window_openings.py::test_mid_window_roster_ramps_in`.
+  **End-to-end validation (default config, 80 stores, flag on).** A full pipeline
+  run confirmed the consuming side holds under mid-window: 51/80 stores opened
+  inside the window; **0** bridge assignments started before their store's
+  OpeningDate across all 1,195 rows — including the `Renovation Reassignment`,
+  `Renovation Return`, `New Store Opening`, `Backfill`, and `Seasonal Support`
+  transfer reasons, so the transfer + renovation passes are already opening-aware
+  (`apply_transfers` only staffs open destinations); **0** of 100k sales lines were
+  dated before their store opened; salesperson coverage held (0 `EmployeeKey=-1`,
+  0 orphan FKs; coverage pre-flight reported 0 fully-uncovered, 0 avoidable). One
+  caveat: this is one seed/config, not a proof for every opening window.
+  **Minimum operating window (STORE_MIN_OPERATING_DAYS = 365, defaults.py).** A
+  store must be *visibly* operating for at least a year — between
+  max(OpeningDate, dataset_start) and min(ClosingDate, dataset_end) — or it isn't
+  worth capturing. Two enforcement points in `stores/lifecycle.py`
+  `assign_opening_closing_dates`: (1) with mid-window on, the opening window is
+  capped at dataset_end - 1yr so no store opens in the last weeks of the data;
+  (2) a closing store's ClosingDate is floored at max(OpeningDate, dataset_start)
+  + 1yr, and a store with no room for a full-year window before the close cutoff
+  simply stays Open (reverts). This changes the default (flag-off) output too —
+  closed stores that used to close early in the window now run ≥1yr or stay open
+  — so the stores schema bumped 11→12 and the golden fingerprint regenerated.
+  Guarded by `TestMidWindowCluster` (a second, mid-window snapshot fixture) and
+  the `verify_employee_store_sales.py` "operates >= ~1 year" check.
 - **Integer `StoreDistrictId`/`StoreRegionId` columns on stores.**  ✅ DONE in v2.
   Stores used to build "District 12" strings from integers and employees
   regex-extracted them back (`str.extract(r"(\d+)")`) — a destroy-then-reparse

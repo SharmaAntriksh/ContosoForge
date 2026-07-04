@@ -39,6 +39,14 @@ STORE_CLOSE_REASONS = np.array(
 STORE_TYPES_P = np.array([0.50, 0.30, 0.10, 0.10], dtype=float)
 STORE_STATUS_P = np.array([0.85, 0.10, 0.05], dtype=float)
 
+# Minimum days a store must be *visibly* operating inside the data window
+# (between max(OpeningDate, dataset_start) and min(ClosingDate, dataset_end)).
+# A store with a shorter footprint is not worth capturing: with mid-window
+# openings on, the opening window is capped so no store opens within this of the
+# dataset end, and closing stores must run at least this long before closing
+# (else they stay open). One year.
+STORE_MIN_OPERATING_DAYS = 365
+
 STORE_BRANDS = np.array(
     [
         "Northwind Market", "Contoso Mart", "Fabrikam Foods", "Woodgrove Grocers",
@@ -239,6 +247,17 @@ EMPLOYEE_PART_TIME_RATE_BY_ROLE: Dict[str, float] = {
 
 # FTE values for part-time employees (chosen at hire)
 EMPLOYEE_PART_TIME_FTE_VALUES = np.array([0.50, 0.75], dtype=np.float64)
+
+# Mid-window opening ramp (stores.allow_mid_window_openings). When a store opens
+# inside the data window, its roster ramps up around the opening date O rather
+# than pre-existing: the manager arrives O - Uniform[lead_min, lead_max] days
+# ahead to set the store up, the sales role is hired on opening day (so
+# salesperson coverage holds from the store's first month), and the remaining
+# staff trickle in over [O, O + ramp] days. Inert for the default (shifted)
+# opening window, where every store opens before the data begins.
+MID_WINDOW_MANAGER_LEAD_MIN_DAYS = 14
+MID_WINDOW_MANAGER_LEAD_MAX_DAYS = 45
+MID_WINDOW_STAFF_RAMP_DAYS = 60
 
 # Base pay scales with org level (executives out-earn staff). Salaried levels
 # (1–5) draw an annual salary within their band; BaseRate is the hourly

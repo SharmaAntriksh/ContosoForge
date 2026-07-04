@@ -650,6 +650,11 @@ class StoresConfig(_Base):
     district_size: int = 10
     districts_per_region: int = 8
     opening: StoreOpeningConfig = StoreOpeningConfig()
+    # When False (default), the opening window is shifted entirely before
+    # defaults.dates.start so every store is open before the data begins. When
+    # True, stores may open mid-window (their pre-opening months carry no sales
+    # or staff); requires the opening-aware employee/bridge generation.
+    allow_mid_window_openings: bool = False
     closing_end: str = "2028-12-31"
     closing: StoreClosingConfig = StoreClosingConfig()
     assortment: AssortmentConfig = AssortmentConfig()

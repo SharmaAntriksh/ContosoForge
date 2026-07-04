@@ -21,6 +21,7 @@ from src.defaults import (
     STORE_STATUS as _STORE_STATUS,
     STORE_STATUS_P as _STORE_STATUS_P,
     STORE_CLOSE_REASONS as _CLOSE_REASONS,
+    STORE_MIN_OPERATING_DAYS,
     is_physical_store_key,
 )
 from src.dimensions.stores.columns import _as_date64d, _rand_dates_d
@@ -211,6 +212,7 @@ def assign_opening_closing_dates(
     closing_enabled,
     dataset_start,
     dataset_end,
+    allow_mid_window_openings=False,
 ):
     # Dates at DAY granularity
     open_start_d = _as_date64d(opening_start)
@@ -225,7 +227,10 @@ def assign_opening_closing_dates(
 
     # Stores opening after dataset_start would have no employees or sales for
     # their pre-open period; shift the window (preserving width) to fit before it.
-    if dataset_start:
+    # Skipped when mid-window openings are explicitly enabled — then stores may
+    # open inside the data range and the employee/bridge generation is expected
+    # to be opening-aware (no assignments before OpeningDate).
+    if dataset_start and not allow_mid_window_openings:
         ds_start_d = _as_date64d(dataset_start)
         one_day = np.timedelta64(1, "D")
         target_end = ds_start_d - one_day
@@ -239,6 +244,17 @@ def assign_opening_closing_dates(
             )
             open_start_d = new_start
             open_end_d = target_end
+
+    # Minimum operating window: with mid-window openings on, a store must open
+    # early enough to run at least STORE_MIN_OPERATING_DAYS before dataset_end,
+    # so cap the opening window there (a store opening in the last weeks of the
+    # data isn't worth capturing). Flag-off shifts the whole window before
+    # dataset_start, so this never binds there.
+    if allow_mid_window_openings and dataset_end:
+        latest_open_d = _as_date64d(dataset_end) - np.timedelta64(STORE_MIN_OPERATING_DAYS, "D")
+        open_end_d = min(open_end_d, latest_open_d)
+        if open_end_d < open_start_d:
+            open_end_d = open_start_d
 
     if close_end_d < open_end_d:
         warn(
@@ -255,39 +271,46 @@ def assign_opening_closing_dates(
 
     if closed_mask.any():
         if closing_enabled and dataset_start and dataset_end:
-            # Constrain closing dates to [dataset_start, dataset_end]
-            ds_start_d = _as_date64d(dataset_start)
-            ds_end_d = _as_date64d(dataset_end)
-            # Leave a buffer: close at least 30 days into the window,
-            # and at least 60 days before the end (for wind-down/transfer)
-            min_close_d = _as_date64d(
-                (pd.to_datetime(dataset_start) + pd.Timedelta(days=30)).date()
+            # Closing dates respect the minimum operating window: a store must run
+            # at least STORE_MIN_OPERATING_DAYS of *visible* operation (measured
+            # from max(OpeningDate, dataset_start)) before it may close, and every
+            # closing leaves a 60-day wind-down buffer before dataset_end. A store
+            # selected to close but with no room for a full-year window before that
+            # cutoff simply stays open (reverts to "Open") — a sub-year closure
+            # isn't worth capturing. Because closing >= opening + a year, the old
+            # "pull the opening back before the closing" fixup is no longer needed.
+            ds_start_i = int(_as_date64d(dataset_start).astype("int64"))
+            max_close_i = int(
+                _as_date64d(
+                    (pd.to_datetime(dataset_end) - pd.Timedelta(days=60)).date()
+                ).astype("int64")
             )
-            max_close_d = _as_date64d(
-                (pd.to_datetime(dataset_end) - pd.Timedelta(days=60)).date()
-            )
-            if max_close_d < min_close_d:
-                max_close_d = ds_end_d
 
-            n_closed = int(closed_mask.sum())
-            close_d = _rand_dates_d(rng, min_close_d, max_close_d, n_closed)
-            df.loc[closed_mask, "ClosingDate"] = pd.to_datetime(
-                close_d.astype("datetime64[ns]")
-            ).normalize()
-
-            # Ensure opening dates for closed stores are before their closing date
-            # (opening range may extend into the dataset window)
             closed_idx = np.where(closed_mask)[0]
-            open_ts = pd.to_datetime(df.loc[closed_mask, "OpeningDate"])
-            close_ts = pd.to_datetime(df.loc[closed_mask, "ClosingDate"])
-            bad = open_ts.to_numpy() >= close_ts.to_numpy()
-            if bad.any():
-                bad_idx = closed_idx[bad]
-                for bi in bad_idx:
-                    cd = pd.to_datetime(df.at[bi, "ClosingDate"]).normalize()
-                    # Place opening at least 180 days before closing
-                    new_open = cd - pd.Timedelta(days=rng.integers(180, 730))
-                    df.at[bi, "OpeningDate"] = new_open.normalize()
+            open_i = opening_d.astype("int64")[closed_mask]
+            visible_start_i = np.maximum(open_i, ds_start_i)
+            min_close_i = visible_start_i + STORE_MIN_OPERATING_DAYS
+            can_close = min_close_i <= max_close_i
+
+            if can_close.any():
+                lo = min_close_i[can_close]
+                close_days = rng.integers(lo, max_close_i + 1, dtype=np.int64)
+                good_idx = closed_idx[can_close]
+                df.loc[good_idx, "ClosingDate"] = (
+                    pd.to_datetime(close_days.astype("datetime64[D]").astype("datetime64[ns]"))
+                    .normalize().to_numpy()
+                )
+
+            reopen_idx = closed_idx[~can_close]
+            if reopen_idx.size:
+                debug(
+                    f"{reopen_idx.size} store(s) selected to close lacked room for a "
+                    f"{STORE_MIN_OPERATING_DAYS}-day operating window before the close "
+                    "cutoff; keeping them Open."
+                )
+                status_arr = df["Status"].to_numpy().copy()
+                status_arr[reopen_idx] = "Open"
+                df["Status"] = status_arr
         else:
             open_days     = opening_d.astype("int64")[closed_mask]
             close_end_day = close_end_d.astype("int64")
@@ -299,8 +322,8 @@ def assign_opening_closing_dates(
                     f"{closing_end}; their ClosingDate will be set to 30+ days after OpeningDate"
                 )
 
-            # Ensure at least 30 days of operation for closed stores
-            min_close_offset = 30
+            # Ensure at least a full operating year for closed stores
+            min_close_offset = STORE_MIN_OPERATING_DAYS
             effective_end = np.maximum(open_days + min_close_offset, close_end_day)
             close_days = rng.integers(open_days + min_close_offset, effective_end + 1, dtype=np.int64)
             close_d = close_days.astype("datetime64[D]")

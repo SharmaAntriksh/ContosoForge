@@ -13,6 +13,9 @@ from src.defaults import (
     EMPLOYEE_PART_TIME_RATE_BY_ROLE,
     EMPLOYEE_PART_TIME_FTE_VALUES,
     ONLINE_SALES_REP_ROLE,
+    MID_WINDOW_MANAGER_LEAD_MIN_DAYS,
+    MID_WINDOW_MANAGER_LEAD_MAX_DAYS,
+    MID_WINDOW_STAFF_RAMP_DAYS,
     is_online_store_key,
 )
 from src.dimensions.employees.names import _apply_deterministic_names
@@ -451,6 +454,76 @@ def assign_employment_dates_status(
             hire_dates.iloc[mgr_mask_np] = pd.to_datetime(
                 mgr_hire_i, unit="ns"
             ).normalize().to_numpy()
+
+    # ------------------------------------------------------------------
+    # Mid-window opening ramp — stores that open strictly after global_start
+    # (only possible when allow_mid_window_openings shifts nothing) get a roster
+    # that ramps up around opening day O instead of pre-existing: the manager
+    # arrives a few weeks ahead, the sales role lands on O (keeps salesperson
+    # coverage from the store's first month), and other staff trickle in over
+    # [O, O + ramp]. The bridge clamps every start up to O, so managers/sales
+    # show at O and other staff spread O..O+ramp. Inert (draws no RNG) when no
+    # store opens mid-window, so the default (shifted) output is byte-identical.
+    # This overrides the hire dates the SA/manager blocks above assigned for
+    # these rows; those blocks still draw so the RNG stream stays aligned.
+    # ------------------------------------------------------------------
+    if store_opening_dates:
+        open_per_emp = pd.to_datetime(
+            df["StoreKey"].map(
+                lambda s: store_opening_dates.get(int(s)) if pd.notna(s) else None
+            )
+        )
+        is_mid = (open_per_emp.notna() & (open_per_emp > global_start)).to_numpy()
+        if is_mid.any():
+            title_np = df["Title"].astype(str).to_numpy()
+            open_ns = open_per_emp.to_numpy("datetime64[ns]")
+            gend_ns = np.datetime64(pd.Timestamp(global_end).normalize(), "ns")
+            one_day = np.timedelta64(1, "D")
+            # A store that closes inside the window terminates its staff at
+            # ClosingDate-1 (below). Cap ramped hires there so nobody is hired
+            # after their store has shut — else HireDate > TerminationDate and
+            # the bridge's start<=end filter silently drops them. Sales (@O) and
+            # the manager (@O-lead) are always before closing since O < close.
+            if store_closing_dates:
+                close_ns = pd.to_datetime(
+                    df["StoreKey"].map(
+                        lambda s: store_closing_dates.get(int(s)) if pd.notna(s) else None
+                    )
+                ).to_numpy("datetime64[ns]")
+            else:
+                close_ns = np.full(len(df), np.datetime64("NaT", "ns"))
+
+            # Manager: hired O - Uniform[lead_min, lead_max] days (store setup).
+            mgr_mid = is_mid & (title_np == "Store Manager")
+            n_mgr_mid = int(mgr_mid.sum())
+            if n_mgr_mid > 0:
+                lead = rng.integers(
+                    MID_WINDOW_MANAGER_LEAD_MIN_DAYS,
+                    MID_WINDOW_MANAGER_LEAD_MAX_DAYS + 1,
+                    size=n_mgr_mid,
+                ).astype("timedelta64[D]")
+                hire_dates.iloc[mgr_mid] = open_ns[mgr_mid] - lead
+
+            # Sales role + online rep: present on opening day.
+            at_open_mid = is_mid & (
+                (title_np == ps_role_str) | (title_np == ONLINE_SALES_REP_ROLE)
+            )
+            if at_open_mid.any():
+                hire_dates.iloc[at_open_mid] = open_ns[at_open_mid]
+
+            # Remaining store staff: trickle in over [O, O + ramp], capped at
+            # global_end and (for stores that close in-window) the day before
+            # ClosingDate, so a ramped hire never lands after the store shuts.
+            ramp_mid = is_mid & ~mgr_mid & ~at_open_mid
+            n_ramp = int(ramp_mid.sum())
+            if n_ramp > 0:
+                offs = rng.integers(
+                    0, MID_WINDOW_STAFF_RAMP_DAYS + 1, size=n_ramp,
+                ).astype("timedelta64[D]")
+                cl = close_ns[ramp_mid]
+                cap = np.where(np.isnat(cl), gend_ns, np.minimum(gend_ns, cl - one_day))
+                staff_hire = np.minimum(open_ns[ramp_mid] + offs, cap)
+                hire_dates.iloc[ramp_mid] = staff_hire
 
     df["HireDate"] = hire_dates
 
