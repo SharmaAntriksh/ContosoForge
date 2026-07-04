@@ -216,7 +216,11 @@ def _fingerprint(df: pd.DataFrame, sort_keys: list[str]) -> str:
     payload = {
         "schema": [(str(c), str(d[c].dtype)) for c in d.columns],
         "rows": int(len(d)),
-        "csv": d.to_csv(index=False),
+        # lineterminator="\n": to_csv defaults to CRLF on Windows and LF on Linux,
+        # which would make the same data hash differently across platforms (e.g. a
+        # baseline recorded on Windows failing on Linux CI). Pin LF so the
+        # fingerprint is platform-independent.
+        "csv": d.to_csv(index=False, lineterminator="\n"),
     }
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
