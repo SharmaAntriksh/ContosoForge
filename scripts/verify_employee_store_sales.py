@@ -116,6 +116,58 @@ def _to_dt(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce")
 
 
+def _infer_data_window(folder: Path, sales: Optional[pd.DataFrame]):
+    """Return the data window ``(start, end)`` for the operating-window checks.
+
+    Prefer the packaged ``config/config.yaml`` ``defaults.dates`` — it is the
+    exact configured window, immune to sparse first/last sales months. The dates
+    *dimension* is deliberately NOT used: it is padded a year beyond the window,
+    which would inflate visible spans and mask genuinely short-lived stores.
+
+    The packaged config is the *file* snapshot, so ``--start-date`` / ``--end-date``
+    CLI overrides (applied in memory only) can make it disagree with the run. Sales
+    always fall inside the true window, so we cross-check: if the sales span spills
+    past the config window it is too narrow, and if BOTH sales edges sit well inside
+    it the config is too wide (a CLI-narrowed run) — either way trust the sales
+    span. A late *start* alone is just a sparse bootstrap, so config is kept. Sales
+    span is also the fallback when the config is absent/unreadable.
+    """
+    sales_span = None
+    if sales is not None and "OrderDate" in sales.columns:
+        _od = _to_dt(sales["OrderDate"])
+        sales_span = (_od.min(), _od.max())
+
+    cfg_path = folder / "config" / "config.yaml"
+    if cfg_path.exists():
+        try:
+            import yaml
+        except ImportError:
+            yaml = None
+        if yaml is not None:
+            start = end = None
+            try:
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                dates = (cfg.get("defaults") or {}).get("dates") or {}
+                start, end = dates.get("start"), dates.get("end")
+            except (yaml.YAMLError, OSError, ValueError, TypeError, KeyError):
+                start = end = None
+            if start and end:
+                cfg_start, cfg_end = pd.Timestamp(start), pd.Timestamp(end)
+                if sales_span is None:
+                    return cfg_start, cfg_end
+                smin, smax = sales_span
+                slack = pd.Timedelta(days=120)  # bootstrap / sparse-edge tolerance
+                spills = smin < cfg_start or smax > cfg_end
+                both_inside = smin > cfg_start + slack and smax < cfg_end - slack
+                if spills or both_inside:
+                    print("  [NOTE] packaged config.yaml dates disagree with the "
+                          "sales span (CLI --start-date/--end-date override?); "
+                          "using the sales span")
+                    return smin, smax
+                return cfg_start, cfg_end
+    return sales_span if sales_span is not None else (None, None)
+
+
 # ============================================================================
 # Checks: STORES
 # ============================================================================
@@ -218,8 +270,11 @@ def check_stores(
     if {"StoreDistrictId", "StoreRegionId", "StoreDistrict", "StoreRegion"} <= set(stores.columns):
         did_str = stores["StoreDistrict"].astype(str).str.extract(r"(\d+)", expand=False).astype("Int64")
         rid_str = stores["StoreRegion"].astype(str).str.extract(r"(\d+)", expand=False).astype("Int64")
-        did_bad = int((did_str != stores["StoreDistrictId"].astype("Int64")).sum())
-        rid_bad = int((rid_str != stores["StoreRegionId"].astype("Int64")).sum())
+        # fillna(True): a StoreDistrict string with no digits yields NA, and an NA
+        # comparison is skipna-dropped by .sum() — treat it as a mismatch instead,
+        # so a corrupted display string (or a missing id) fails rather than passes.
+        did_bad = int((did_str != stores["StoreDistrictId"].astype("Int64")).fillna(True).sum())
+        rid_bad = int((rid_str != stores["StoreRegionId"].astype("Int64")).fillna(True).sum())
         _add(cat, "StoreDistrictId/StoreRegionId match display strings",
              did_bad == 0 and rid_bad == 0,
              f"{did_bad} district + {rid_bad} region id/string mismatch(es)")
@@ -265,21 +320,30 @@ def check_stores(
     # A store's footprint inside the data window is [max(Opening, ds_start),
     # min(Closing, ds_end)]; the generator guarantees at least a year of it, so a
     # store opening in the last weeks of the data, or opening+closing within a
-    # year, is a bug. The data window is inferred from the sales OrderDate span; a
-    # month of grace absorbs any inference slack.
+    # year, is a bug. The floor scales to the window (a sub-year data window can't
+    # host a year of operation), a 31d grace absorbs residual inference slack, and
+    # a NaT OpeningDate counts as a failure rather than crashing int(span.min()).
     if ds_start is not None and ds_end is not None and "OpeningDate" in stores.columns:
         o = _to_dt(stores["OpeningDate"])
         c = _to_dt(stores["ClosingDate"])
         vis_start = o.clip(lower=ds_start)
         vis_end = c.fillna(ds_end).clip(upper=ds_end)
         span = (vis_end - vis_start).dt.days
-        floor_days = 365 - 31  # ~1 year, minus a month of window-inference grace
-        short = stores[span < floor_days]
-        _add(cat, "Every store operates >= ~1 year (visible window)",
-             len(short) == 0,
-             f"{len(short)} store(s) open < {floor_days}d in-window (min span {int(span.min())}d)",
-             _sample(short.assign(_span=span[span < floor_days].values),
-                     ["StoreKey", "Status", "OpeningDate", "ClosingDate", "_span"]))
+        window_days = int((pd.Timestamp(ds_end) - pd.Timestamp(ds_start)).days)
+        floor_days = min(365, window_days) - 31
+        if floor_days <= 0:
+            _add(cat, "Every store operates >= ~1 year (visible window)", True,
+                 f"data window is only {window_days}d (< 1yr) — check not applicable")
+        else:
+            n_nat = int(span.isna().sum())
+            min_span = int(span.min()) if span.notna().any() else -1
+            short = stores[(span < floor_days) | span.isna()]  # NaT opening => corrupt => fail
+            _add(cat, "Every store operates >= ~1 year (visible window)",
+                 len(short) == 0,
+                 f"{len(short)} store(s) open < {floor_days}d in-window "
+                 f"(min span {min_span}d, {n_nat} NaT OpeningDate(s))",
+                 _sample(short.assign(_span=span),
+                         ["StoreKey", "Status", "OpeningDate", "ClosingDate", "_span"]))
 
 
 # ============================================================================
@@ -369,6 +433,7 @@ def check_esa(
     esa: pd.DataFrame,
     stores: pd.DataFrame,
     employees: pd.DataFrame,
+    ds_start: Optional[pd.Timestamp] = None,
 ) -> None:
     cat = "ESA-Bridge"
 
@@ -620,7 +685,7 @@ def check_esa(
         _check_transfer_reason_consistency(_esa_emp_sorted, _same_emp, cat)
 
     # --- Opening-aware assignments + mid-window opening feature ---
-    _check_bridge_opening_and_midwindow(esa, stores, cat)
+    _check_bridge_opening_and_midwindow(esa, stores, cat, ds_start)
 
     # --- Salesperson coverage per open physical store-month ---
     _check_salesperson_coverage(esa, stores, cat)
@@ -712,6 +777,7 @@ def _check_bridge_opening_and_midwindow(
     esa: pd.DataFrame,
     stores: pd.DataFrame,
     cat: str,
+    ds_start: Optional[pd.Timestamp] = None,
 ) -> None:
     """Opening-aware assignments and the mid-window-openings feature.
 
@@ -719,8 +785,12 @@ def _check_bridge_opening_and_midwindow(
     no bridge assignment may start before its store's OpeningDate. When the flag
     is on, some stores open inside the data window; those must still be staffed
     from opening day, and their rosters ramp in (manager ahead, sales on opening,
-    other staff trickling) — reported for eyeballing. ``global_start`` is inferred
-    as the earliest bridge StartDate (pre-window stores clamp their start to it).
+    other staff trickling) — reported for eyeballing. ``global_start`` (the run
+    start used to classify mid-window stores) is the earliest bridge StartDate:
+    that equals the true run start whenever any store pre-dates the window and,
+    unlike the inferred ``ds_start``, cannot be poisoned by a stale packaged
+    config. Only in the all-mid-window degenerate (no pre-window assignment) does
+    it fall back to ``ds_start``, harmlessly.
     """
     if "OpeningDate" not in stores.columns:
         _add(cat, "Assignment StartDate >= store OpeningDate", True,
@@ -740,8 +810,19 @@ def _check_bridge_opening_and_midwindow(
          _sample(esa[before_mask.values],
                  ["EmployeeKey", "StoreKey", "StartDate", "TransferReason"]))
 
-    # Mid-window feature summary. global_start ~= earliest bridge start.
+    # Mid-window feature summary. The earliest bridge StartDate IS the run start
+    # whenever any store opened before the window (flag-off always; flag-on with
+    # any pre-window store) — and unlike the inferred ds_start it cannot be
+    # poisoned by a stale packaged config (one-sided --start-date overrides are
+    # not written back to the file). Only when NO store opened before the
+    # earliest assignment (every store mid-window) does the bridge lose its
+    # anchor; fall back to ds_start then. A too-early fallback is harmless in
+    # that regime: every store genuinely is mid-window, so the classification
+    # (and the staffed-on-opening-day hard check) is unchanged.
     global_start = start.min()
+    open_min = min((od for od in open_map.values() if pd.notna(od)), default=None)
+    if ds_start is not None and open_min is not None and open_min >= global_start:
+        global_start = min(global_start, pd.Timestamp(ds_start))
     mid_sk = {int(sk) for sk, od in open_map.items() if pd.notna(od) and od > global_start}
     n_mid = len(mid_sk)
     _add(cat, "Mid-window openings feature",
@@ -1225,14 +1306,11 @@ def main() -> int:
           f"ESA={len(esa)}, {sales_table}={len(sales):,})\n")
 
     # --- Run checks ---
-    print("=" * 60)
-    # Infer the data window from the sales OrderDate span for the
-    # minimum-operating-window check.
-    ds_start = ds_end = None
-    if sales is not None and "OrderDate" in sales.columns:
-        _od = _to_dt(sales["OrderDate"])
-        ds_start, ds_end = _od.min(), _od.max()
+    # Data window (packaged config first, sales span fallback) — anchors the
+    # minimum-operating-window and mid-window checks.
+    ds_start, ds_end = _infer_data_window(folder, sales)
 
+    print("=" * 60)
     print("STORES")
     print("=" * 60)
     check_stores(stores, warehouses, ds_start, ds_end)
@@ -1247,7 +1325,7 @@ def main() -> int:
     print("=" * 60)
     print("ESA BRIDGE TABLE")
     print("=" * 60)
-    check_esa(esa, stores, employees)
+    check_esa(esa, stores, employees, ds_start)
 
     print()
     print("=" * 60)

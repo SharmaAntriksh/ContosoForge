@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.exceptions import DimensionError
-from src.utils.logging_utils import debug, warn
+from src.utils.logging_utils import debug, info, warn
 from src.defaults import (
     STORE_STATUS as _STORE_STATUS,
     STORE_STATUS_P as _STORE_STATUS_P,
@@ -225,6 +225,19 @@ def assign_opening_closing_dates(
             f"({opening_start}); fix the reversed opening window in config."
         )
 
+    # A data window shorter than the minimum operating span makes the >= 1-year
+    # guarantee vacuous: no store can be visible that long, and none will close
+    # (the closing floor has no room). Warn rather than fail — the window is a
+    # deliberate config choice — but say the invariant cannot hold.
+    if dataset_start and dataset_end:
+        _window_days = int((_as_date64d(dataset_end) - _as_date64d(dataset_start)).astype("int64"))
+        if _window_days < STORE_MIN_OPERATING_DAYS:
+            warn(
+                f"data window is only {_window_days} days — shorter than "
+                f"STORE_MIN_OPERATING_DAYS ({STORE_MIN_OPERATING_DAYS}); the minimum "
+                "operating-window guarantee cannot hold and no store will close."
+            )
+
     # Stores opening after dataset_start would have no employees or sales for
     # their pre-open period; shift the window (preserving width) to fit before it.
     # Skipped when mid-window openings are explicitly enabled — then stores may
@@ -252,9 +265,19 @@ def assign_opening_closing_dates(
     # dataset_start, so this never binds there.
     if allow_mid_window_openings and dataset_end:
         latest_open_d = _as_date64d(dataset_end) - np.timedelta64(STORE_MIN_OPERATING_DAYS, "D")
+        if latest_open_d < open_start_d:
+            # The entire opening window sits after the cap, so no store could ever
+            # run a full year. Silently clamping produced same-day openings with a
+            # sub-year footprint (and no closings) — fail loudly instead; this is a
+            # config error. Fires before any RNG draw, so valid configs are unchanged.
+            raise DimensionError(
+                f"stores opening window [{opening_start}, {opening_end}] is incompatible "
+                f"with allow_mid_window_openings: every store must open on or before "
+                f"{latest_open_d} (dataset_end - {STORE_MIN_OPERATING_DAYS}d) to operate a "
+                f"minimum of {STORE_MIN_OPERATING_DAYS} days. Move opening_start earlier "
+                f"or extend defaults.dates.end."
+            )
         open_end_d = min(open_end_d, latest_open_d)
-        if open_end_d < open_start_d:
-            open_end_d = open_start_d
 
     if close_end_d < open_end_d:
         warn(
@@ -303,7 +326,9 @@ def assign_opening_closing_dates(
 
             reopen_idx = closed_idx[~can_close]
             if reopen_idx.size:
-                debug(
+                # Reverting Closed -> Open materially shrinks the effective
+                # close_share (sometimes to zero), so surface it at info level.
+                info(
                     f"{reopen_idx.size} store(s) selected to close lacked room for a "
                     f"{STORE_MIN_OPERATING_DAYS}-day operating window before the close "
                     "cutoff; keeping them Open."
@@ -319,7 +344,8 @@ def assign_opening_closing_dates(
             if late_openers:
                 warn(
                     f"{late_openers} closed store(s) have OpeningDate after closing_end="
-                    f"{closing_end}; their ClosingDate will be set to 30+ days after OpeningDate"
+                    f"{closing_end}; their ClosingDate will be set to "
+                    f"{STORE_MIN_OPERATING_DAYS}+ days after OpeningDate"
                 )
 
             # Ensure at least a full operating year for closed stores

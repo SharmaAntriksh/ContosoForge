@@ -96,6 +96,21 @@ class TestOpeningWindowFlag:
         )
         assert (pd.to_datetime(default["OpeningDate"]) < DS_START).all()
 
+    def test_opening_window_after_cap_raises(self, geo_keys, iso_by_geo):
+        """The whole opening window sits after dataset_end - 365d: no store can
+        satisfy the minimum operating window, so generation must fail loudly
+        instead of silently emitting same-day openings with a sub-year footprint."""
+        from src.exceptions import DimensionError
+        with pytest.raises(DimensionError, match="allow_mid_window_openings"):
+            generate_store_table(
+                geo=GeoContext(geo_keys=geo_keys, iso_by_geo=iso_by_geo),
+                num_stores=10, seed=7,
+                opening_start="2025-06-01", opening_end="2025-11-30",
+                dataset_start=str(DS_START.date()), dataset_end=str(DS_END.date()),
+                closing_enabled=False,
+                allow_mid_window_openings=True,
+            )
+
 
 def _build_cluster(geo_keys, iso_by_geo, people_pools):
     stores = _stores(geo_keys, iso_by_geo, allow_mid_window=True)
