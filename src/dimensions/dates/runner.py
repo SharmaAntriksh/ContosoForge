@@ -1,25 +1,35 @@
 """Runner for the dates dimension — config parsing, versioning, parquet write."""
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Dict
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from src.exceptions import ConfigError, DimensionError
-from src.utils import info, warn, skip, stage
+from src.utils import info, skip, stage, warn
 from src.utils.config_helpers import int_or as _int_or, bool_or as _bool_or, as_dict
 from src.utils.output_utils import write_parquet_with_date32
+from src.utils.static_schemas import DATE_ALL_COLUMNS
 from src.versioning import should_regenerate, save_version
 
 from .columns import get_date_rename_map, resolve_date_columns
 from .generator import generate_date_table
 from .helpers import _clamp_month, _normalize_override_dates, _require_start_end
-from .weekly_fiscal import WeeklyFiscalConfig
+from .weekly_fiscal import resolve_weekly_fiscal_cfg
+
+if TYPE_CHECKING:
+    from src.engine.config.config_schema import AppConfig
+
+# Code-version component of the dates version key. Dates was previously the only
+# dimension whose version key had no schema component, so shipped output changes
+# (alias removals, offset fixes) never reached existing outputs until an
+# unrelated config edit. Bump this whenever the dates *output* changes so all
+# users get a one-time regen (release-note it).
+DATES_SCHEMA_VERSION = 1
 
 
-def run_dates(cfg: Dict, parquet_folder: Path) -> None:
+def run_dates(cfg: "AppConfig", parquet_folder: Path) -> None:
     out_path = parquet_folder / "dates.parquet"
     if not hasattr(cfg, "dates"):
         raise ConfigError("Missing required config section: 'dates'")
@@ -34,6 +44,7 @@ def run_dates(cfg: Dict, parquet_folder: Path) -> None:
 
     version_cfg = as_dict(dates_cfg)
     version_cfg["global_dates"] = as_dict(defaults_dates) if defaults_dates else {}
+    version_cfg["schema_version"] = DATES_SCHEMA_VERSION
 
     if not should_regenerate("dates", version_cfg, out_path):
         skip("Dates up-to-date")
@@ -59,26 +70,7 @@ def run_dates(cfg: Dict, parquet_folder: Path) -> None:
     force_date32 = _bool_or(dates_cfg.force_date32, True)
 
     include = dates_cfg.include or {}
-    wf_block = getattr(include, "weekly_fiscal", None) or {}
-    if isinstance(wf_block, bool):
-        wf_block = {"enabled": wf_block}
-    if isinstance(wf_block, Mapping):
-        wf_cfg = WeeklyFiscalConfig(
-            enabled=_bool_or(wf_block.get("enabled", True), True),
-            first_day_of_week=_int_or(wf_block.get("first_day_of_week", 0), 0),
-            weekly_type=str(wf_block.get("weekly_type", "Last")),
-            quarter_week_type=str(wf_block.get("quarter_week_type", "445")),
-            type_start_fiscal_year=_int_or(wf_block.get("type_start_fiscal_year", 1), 1),
-        )
-    else:
-        # wf_block is a Pydantic model (WeeklyFiscalConfig from config_schema)
-        wf_cfg = WeeklyFiscalConfig(
-            enabled=_bool_or(getattr(wf_block, "enabled", True), True),
-            first_day_of_week=_int_or(getattr(wf_block, "first_day_of_week", 0), 0),
-            weekly_type=str(getattr(wf_block, "weekly_type", "Last")),
-            quarter_week_type=str(getattr(wf_block, "quarter_week_type", "445")),
-            type_start_fiscal_year=_int_or(getattr(wf_block, "type_start_fiscal_year", 1), 1),
-        )
+    wf_cfg = resolve_weekly_fiscal_cfg(getattr(include, "weekly_fiscal", None))
 
     with stage("Generating Dates"):
         df = generate_date_table(
@@ -88,6 +80,14 @@ def run_dates(cfg: Dict, parquet_folder: Path) -> None:
             as_of_date=as_of_date,
             weekly_cfg=wf_cfg,
         )
+
+        # Inverse guard: a generated column absent from the registry can never
+        # be exposed (resolve_date_columns only lists registry columns), so it
+        # would silently vanish at ``df = df[cols]``. Surface it instead.
+        registered = set(DATE_ALL_COLUMNS)
+        unregistered = [c for c in df.columns if c not in registered]
+        if unregistered:
+            warn(f"Dates: generated columns absent from registry (will not be emitted): {unregistered}")
 
         rename_map = get_date_rename_map(dates_cfg)
         if rename_map:

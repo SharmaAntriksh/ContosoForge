@@ -96,6 +96,13 @@ def add_calendar_columns(df: pd.DataFrame, *, as_of: pd.Timestamp) -> pd.DataFra
     df["CalendarWeekEndDate"] = (df["CalendarWeekStartDate"] + pd.Timedelta(days=6)).dt.normalize()
 
     # Week number within the year (1-based, partial first week = week 1).
+    #
+    # Convention: Sunday-based weeks with a partial first week counted as week 1.
+    # This is arithmetically consistent but can yield week 53 or even 54 in a leap
+    # year that starts on Saturday — e.g. 2000-12-31 and 2028-12-31 land in week 54.
+    # Kept as-is deliberately (changing it would be a data-visible break for zero
+    # benefit); BI consumers should expect the 1..54 range, not 1..52.
+    #
     # Compute Jan 1 day-of-week once per unique year, then map back.
     unique_years = df["Year"].unique()
     jan1_timestamps = pd.to_datetime(unique_years.astype(str) + "-01-01")

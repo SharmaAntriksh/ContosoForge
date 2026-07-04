@@ -3,23 +3,59 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import pandas as pd
 
+from src.exceptions import DimensionError
 from src.utils import warn
+from src.utils.config_helpers import int_or as _int_or
+from src.utils.static_schemas import weekly_fiscal_enabled
 
 from .helpers import _clamp_month, _format_week_date_range
 
 
 @dataclass(frozen=True)
 class WeeklyFiscalConfig:
-    enabled: bool = False
+    # Field defaults mirror the Pydantic ``WeeklyFiscalConfig`` in
+    # config_schema.py (the authority); equality is enforced by
+    # tests/test_dates.py::TestWeeklyFiscalConfigMirror. Default is ON
+    # (present/absent config both enable; only ``enabled: false`` turns it off).
+    # The single place OFF is chosen by default is the explicit
+    # ``WeeklyFiscalConfig(enabled=False)`` in generator.py's
+    # ``generate_date_table(weekly_cfg=None)`` fallback.
+    enabled: bool = True
     first_day_of_week: int = 0            # 0 = Sunday, 1 = Monday, ... 6 = Saturday
     weekly_type: str = "Last"             # "Last" or "Nearest"
     quarter_week_type: str = "445"        # "445", "454", "544"
     type_start_fiscal_year: int = 1       # 0 = start-year labeling, 1 = end-year labeling (matches DAX)
+
+
+def resolve_weekly_fiscal_cfg(wf_block: Any) -> WeeklyFiscalConfig:
+    """Normalize a raw ``include.weekly_fiscal`` value into the frozen dataclass.
+
+    Single boundary for all weekly-fiscal shape-shimming: accepts ``None``, a
+    bool, a plain dict, or a Pydantic model and always returns a
+    ``WeeklyFiscalConfig``. Enablement is delegated to the shared
+    ``weekly_fiscal_enabled`` predicate (so the parquet and SQL sides can never
+    disagree, and ``weekly_fiscal: false`` is honoured rather than erased);
+    absence yields the pipeline default (enabled).
+    """
+    enabled = weekly_fiscal_enabled(wf_block)
+    if isinstance(wf_block, bool):
+        wf_block = {}
+    wf_block = wf_block or {}
+    _get = wf_block.get if isinstance(wf_block, Mapping) else (
+        lambda key, default: getattr(wf_block, key, default)
+    )
+    return WeeklyFiscalConfig(
+        enabled=enabled,
+        first_day_of_week=_int_or(_get("first_day_of_week", 0), 0),
+        weekly_type=str(_get("weekly_type", "Last")),
+        quarter_week_type=str(_get("quarter_week_type", "445")),
+        type_start_fiscal_year=_int_or(_get("type_start_fiscal_year", 1), 1),
+    )
 
 
 def _weekday_num(date: pd.Timestamp, first_day_of_week: int) -> int:
@@ -87,19 +123,62 @@ def _weeks_in_periods(quarter_week_type: str) -> Tuple[int, int, int]:
     return (5, 4, 4)
 
 
-def _wf_is_enabled(wf_cfg) -> bool:
-    """Return True if the weekly_fiscal config block is present and enabled.
+def _fw_asof_indices(
+    as_of: pd.Timestamp,
+    *,
+    first_fiscal_month: int,
+    first_day_of_week: int,
+    weekly_type: str,
+    type_start_fiscal_year: int,
+    w1: int,
+    w2: int,
+    first_week_reference: pd.Timestamp,
+) -> Tuple[int, int, int]:
+    """Compute ``(FWWeekIndex, FWMonthIndex, FWQuarterIndex)`` for a single date.
 
-    Accepts both the new dict form (``{enabled: true, ...}``) and the legacy
-    bare bool (``weekly_fiscal: true``).
+    Uses the same formulas as :func:`add_weekly_fiscal_columns`, so when *as_of*
+    is present in the frame the result equals that row's values exactly; when it
+    is absent the offsets are still arithmetically correct rather than collapsing
+    to all-zero (mirrors the DATES-2 fix applied to ``fiscal.py``).
     """
-    if isinstance(wf_cfg, bool):
-        return wf_cfg
-    if isinstance(wf_cfg, dict):
-        return bool(wf_cfg.get("enabled", True))
-    if isinstance(wf_cfg, Mapping):
-        return bool(getattr(wf_cfg, "enabled", True))
-    return False
+    as_of = pd.Timestamp(as_of).normalize()
+
+    # The FW years partition the timeline with no gaps/overlaps, so exactly one
+    # candidate year around as_of.year contains it.
+    fw_year = None
+    start = None
+    for y in range(as_of.year - 1, as_of.year + 3):
+        s, e = _weekly_fiscal_year_bounds(
+            y, first_fiscal_month, first_day_of_week, weekly_type, type_start_fiscal_year
+        )
+        if s <= as_of <= e:
+            fw_year, start = y, s
+            break
+    if fw_year is None:
+        # Unreachable given the partition invariant (FW years tile the timeline
+        # with no gaps). If it ever fires, silently computing from a wrong year
+        # would yield subtly wrong offsets — fail loudly instead.
+        raise DimensionError(
+            f"weekly fiscal: no FW year contains as_of={as_of.date()} "
+            "(year-bounds partition invariant violated)"
+        )
+
+    fw_day_of_year = (as_of - start).days + 1
+    fw_week = (fw_day_of_year - 1) // 7 + 1
+    fw_quarter = 4 if fw_week > 52 else (fw_week + 12) // 13
+    week_in_q = 14 if fw_week > 52 else fw_week - 13 * (fw_quarter - 1)
+    if week_in_q <= w1:
+        m_in_q = 1
+    elif week_in_q <= w1 + w2:
+        m_in_q = 2
+    else:
+        m_in_q = 3
+    fw_month = (fw_quarter - 1) * 3 + m_in_q
+
+    week_index = ((as_of - first_week_reference).days) // 7 + 1
+    month_index = fw_year * 12 - 1 + fw_month
+    quarter_index = fw_year * 4 - 1 + fw_quarter
+    return int(week_index), int(month_index), int(quarter_index)
 
 
 def add_weekly_fiscal_columns(
@@ -386,26 +465,24 @@ def add_weekly_fiscal_columns(
 
     df = pd.concat([df, new_cols], axis=1)
 
-    # Weekly fiscal offsets (relative to as_of)
-    asof_mask = df["Date"] == as_of
-    asof_idx = df.index[asof_mask]
-
-    if len(asof_idx) > 0:
-        _asof = df.loc[asof_idx[0]]
-        as_of_fw_year_week_index = int(_asof["FWWeekIndex"])
-        as_of_fw_year_month_index = int(_asof["FWMonthIndex"])
-        as_of_fw_year_quarter_index = int(_asof["FWQuarterIndex"])
-
-        df = df.assign(
-            FWWeekOffset=(df["FWWeekIndex"].astype(int) - as_of_fw_year_week_index).astype(np.int32),
-            FWMonthOffset=(df["FWMonthIndex"].astype(int) - as_of_fw_year_month_index).astype(np.int32),
-            FWQuarterOffset=(df["FWQuarterIndex"].astype(int) - as_of_fw_year_quarter_index).astype(np.int32),
-        )
-    else:
-        df = df.assign(
-            FWWeekOffset=np.int32(0),
-            FWMonthOffset=np.int32(0),
-            FWQuarterOffset=np.int32(0),
-        )
+    # Weekly fiscal offsets (relative to as_of) — computed arithmetically from
+    # as_of's own FW indices (same formulas as the columns above). When as_of is
+    # present in the frame this equals that row's values exactly; when absent the
+    # offsets stay correct rather than collapsing to all-zero (DATES-2 pattern).
+    as_of_week_index, as_of_month_index, as_of_quarter_index = _fw_asof_indices(
+        as_of,
+        first_fiscal_month=first_fiscal_month,
+        first_day_of_week=fdow,
+        weekly_type=weekly_type,
+        type_start_fiscal_year=tsy,
+        w1=w1,
+        w2=w2,
+        first_week_reference=first_week_reference,
+    )
+    df = df.assign(
+        FWWeekOffset=(df["FWWeekIndex"].astype(int) - as_of_week_index).astype(np.int32),
+        FWMonthOffset=(df["FWMonthIndex"].astype(int) - as_of_month_index).astype(np.int32),
+        FWQuarterOffset=(df["FWQuarterIndex"].astype(int) - as_of_quarter_index).astype(np.int32),
+    )
 
     return df

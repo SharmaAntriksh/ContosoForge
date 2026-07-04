@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
 import numpy as np
 import pandas as pd
 
 from src.dimensions.lookups import _run_lookup_dim
+
+if TYPE_CHECKING:
+    from src.engine.config.config_schema import AppConfig
 
 
 # ── label helpers ────────────────────────────────────────────────────
@@ -126,7 +129,7 @@ def _df_time_table(dim_cfg: Dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def run_time_table(cfg: Dict[str, Any], parquet_folder: Path) -> None:
+def run_time_table(cfg: "AppConfig", parquet_folder: Path) -> None:
     """Public runner: cfg key "time", output time.parquet."""
     _run_lookup_dim(
         cfg=cfg,

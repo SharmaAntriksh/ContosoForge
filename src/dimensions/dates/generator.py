@@ -23,6 +23,14 @@ def generate_date_table(
     as_of_date: Optional[str] = None,
     weekly_cfg: Optional[WeeklyFiscalConfig] = None,
 ) -> pd.DataFrame:
+    """Build the full date table.
+
+    ``weekly_cfg=None`` is the *direct-call* API default: weekly-fiscal columns
+    are **disabled** — a bare programmatic call shouldn't silently emit ~40 extra
+    columns. This is the single place OFF is the implicit choice; the class
+    default is otherwise ON. The pipeline never relies on this — the runner always
+    resolves an explicit config via ``resolve_weekly_fiscal_cfg``.
+    """
     start_date = pd.to_datetime(start_date).normalize()
     end_date = pd.to_datetime(end_date).normalize()
     if end_date < start_date:
@@ -48,7 +56,8 @@ def generate_date_table(
     df = add_iso_columns(df, as_of=as_of)
     df = add_fiscal_columns(df, fiscal_start_month=fiscal_start_month, as_of=as_of)
 
-    weekly_cfg = weekly_cfg or WeeklyFiscalConfig()
+    # Explicit disabled default for the direct-API path (the class default is ON).
+    weekly_cfg = weekly_cfg if weekly_cfg is not None else WeeklyFiscalConfig(enabled=False)
     fy_start_month = _clamp_month(fiscal_start_month)
     df = add_weekly_fiscal_columns(df, first_fiscal_month=fy_start_month, cfg=weekly_cfg, as_of=as_of)
 

@@ -194,10 +194,16 @@ class TestStaticSchemas:
     def test_get_dates_schema_all_defaults(self):
         schema = get_dates_schema({})
         col_names = {c for c, _ in schema}
-        # Defaults include calendar, iso, fiscal
+        # Defaults: calendar + fiscal on, iso OFF (matches the pipeline/Pydantic
+        # DatesIncludeConfig.iso = False; unified via DATE_GROUP_DEFAULTS).
         assert "IsToday" in col_names
-        assert "ISOWeekNumber" in col_names
         assert "FiscalYear" in col_names
+        assert "ISOWeekNumber" not in col_names
+
+    def test_get_dates_schema_iso_opt_in(self):
+        schema = get_dates_schema({"include": {"iso": True}})
+        col_names = {c for c, _ in schema}
+        assert "ISOWeekNumber" in col_names
 
     def test_date_column_groups_keys(self):
         expected = {"base", "calendar", "iso", "fiscal", "weekly_fiscal", "base_calendar"}

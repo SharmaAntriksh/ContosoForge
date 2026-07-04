@@ -236,7 +236,14 @@ class CustomersConfig(_Base):
 # -- Dates (dimension table config) --
 
 class WeeklyFiscalConfig(_Base):
-    enabled: bool = False
+    # Default ON: a *present* weekly_fiscal block means the user wants the 4-4-5
+    # calendar, so omitting `enabled` inside it enables (matching an omitted
+    # block, which is also ON). This avoids the old surprise where adding a
+    # partial block — e.g. just `first_day_of_week` — silently DISABLED the
+    # feature. Set `enabled: false` to turn it off. The frozen dataclass mirror in
+    # weekly_fiscal.py carries the same default; the *only* place OFF is the
+    # implicit choice is the direct generate_date_table(weekly_cfg=None) call.
+    enabled: bool = True
     first_day_of_week: int = 0
     weekly_type: str = "Last"
     quarter_week_type: str = "445"

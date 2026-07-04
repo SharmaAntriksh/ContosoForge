@@ -10,8 +10,8 @@ from .helpers import _ISO_WEEK_REF, _format_week_date_range
 def add_iso_columns(df: pd.DataFrame, *, as_of: pd.Timestamp) -> pd.DataFrame:
     """Add ISO-8601 week columns and as-of week offset to *df*.
 
-    Expects ``Date`` and ``ISOWeekStartDate`` is NOT yet present (we compute it here
-    using ISO Monday-based weeks).
+    Expects a ``Date`` column; ``ISOWeekStartDate`` (ISO Monday-based) is
+    computed here.
     """
     iso = df["Date"].dt.isocalendar()
     df["ISOWeekNumber"] = iso.week.astype(np.int32)

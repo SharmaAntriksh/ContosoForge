@@ -5,6 +5,8 @@ ISO, and weekly fiscal (4-4-5) subsystems.
 """
 from __future__ import annotations
 
+from dataclasses import fields
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,6 +18,7 @@ from src.dimensions.dates import (
     WeeklyFiscalConfig,
 )
 from src.exceptions import DimensionError
+from src.dimensions.dates.helpers import _require_start_end
 from src.dimensions.dates.fiscal import add_fiscal_columns
 from src.dimensions.dates.iso import add_iso_columns
 from src.dimensions.dates.weekly_fiscal import (
@@ -23,7 +26,10 @@ from src.dimensions.dates.weekly_fiscal import (
     _weekly_fiscal_year_bounds,
     _weeks_in_periods,
     add_weekly_fiscal_columns,
+    resolve_weekly_fiscal_cfg,
 )
+from src.utils.static_schemas import weekly_fiscal_enabled
+from src.engine.config.config_schema import WeeklyFiscalConfig as PydWeeklyFiscalConfig
 
 
 # ===================================================================
@@ -122,12 +128,33 @@ class TestGenerateDateTable:
         pd.testing.assert_index_equal(dates, expected, check_names=False)
 
 
+class TestRequireStartEnd:
+    """The runner-boundary start/end validator raises on an inverted range."""
+
+    def test_inverted_range_raises(self):
+        # An inverted range is a config bug: raise, don't silently swap (matches
+        # the customers dimension).
+        with pytest.raises(DimensionError, match="before start date"):
+            _require_start_end("2025-12-31", "2020-01-01")
+
+    def test_valid_range_parses(self):
+        s, e = _require_start_end("2020-01-01", "2025-12-31")
+        assert s == pd.Timestamp("2020-01-01")
+        assert e == pd.Timestamp("2025-12-31")
+
+    def test_missing_raises(self):
+        with pytest.raises(DimensionError, match="Missing required"):
+            _require_start_end(None, "2025-12-31")
+
+
 class TestWeeklyFiscalConfigValues:
     """Test WeeklyFiscalConfig dataclass defaults and construction."""
 
     def test_default_values(self):
         cfg = WeeklyFiscalConfig()
-        assert cfg.enabled is False
+        # Default is ON (present/absent config both enable); only the direct-API
+        # generate_date_table(weekly_cfg=None) path opts out, explicitly.
+        assert cfg.enabled is True
         assert cfg.first_day_of_week == 0
         assert cfg.weekly_type == "Last"
         assert cfg.quarter_week_type == "445"
@@ -141,6 +168,97 @@ class TestWeeklyFiscalConfigValues:
         )
         assert cfg.enabled is False
         assert cfg.quarter_week_type == "454"
+
+
+class TestWeeklyFiscalConfigMirror:
+    """The frozen dataclass defaults must mirror the Pydantic authority.
+
+    ``resolve_weekly_fiscal_cfg`` is the single normalizer, but the two config
+    types must agree field-for-field so the "one default source" contract holds.
+    """
+
+    def test_field_names_and_defaults_equal(self):
+        dc_defaults = {f.name: f.default for f in fields(WeeklyFiscalConfig)}
+        pyd_defaults = {
+            name: fld.default
+            for name, fld in PydWeeklyFiscalConfig.model_fields.items()
+        }
+        assert dc_defaults == pyd_defaults
+
+
+class TestResolveWeeklyFiscalCfg:
+    """Single boundary for weekly-fiscal shape-shimming."""
+
+    def test_none_is_pipeline_default_enabled(self):
+        assert resolve_weekly_fiscal_cfg(None).enabled is True
+
+    def test_empty_dict_defaults_enabled(self):
+        assert resolve_weekly_fiscal_cfg({}).enabled is True
+
+    def test_dict_enabled_false(self):
+        assert resolve_weekly_fiscal_cfg({"enabled": False}).enabled is False
+
+    def test_bool_true(self):
+        assert resolve_weekly_fiscal_cfg(True).enabled is True
+
+    def test_bool_false(self):
+        # A bare `weekly_fiscal: false` must disable, not be erased by `or {}`.
+        assert resolve_weekly_fiscal_cfg(False).enabled is False
+
+    def test_pydantic_model_reports_its_enabled(self):
+        assert resolve_weekly_fiscal_cfg(PydWeeklyFiscalConfig(enabled=True)).enabled is True
+        assert resolve_weekly_fiscal_cfg(PydWeeklyFiscalConfig(enabled=False)).enabled is False
+        # A model with enabled unset reports its own default, now ON.
+        assert resolve_weekly_fiscal_cfg(PydWeeklyFiscalConfig()).enabled is True
+
+    def test_fields_passthrough(self):
+        cfg = resolve_weekly_fiscal_cfg(
+            {"enabled": True, "first_day_of_week": 1, "weekly_type": "Nearest",
+             "quarter_week_type": "454", "type_start_fiscal_year": 0}
+        )
+        assert (cfg.first_day_of_week, cfg.weekly_type, cfg.quarter_week_type,
+                cfg.type_start_fiscal_year) == (1, "Nearest", "454", 0)
+
+    def test_returns_frozen_dataclass(self):
+        assert isinstance(resolve_weekly_fiscal_cfg({}), WeeklyFiscalConfig)
+
+
+class TestWeeklyFiscalEnabledPredicate:
+    """The single enablement predicate shared by the parquet + SQL resolvers."""
+
+    def test_none_and_empty_default_enabled(self):
+        assert weekly_fiscal_enabled(None) is True
+        assert weekly_fiscal_enabled({}) is True
+
+    def test_bare_bool(self):
+        assert weekly_fiscal_enabled(True) is True
+        assert weekly_fiscal_enabled(False) is False
+
+    def test_string_false_coerced_consistently(self):
+        # bool_or parses "false" → False on BOTH sides (the old SQL side used raw
+        # bool("false") → True, causing a parquet↔DDL column-count mismatch).
+        assert weekly_fiscal_enabled({"enabled": "false"}) is False
+
+    def test_null_enabled_defaults_true(self):
+        # A present block with an explicit YAML-null `enabled:` defaults to on
+        # (bool_or(None, True)), identically on both sides.
+        assert weekly_fiscal_enabled({"enabled": None}) is True
+
+    def test_resolver_delegates_to_predicate(self):
+        # resolve_weekly_fiscal_cfg's enabled agrees with the predicate for every
+        # shape, so the dataclass builder and the column resolver never drift.
+        for block in (None, {}, True, False, {"enabled": "false"}, {"enabled": None},
+                      PydWeeklyFiscalConfig(enabled=True), PydWeeklyFiscalConfig()):
+            assert resolve_weekly_fiscal_cfg(block).enabled == weekly_fiscal_enabled(block)
+
+
+class TestGenerateDateTableApiDefault:
+    """generate_date_table(weekly_cfg=None) is the disabled API default."""
+
+    def test_no_weekly_cfg_disables_weekly_fiscal(self):
+        df = _make("2024-01-01", "2024-03-31")  # weekly_cfg omitted
+        assert not any(c.startswith("FW") for c in df.columns)
+        assert "WeeklyFiscalSystem" not in df.columns
 
 
 # ===================================================================
@@ -300,6 +418,14 @@ class TestCalendarWeek:
         df = _make("2024-01-01", "2024-12-31", fiscal=1)
         assert df["CalendarWeekNumber"].between(1, 54).all()
         assert df["CalendarWeekNumber"].iloc[0] >= 1
+
+    def test_calendar_week_number_can_reach_54(self):
+        """The Sunday-based partial-week-1 convention yields week 54 in a leap
+        year starting Saturday (2000). Documented convention, not a bug."""
+        df = _make("2000-01-01", "2000-12-31", fiscal=1)
+        dec31 = df[df["Date"] == pd.Timestamp("2000-12-31")].iloc[0]
+        assert int(dec31["CalendarWeekNumber"]) == 54
+        assert int(df["CalendarWeekNumber"].max()) == 54
 
     def test_calendar_week_index_monotonic(self):
         """CalendarWeekIndex should be monotonically non-decreasing."""

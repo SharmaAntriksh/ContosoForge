@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from src.tools.sql.dialect import ColumnSpec, SqlType
+from src.utils.config_helpers import bool_or as _bool_or
 
 # Type aliases (lightweight, no runtime overhead)
 SchemaCol = Tuple[str, ColumnSpec]
@@ -128,6 +129,192 @@ def _validate_schema_map(schema_map: Mapping[str, Schema]) -> None:
         if not isinstance(table, str) or not table.strip():
             raise ValueError(f"Invalid table key: {table!r}")
         _validate_schema(table, schema)
+
+
+# ============================================================================
+# DATES COLUMN REGISTRY — single source of truth
+# ============================================================================
+# One ordered table of (name, group, spaced_name, sql_type) per Dates column.
+# Row order defines the output column order. Everything downstream derives from
+# it: the Dates entry in STATIC_SCHEMAS (name -> sql_type), the per-group
+# internal column lists + DATE_COLUMN_GROUPS, and columns.py's
+# resolve_date_columns group lists + spaced-name rename map. To add a Dates
+# column, append one row here (plus the generator that emits it) — the sync test
+# and the runner's unregistered-column guard enforce that the sides stay aligned.
+_DatesRegistryRow = Tuple[str, str, str, ColumnSpec]
+
+_DATES_REGISTRY: Tuple[_DatesRegistryRow, ...] = (
+    # --- base ---
+    ('Date', 'base', 'Date', DATE_NN),
+    ('DateKey', 'base', 'Date Key', INT_NN),
+    ('DateSerialNumber', 'base', 'Date Serial Number', INT_NN),
+    ('Year', 'base', 'Year', INT_NN),
+    ('Quarter', 'base', 'Quarter', INT_NN),
+    ('QuarterStartDate', 'base', 'Quarter Start Date', DATE_NN),
+    ('QuarterEndDate', 'base', 'Quarter End Date', DATE_NN),
+    ('QuarterYear', 'base', 'Quarter Year', VARCHAR(10, not_null=True)),
+    ('Month', 'base', 'Month', INT_NN),
+    ('MonthName', 'base', 'Month Name', VARCHAR(10, not_null=True)),
+    ('MonthShort', 'base', 'Month Short', VARCHAR(10, not_null=True)),
+    ('MonthStartDate', 'base', 'Month Start Date', DATE_NN),
+    ('MonthEndDate', 'base', 'Month End Date', DATE_NN),
+    ('MonthYear', 'base', 'Month Year', VARCHAR(20, not_null=True)),
+    ('MonthYearKey', 'base', 'Month Year Key', INT_NN),
+    ('YearQuarterKey', 'base', 'Year Quarter Key', INT_NN),
+    ('CalendarMonthIndex', 'base', 'Calendar Month Index', INT_NN),
+    ('CalendarQuarterIndex', 'base', 'Calendar Quarter Index', INT_NN),
+    ('WeekOfMonth', 'base', 'Week Of Month', INT_NN),
+    ('CalendarWeekNumber', 'base', 'Calendar Week Number', INT_NN),
+    ('CalendarWeekStartDate', 'base', 'Calendar Week Start Date', DATE_NN),
+    ('CalendarWeekEndDate', 'base', 'Calendar Week End Date', DATE_NN),
+    ('CalendarWeekDateRange', 'base', 'Calendar Week Date Range', VARCHAR(30, not_null=True)),
+    ('CalendarWeekIndex', 'base', 'Calendar Week Index', INT_NN),
+    ('Day', 'base', 'Day', INT_NN),
+    ('DayName', 'base', 'Day Name', VARCHAR(10, not_null=True)),
+    ('DayShort', 'base', 'Day Short', VARCHAR(10, not_null=True)),
+    ('DayOfYear', 'base', 'Day Of Year', INT_NN),
+    ('DayOfQuarter', 'base', 'Day Of Quarter', INT_NN),
+    ('DayOfWeek', 'base', 'Day Of Week', INT_NN),
+    ('IsWeekend', 'base', 'Is Weekend', BIT(not_null=True)),
+    ('IsBusinessDay', 'base', 'Is Business Day', BIT(not_null=True)),
+    ('NextBusinessDay', 'base', 'Next Business Day', DATE_NN),
+    ('PreviousBusinessDay', 'base', 'Previous Business Day', DATE_NN),
+    ('YearStartDate', 'base', 'Year Start Date', DATE_NN),
+    ('YearEndDate', 'base', 'Year End Date', DATE_NN),
+    ('MonthDays', 'base', 'Month Days', INT_NN),
+    ('QuarterDays', 'base', 'Quarter Days', INT_NN),
+    ('YearDays', 'base', 'Year Days', INT_NN),
+    ('DatePreviousWeek', 'base', 'Date Previous Week', DATE_NN),
+    ('DatePreviousMonth', 'base', 'Date Previous Month', DATE_NN),
+    ('DatePreviousQuarter', 'base', 'Date Previous Quarter', DATE_NN),
+    ('DatePreviousYear', 'base', 'Date Previous Year', DATE_NN),
+    # --- calendar ---
+    ('IsYearStart', 'calendar', 'Is Year Start', BIT(not_null=True)),
+    ('IsYearEnd', 'calendar', 'Is Year End', BIT(not_null=True)),
+    ('IsQuarterStart', 'calendar', 'Is Quarter Start', BIT(not_null=True)),
+    ('IsQuarterEnd', 'calendar', 'Is Quarter End', BIT(not_null=True)),
+    ('IsMonthStart', 'calendar', 'Is Month Start', BIT(not_null=True)),
+    ('IsMonthEnd', 'calendar', 'Is Month End', BIT(not_null=True)),
+    ('IsToday', 'calendar', 'Is Today', BIT(not_null=True)),
+    ('IsCurrentYear', 'calendar', 'Is Current Year', BIT(not_null=True)),
+    ('IsCurrentMonth', 'calendar', 'Is Current Month', BIT(not_null=True)),
+    ('IsCurrentQuarter', 'calendar', 'Is Current Quarter', BIT(not_null=True)),
+    ('CurrentDayOffset', 'calendar', 'Current Day Offset', INT_NN),
+    ('YearOffset', 'calendar', 'Year Offset', SMALLINT_NN),
+    ('CalendarMonthOffset', 'calendar', 'Calendar Month Offset', INT_NN),
+    ('CalendarQuarterOffset', 'calendar', 'Calendar Quarter Offset', INT_NN),
+    ('CalendarWeekOffset', 'calendar', 'Calendar Week Offset', INT_NN),
+    # --- iso ---
+    ('ISOWeekNumber', 'iso', 'ISO Week Number', INT_NN),
+    ('ISOYear', 'iso', 'ISO Year', INT_NN),
+    ('ISOYearWeekIndex', 'iso', 'ISO Year Week Index', INT_NN),
+    ('ISOWeekOffset', 'iso', 'ISO Week Offset', INT_NN),
+    ('ISOWeekStartDate', 'iso', 'ISO Week Start Date', DATE_NN),
+    ('ISOWeekEndDate', 'iso', 'ISO Week End Date', DATE_NN),
+    ('ISOWeekDateRange', 'iso', 'ISO Week Date Range', VARCHAR(30, not_null=True)),
+    # --- fiscal ---
+    ('FiscalYearStartYear', 'fiscal', 'Fiscal Year Start Year', INT_NN),
+    ('FiscalMonthNumber', 'fiscal', 'Fiscal Month Number', INT_NN),
+    ('FiscalQuarterNumber', 'fiscal', 'Fiscal Quarter Number', INT_NN),
+    ('FiscalMonthIndex', 'fiscal', 'Fiscal Month Index', INT_NN),
+    ('FiscalQuarterIndex', 'fiscal', 'Fiscal Quarter Index', INT_NN),
+    ('FiscalMonthOffset', 'fiscal', 'Fiscal Month Offset', INT_NN),
+    ('FiscalQuarterOffset', 'fiscal', 'Fiscal Quarter Offset', INT_NN),
+    ('FiscalQuarterLabel', 'fiscal', 'Fiscal Quarter Label', VARCHAR(20, not_null=True)),
+    ('FiscalMonthName', 'fiscal', 'Fiscal Month Name', VARCHAR(10, not_null=True)),
+    ('FiscalMonthShort', 'fiscal', 'Fiscal Month Short', VARCHAR(10, not_null=True)),
+    ('FiscalYearRange', 'fiscal', 'Fiscal Year Range', VARCHAR(20, not_null=True)),
+    ('FiscalYearStartDate', 'fiscal', 'Fiscal Year Start Date', DATE_NN),
+    ('FiscalYearEndDate', 'fiscal', 'Fiscal Year End Date', DATE_NN),
+    ('FiscalQuarterStartDate', 'fiscal', 'Fiscal Quarter Start Date', DATE_NN),
+    ('FiscalQuarterEndDate', 'fiscal', 'Fiscal Quarter End Date', DATE_NN),
+    ('IsFiscalYearStart', 'fiscal', 'Is Fiscal Year Start', BIT(not_null=True)),
+    ('IsFiscalYearEnd', 'fiscal', 'Is Fiscal Year End', BIT(not_null=True)),
+    ('IsFiscalQuarterStart', 'fiscal', 'Is Fiscal Quarter Start', BIT(not_null=True)),
+    ('IsFiscalQuarterEnd', 'fiscal', 'Is Fiscal Quarter End', BIT(not_null=True)),
+    ('FiscalYear', 'fiscal', 'Fiscal Year', INT_NN),
+    ('FiscalYearLabel', 'fiscal', 'Fiscal Year Label', VARCHAR(10, not_null=True)),
+    ('FiscalQuarterDays', 'fiscal', 'Fiscal Quarter Days', INT_NN),
+    ('FiscalYearDays', 'fiscal', 'Fiscal Year Days', INT_NN),
+    ('FiscalDayOfQuarter', 'fiscal', 'Fiscal Day Of Quarter', INT_NN),
+    ('FiscalDayOfYear', 'fiscal', 'Fiscal Day Of Year', INT_NN),
+    ('FiscalYearOffset', 'fiscal', 'Fiscal Year Offset', INT_NN),
+    # --- weekly_fiscal ---
+    ('FWYearNumber', 'weekly_fiscal', 'FW Year Number', INT_NN),
+    ('FWYearLabel', 'weekly_fiscal', 'FW Year Label', VARCHAR(10, not_null=True)),
+    ('FWQuarterNumber', 'weekly_fiscal', 'FW Quarter Number', INT_NN),
+    ('FWQuarterLabel', 'weekly_fiscal', 'FW Quarter Label', VARCHAR(20, not_null=True)),
+    ('FWQuarterIndex', 'weekly_fiscal', 'FW Quarter Index', INT_NN),
+    ('FWQuarterOffset', 'weekly_fiscal', 'FW Quarter Offset', INT_NN),
+    ('FWMonthNumber', 'weekly_fiscal', 'FW Month Number', INT_NN),
+    ('FWMonthLabel', 'weekly_fiscal', 'FW Month Label', VARCHAR(20, not_null=True)),
+    ('FWMonthIndex', 'weekly_fiscal', 'FW Month Index', INT_NN),
+    ('FWMonthOffset', 'weekly_fiscal', 'FW Month Offset', INT_NN),
+    ('FWWeekNumber', 'weekly_fiscal', 'FW Week Number', INT_NN),
+    ('FWWeekLabel', 'weekly_fiscal', 'FW Week Label', VARCHAR(20, not_null=True)),
+    ('FWWeekDateRange', 'weekly_fiscal', 'FW Week Date Range', VARCHAR(30, not_null=True)),
+    ('FWWeekIndex', 'weekly_fiscal', 'FW Week Index', INT_NN),
+    ('FWWeekOffset', 'weekly_fiscal', 'FW Week Offset', INT_NN),
+    ('FWPeriodNumber', 'weekly_fiscal', 'FW Period Number', INT_NN),
+    ('FWPeriodLabel', 'weekly_fiscal', 'FW Period Label', VARCHAR(20, not_null=True)),
+    ('FWStartOfYear', 'weekly_fiscal', 'FW Start Of Year', DATE_NN),
+    ('FWEndOfYear', 'weekly_fiscal', 'FW End Of Year', DATE_NN),
+    ('FWStartOfQuarter', 'weekly_fiscal', 'FW Start Of Quarter', DATE_NN),
+    ('FWEndOfQuarter', 'weekly_fiscal', 'FW End Of Quarter', DATE_NN),
+    ('FWStartOfMonth', 'weekly_fiscal', 'FW Start Of Month', DATE_NN),
+    ('FWEndOfMonth', 'weekly_fiscal', 'FW End Of Month', DATE_NN),
+    ('FWStartOfWeek', 'weekly_fiscal', 'FW Start Of Week', DATE_NN),
+    ('FWEndOfWeek', 'weekly_fiscal', 'FW End Of Week', DATE_NN),
+    ('FWWeekDayNumber', 'weekly_fiscal', 'FW Week Day Number', INT_NN),
+    ('FWWeekDayNameShort', 'weekly_fiscal', 'FW Week Day Name Short', VARCHAR(10, not_null=True)),
+    ('FWDayOfYear', 'weekly_fiscal', 'FW Day Of Year', INT_NN),
+    ('FWDayOfQuarter', 'weekly_fiscal', 'FW Day Of Quarter', INT_NN),
+    ('FWDayOfMonth', 'weekly_fiscal', 'FW Day Of Month', INT_NN),
+    ('FWMonthDays', 'weekly_fiscal', 'FW Month Days', INT_NN),
+    ('FWQuarterDays', 'weekly_fiscal', 'FW Quarter Days', INT_NN),
+    ('FWYearDays', 'weekly_fiscal', 'FW Year Days', INT_NN),
+    ('FWDatePreviousMonth', 'weekly_fiscal', 'FW Date Previous Month', DATE_NN),
+    ('FWDatePreviousQuarter', 'weekly_fiscal', 'FW Date Previous Quarter', DATE_NN),
+    ('FWIsWorkingDay', 'weekly_fiscal', 'FW Is Working Day', BIT(not_null=True)),
+    ('FWDayType', 'weekly_fiscal', 'FW Day Type', VARCHAR(20, not_null=True)),
+    ('FWWeekInQuarterNumber', 'weekly_fiscal', 'FW Week In Quarter Number', INT_NN),
+    ('FWYearMonthLabel', 'weekly_fiscal', 'FW Year Month Label', VARCHAR(20, not_null=True)),
+    ('WeeklyFiscalSystem', 'weekly_fiscal', 'Weekly Fiscal System', VARCHAR(40, not_null=True)),
+)
+
+# Canonical group order (also the output section order).
+_DATES_GROUP_ORDER: Tuple[str, ...] = ("base", "calendar", "iso", "fiscal", "weekly_fiscal")
+
+# include.<group> fallback defaults — the single shared default table read by
+# BOTH resolvers (this module's _dates_internal_columns and columns.py's
+# resolve_date_columns), so a missing include key can never diverge between them.
+# iso defaults OFF to match the pipeline (DatesIncludeConfig.iso = False).
+DATE_GROUP_DEFAULTS: Dict[str, bool] = {"calendar": True, "iso": False, "fiscal": True}
+
+
+def _dates_cols_by_group(group: str) -> List[str]:
+    return [name for name, grp, _spaced, _t in _DATES_REGISTRY if grp == group]
+
+
+_DATES_BASE_INTERNAL = _dates_cols_by_group("base")
+_DATES_CALENDAR_INTERNAL = _dates_cols_by_group("calendar")
+_DATES_ISO_INTERNAL = _dates_cols_by_group("iso")
+_DATES_FISCAL_INTERNAL = _dates_cols_by_group("fiscal")
+_WF_INTERNAL_COLS = _dates_cols_by_group("weekly_fiscal")
+
+# name -> spaced display name (authority for columns.py's rename map).
+_DATES_SPACED_NAMES: Dict[str, str] = {name: spaced for name, _g, spaced, _t in _DATES_REGISTRY}
+
+# All Dates columns in output order — used by the runner's unregistered-column guard.
+DATE_ALL_COLUMNS: Tuple[str, ...] = tuple(name for name, _g, _s, _t in _DATES_REGISTRY)
+
+# Each column belongs to exactly one group; assert it once at build time so the
+# resolvers can skip a per-call dedupe pass and rely on the invariant.
+assert len(set(DATE_ALL_COLUMNS)) == len(DATE_ALL_COLUMNS), "duplicate name in _DATES_REGISTRY"
+
+# The Dates schema (name -> sql_type), derived from the registry and injected
+# into STATIC_SCHEMAS below.
+_DATES_SCHEMA: Schema = tuple((name, sql_type) for name, _g, _s, sql_type in _DATES_REGISTRY)
 
 
 # ============================================================================
@@ -473,149 +660,8 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("ShrinkageRatePct", FLOAT(not_null=False)),
         ("WarehouseKey", INT_NN),
     ),
-    "Dates": (
-        ("Date", DATE_NN),
-        ("DateKey", INT_NN),
-        ("DateSerialNumber", INT_NN),
-
-        ("Year", INT_NN),
-        ("IsYearStart", BIT(not_null=True)),
-        ("IsYearEnd", BIT(not_null=True)),
-
-        ("Quarter", INT_NN),
-        ("QuarterStartDate", DATE_NN),
-        ("QuarterEndDate", DATE_NN),
-        ("IsQuarterStart", BIT(not_null=True)),
-        ("IsQuarterEnd", BIT(not_null=True)),
-        ("QuarterYear", VARCHAR(10, not_null=True)),
-
-        ("Month", INT_NN),
-        ("MonthName", VARCHAR(10, not_null=True)),
-        ("MonthShort", VARCHAR(10, not_null=True)),
-        ("MonthStartDate", DATE_NN),
-        ("MonthEndDate", DATE_NN),
-        ("MonthYear", VARCHAR(20, not_null=True)),
-        ("MonthYearKey", INT_NN),
-        ("YearQuarterKey", INT_NN),
-        ("CalendarMonthIndex", INT_NN),
-        ("CalendarQuarterIndex", INT_NN),
-        ("IsMonthStart", BIT(not_null=True)),
-        ("IsMonthEnd", BIT(not_null=True)),
-
-        ("WeekOfMonth", INT_NN),
-        ("CalendarWeekNumber", INT_NN),
-        ("CalendarWeekStartDate", DATE_NN),
-        ("CalendarWeekEndDate", DATE_NN),
-        ("CalendarWeekDateRange", VARCHAR(30, not_null=True)),
-        ("CalendarWeekIndex", INT_NN),
-
-        ("Day", INT_NN),
-        ("DayName", VARCHAR(10, not_null=True)),
-        ("DayShort", VARCHAR(10, not_null=True)),
-        ("DayOfYear", INT_NN),
-        ("DayOfWeek", INT_NN),
-        ("IsWeekend", BIT(not_null=True)),
-        ("IsBusinessDay", BIT(not_null=True)),
-        ("NextBusinessDay", DATE_NN),
-        ("PreviousBusinessDay", DATE_NN),
-        ("YearStartDate", DATE_NN),
-        ("YearEndDate", DATE_NN),
-        ("MonthDays", INT_NN),
-        ("QuarterDays", INT_NN),
-        ("YearDays", INT_NN),
-        ("DayOfQuarter", INT_NN),
-        ("DatePreviousWeek", DATE_NN),
-        ("DatePreviousMonth", DATE_NN),
-        ("DatePreviousQuarter", DATE_NN),
-        ("DatePreviousYear", DATE_NN),
-
-        ("IsToday", BIT(not_null=True)),
-        ("IsCurrentYear", BIT(not_null=True)),
-        ("IsCurrentMonth", BIT(not_null=True)),
-        ("IsCurrentQuarter", BIT(not_null=True)),
-        ("CurrentDayOffset", INT_NN),
-        ("YearOffset", SMALLINT(not_null=True)),
-        ("CalendarMonthOffset", INT_NN),
-        ("CalendarQuarterOffset", INT_NN),
-        ("CalendarWeekOffset", INT_NN),
-
-        ("ISOWeekNumber", INT_NN),
-        ("ISOYear", INT_NN),
-        ("ISOYearWeekIndex", INT_NN),
-        ("ISOWeekOffset", INT_NN),
-        ("ISOWeekStartDate", DATE_NN),
-        ("ISOWeekEndDate", DATE_NN),
-        ("ISOWeekDateRange", VARCHAR(30, not_null=True)),
-
-        # Month-based fiscal calendar (kept as "Fiscal ..." to distinguish from Weekly Fiscal)
-        ("FiscalYearStartYear", INT_NN),
-        ("FiscalMonthNumber", INT_NN),
-        ("FiscalQuarterNumber", INT_NN),
-        ("FiscalMonthIndex", INT_NN),
-        ("FiscalQuarterIndex", INT_NN),
-        ("FiscalMonthOffset", INT_NN),
-        ("FiscalQuarterOffset", INT_NN),
-        ("FiscalQuarterLabel", VARCHAR(20, not_null=True)),
-        ("FiscalMonthName", VARCHAR(10, not_null=True)),
-        ("FiscalMonthShort", VARCHAR(10, not_null=True)),
-        ("FiscalYearRange", VARCHAR(20, not_null=True)),
-        ("FiscalYearStartDate", DATE_NN),
-        ("FiscalYearEndDate", DATE_NN),
-        ("FiscalQuarterStartDate", DATE_NN),
-        ("FiscalQuarterEndDate", DATE_NN),
-        ("IsFiscalYearStart", BIT(not_null=True)),
-        ("IsFiscalYearEnd", BIT(not_null=True)),
-        ("IsFiscalQuarterStart", BIT(not_null=True)),
-        ("IsFiscalQuarterEnd", BIT(not_null=True)),
-        ("FiscalYear", INT_NN),
-        ("FiscalYearLabel", VARCHAR(10, not_null=True)),
-        ("FiscalQuarterDays", INT_NN),
-        ("FiscalYearDays", INT_NN),
-        ("FiscalDayOfQuarter", INT_NN),
-        ("FiscalDayOfYear", INT_NN),
-        ("FiscalYearOffset", INT_NN),
-        # Weekly fiscal calendar (DAX weekly logic), disambiguated with "Weekly Fiscal ..." prefix.
-        ("FWYearNumber", INT_NN),
-        ("FWYearLabel", VARCHAR(10, not_null=True)),
-        ("FWQuarterNumber", INT_NN),
-        ("FWQuarterLabel", VARCHAR(20, not_null=True)),
-        ("FWQuarterIndex", INT_NN),
-        ("FWQuarterOffset", INT_NN),
-        ("FWMonthNumber", INT_NN),
-        ("FWMonthLabel", VARCHAR(20, not_null=True)),
-        ("FWMonthIndex", INT_NN),
-        ("FWMonthOffset", INT_NN),
-        ("FWWeekNumber", INT_NN),
-        ("FWWeekLabel", VARCHAR(20, not_null=True)),
-        ("FWWeekDateRange", VARCHAR(30, not_null=True)),
-        ("FWWeekIndex", INT_NN),
-        ("FWWeekOffset", INT_NN),
-        ("FWPeriodNumber", INT_NN),
-        ("FWPeriodLabel", VARCHAR(20, not_null=True)),
-        ("FWStartOfYear", DATE_NN),
-        ("FWEndOfYear", DATE_NN),
-        ("FWStartOfQuarter", DATE_NN),
-        ("FWEndOfQuarter", DATE_NN),
-        ("FWStartOfMonth", DATE_NN),
-        ("FWEndOfMonth", DATE_NN),
-        ("FWStartOfWeek", DATE_NN),
-        ("FWEndOfWeek", DATE_NN),
-        ("FWWeekDayNumber", INT_NN),
-        ("FWWeekDayNameShort", VARCHAR(10, not_null=True)),
-        ("FWDayOfYear", INT_NN),
-        ("FWDayOfQuarter", INT_NN),
-        ("FWDayOfMonth", INT_NN),
-        ("FWMonthDays", INT_NN),
-        ("FWQuarterDays", INT_NN),
-        ("FWYearDays", INT_NN),
-        ("FWDatePreviousMonth", DATE_NN),
-        ("FWDatePreviousQuarter", DATE_NN),
-        ("FWIsWorkingDay", BIT(not_null=True)),
-        ("FWDayType", VARCHAR(20, not_null=True)),
-        ("FWWeekInQuarterNumber", INT_NN),
-        ("FWYearMonthLabel", VARCHAR(20, not_null=True)),
-        ("WeeklyFiscalSystem", VARCHAR(40, not_null=True)),
-    ),
+    # Derived from _DATES_REGISTRY (the single source of truth above).
+    "Dates": _DATES_SCHEMA,
     "Time": (
         ("TimeKey", SMALLINT_NN),       # 0..1439 minute-of-day
         ("Hour24", INT_NN),             # 0..23
@@ -875,128 +921,10 @@ STATIC_SCHEMAS: Mapping[str, Schema] = MappingProxyType(_ALL_SCHEMAS_MUT)
 # ============================================================================
 # DATE COLUMN GROUPS (logical, superset)
 # ============================================================================
-
-# ---------------------------------------------------------------------
-# Dates schema helpers
-# ---------------------------------------------------------------------
-
-_WF_INTERNAL_COLS: list[str] = [
-    "FWYearNumber",
-    "FWYearLabel",
-    "FWQuarterNumber",
-    "FWQuarterLabel",
-    "FWQuarterIndex",
-    "FWQuarterOffset",
-    "FWMonthNumber",
-    "FWMonthLabel",
-    "FWMonthIndex",
-    "FWMonthOffset",
-    "FWWeekNumber",
-    "FWWeekLabel",
-    "FWWeekDateRange",
-    "FWWeekIndex",
-    "FWWeekOffset",
-    "FWPeriodNumber",
-    "FWPeriodLabel",
-    "FWStartOfYear",
-    "FWEndOfYear",
-    "FWStartOfQuarter",
-    "FWEndOfQuarter",
-    "FWStartOfMonth",
-    "FWEndOfMonth",
-    "FWStartOfWeek",
-    "FWEndOfWeek",
-    "FWWeekDayNumber",
-    "FWWeekDayNameShort",
-    "FWDayOfYear",
-    "FWDayOfQuarter",
-    "FWDayOfMonth",
-    "FWMonthDays",
-    "FWQuarterDays",
-    "FWYearDays",
-    "FWDatePreviousMonth",
-    "FWDatePreviousQuarter",
-    "FWIsWorkingDay",
-    "FWDayType",
-    "FWWeekInQuarterNumber",
-    "FWYearMonthLabel",
-    "WeeklyFiscalSystem",
-]
-
-
-
-# ---------------------------------------------------------------------
-# Dates column naming
-# ---------------------------------------------------------------------
-# The generator emits SQL-friendly internal column names (no spaces).
-# Any "pretty" renaming should be done downstream (e.g., Power BI display folders or SQL views).
-
-
-# Internal Dates column groups (must match dates.py resolve_date_columns)
-#
-# _DATES_BASE_INTERNAL: Always emitted regardless of include flags.
-# Contains the primary key columns plus fundamental date-part attributes
-# that every downstream consumer needs (Year, Month, Day, names, etc.).
-#
-# _DATES_CALENDAR_INTERNAL: Emitted only when include.calendar is true.
-# Contains calendar-specific flags (IsYearStart, IsMonthEnd, IsToday, etc.)
-# and relative offsets (CurrentDayOffset, YearOffset, etc.).
-
-_DATES_BASE_INTERNAL = [
-    "Date", "DateKey", "DateSerialNumber",
-    "Year",
-    "Quarter", "QuarterStartDate", "QuarterEndDate",
-    "QuarterYear",
-    "Month", "MonthName", "MonthShort",
-    "MonthStartDate", "MonthEndDate",
-    "MonthYear", "MonthYearKey",
-    "YearQuarterKey",
-    "CalendarMonthIndex", "CalendarQuarterIndex",
-    "WeekOfMonth",
-    "CalendarWeekNumber",
-    "CalendarWeekStartDate", "CalendarWeekEndDate",
-    "CalendarWeekDateRange",
-    "CalendarWeekIndex",
-    "Day", "DayName", "DayShort", "DayOfYear", "DayOfQuarter", "DayOfWeek",
-    "IsWeekend", "IsBusinessDay",
-    "NextBusinessDay", "PreviousBusinessDay",
-    "YearStartDate", "YearEndDate",
-    "MonthDays", "QuarterDays", "YearDays",
-    "DatePreviousWeek", "DatePreviousMonth", "DatePreviousQuarter", "DatePreviousYear",
-]
-
-_DATES_CALENDAR_INTERNAL = [
-    "IsYearStart", "IsYearEnd",
-    "IsQuarterStart", "IsQuarterEnd",
-    "IsMonthStart", "IsMonthEnd",
-    "IsToday", "IsCurrentYear", "IsCurrentMonth", "IsCurrentQuarter",
-    "CurrentDayOffset", "YearOffset",
-    "CalendarMonthOffset", "CalendarQuarterOffset", "CalendarWeekOffset",
-]
-
-_DATES_ISO_INTERNAL = [
-    "ISOWeekNumber",
-    "ISOYear",
-    "ISOYearWeekIndex",
-    "ISOWeekOffset",
-    "ISOWeekStartDate",
-    "ISOWeekEndDate",
-    "ISOWeekDateRange",
-]
-
-_DATES_FISCAL_INTERNAL = [
-    "FiscalYearStartYear", "FiscalMonthNumber", "FiscalQuarterNumber",
-    "FiscalMonthIndex", "FiscalQuarterIndex", "FiscalMonthOffset", "FiscalQuarterOffset",
-    "FiscalQuarterLabel", "FiscalMonthName", "FiscalMonthShort", "FiscalYearRange",
-    "FiscalYearStartDate", "FiscalYearEndDate",
-    "FiscalQuarterStartDate", "FiscalQuarterEndDate",
-    "IsFiscalYearStart", "IsFiscalYearEnd",
-    "IsFiscalQuarterStart", "IsFiscalQuarterEnd",
-    "FiscalYear", "FiscalYearLabel",
-    "FiscalQuarterDays", "FiscalYearDays",
-    "FiscalDayOfQuarter", "FiscalDayOfYear",
-    "FiscalYearOffset",
-]
+# The per-group internal column lists (_DATES_BASE_INTERNAL, _WF_INTERNAL_COLS,
+# etc.) and _DATES_SPACED_NAMES are all derived from _DATES_REGISTRY above — the
+# single source of truth. The generator emits SQL-friendly internal names (no
+# spaces); spaced display names are applied downstream via columns.py.
 
 
 def _cfg_get(obj, key, default=None):
@@ -1006,61 +934,61 @@ def _cfg_get(obj, key, default=None):
     return getattr(obj, key, default)
 
 
-def _wf_is_enabled(wf_cfg) -> bool:
-    """Return True if the weekly_fiscal config block is present and enabled.
+def weekly_fiscal_enabled(wf_block) -> bool:
+    """Single weekly-fiscal enablement predicate.
 
-    Accepts both the new dict form (``{enabled: true, ...}``) and the legacy
-    bare bool (``weekly_fiscal: true``).
+    Shared by the parquet-side normalizer (``resolve_weekly_fiscal_cfg``) and the
+    SQL-side column resolver (``_dates_internal_columns``) so the two can never
+    disagree — the exact parquet↔DDL divergence class the registry closes.
+
+    Rules: a bare ``bool`` is honoured first (so ``weekly_fiscal: false`` is not
+    erased by the ``or {}`` coalescing); absence / ``None`` / empty ⇒ **enabled**
+    (the pipeline default); a present block reports its own ``enabled`` via the
+    canonical ``bool_or`` coercion, so ``"false"`` / null / ``0`` parse the same
+    on both sides.
     """
-    if isinstance(wf_cfg, bool):
-        return wf_cfg
-    if wf_cfg is not None:
-        return bool(_cfg_get(wf_cfg, "enabled", True))
-    return False
+    if isinstance(wf_block, bool):
+        wf_block = {"enabled": wf_block}
+    wf_block = wf_block or {}
+    return _bool_or(_cfg_get(wf_block, "enabled", True), True)
 
 
 def _dates_internal_columns(dates_cfg: Mapping) -> list[str]:
-    """Resolve internal output column list for SQL CREATE TABLE generation.
+    """Resolve the internal (PascalCase) Dates output column list.
 
-    Column inclusion logic:
-      - Base columns are always included (Date, DateKey, DateSerialNumber,
-        plus fundamental date-part attributes: Year, Month, MonthName, Day,
-        DayName, Quarter, WeekOfMonth, etc.).
-      - include.calendar (default True) adds calendar flags and offsets
-        (IsYearStart, IsMonthEnd, IsToday, CurrentDayOffset, etc.).
-      - include.iso (default True) adds ISO week columns.
+    Single registry-driven resolver for both the parquet output (via
+    ``columns.resolve_date_columns``, which only layers spaced-name renaming on
+    top) and the SQL/DDL schema (``get_dates_schema``). Inclusion logic:
+      - Base columns are always included (Date, DateKey, DateSerialNumber, plus
+        fundamental date-part attributes: Year, Month, MonthName, Day, etc.).
+      - include.calendar (default True) adds calendar flags/offsets.
+      - include.iso (default False) adds ISO week columns.
       - include.fiscal (default True) adds monthly fiscal columns.
-      - include.weekly_fiscal.enabled adds weekly fiscal (4-4-5) columns;
-        the same block holds the algorithm parameters (first_day_of_week,
-        weekly_type, quarter_week_type, type_start_fiscal_year).
+      - include.weekly_fiscal.enabled adds weekly fiscal (4-4-5) columns; the same
+        block holds the algorithm parameters (first_day_of_week, weekly_type, ...).
 
-    NOTE: dates.py resolve_date_columns must be updated to match this split
-    so that the parquet output and SQL schema stay in sync.
+    The include.* fallbacks read DATE_GROUP_DEFAULTS and weekly fiscal routes
+    through ``weekly_fiscal_enabled`` — the same tables/predicate both output
+    paths consume — so a missing/edge-cased key cannot diverge between them. The
+    registry assigns each column to exactly one group (asserted at build time),
+    so no dedupe pass is needed.
     """
     dates_cfg = dates_cfg or {}
     include = _cfg_get(dates_cfg, "include", {}) or {}
-    wf_cfg = _cfg_get(include, "weekly_fiscal", {}) or {}
 
     cols: list[str] = list(_DATES_BASE_INTERNAL)
 
-    if _cfg_get(include, "calendar", True):
+    if _cfg_get(include, "calendar", DATE_GROUP_DEFAULTS["calendar"]):
         cols += _DATES_CALENDAR_INTERNAL
-    if _cfg_get(include, "iso", True):
+    if _cfg_get(include, "iso", DATE_GROUP_DEFAULTS["iso"]):
         cols += _DATES_ISO_INTERNAL
-    if _cfg_get(include, "fiscal", True):
+    if _cfg_get(include, "fiscal", DATE_GROUP_DEFAULTS["fiscal"]):
         cols += _DATES_FISCAL_INTERNAL
 
-    if _wf_is_enabled(wf_cfg):
+    if weekly_fiscal_enabled(_cfg_get(include, "weekly_fiscal", None)):
         cols += _WF_INTERNAL_COLS
 
-    # Dedupe preserve order
-    seen = set()
-    out = []
-    for c in cols:
-        if c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
+    return cols
 
 DATE_COLUMN_GROUPS = {
     # Base columns are always present in Dates output (includes fundamental date-part attributes).
@@ -1163,10 +1091,11 @@ def get_dates_schema(dates_cfg: Mapping) -> list[SchemaCol]:
         DateSerialNumber) plus fundamental date-part attributes (Year,
         Month, MonthName, Day, DayName, Quarter, etc.).
       - include.calendar (default True) adds calendar flags/offsets.
-      - include.iso (default True) adds ISO week columns.
+      - include.iso (default False) adds ISO week columns.
       - include.fiscal (default True) adds monthly fiscal columns.
       - include.weekly_fiscal.enabled adds weekly fiscal (4-4-5) columns.
 
+    Defaults come from DATE_GROUP_DEFAULTS (shared with the parquet resolver).
     When ``dates.spaced_column_names`` is true, output column names have
     spaces (e.g. ``"Calendar Week Start Date"``).
     """
@@ -1192,6 +1121,8 @@ def get_dates_schema(dates_cfg: Mapping) -> list[SchemaCol]:
 __all__ = [
     "STATIC_SCHEMAS",
     "DATE_COLUMN_GROUPS",
+    "DATE_GROUP_DEFAULTS",
+    "DATE_ALL_COLUMNS",
     "promote_order_number",
     "get_sales_schema",
     "get_sales_order_header_schema",
