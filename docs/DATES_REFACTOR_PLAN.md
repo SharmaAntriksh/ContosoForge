@@ -1,5 +1,71 @@
 # Dates Package Refactor Plan
 
+> **Update (2026-07-05):** Phases 0–4 and the post-review round were committed as
+> `123e0e8`. The one item this doc still listed as open — finding 4's deeper half,
+> aligning `config_helpers.parse_global_dates` on raise — has since been applied
+> (inverted date ranges now raise `ConfigError`, matching the dates dimension).
+> Phase 5 remains the only parked backlog.
+
+## Status at a glance (2026-07-04)
+
+Phases 0–4 implemented and green (full suite **2081 passed, 0 xfailed**; goldens
+byte-identical throughout). Phase 5 is a parked backlog.
+
+| Phase | Scope | Status | Notes |
+|---|---|---|---|
+| 0 Guardrails | golden snapshots, 3-way column-sync test, property + bug-pin tests | ✅ Done | new `tests/test_dates_snapshot.py` + `tests/golden/dates_snapshots.json` |
+| 1 Truth & trivia | dead `warn`/`_override` removed, docstrings, `AppConfig` type hints | ✅ Done | stale `dates.py` refs were in `static_schemas.py`, not `columns.py` |
+| 2 Column registry | `_DATES_REGISTRY` single source; shared `DATE_GROUP_DEFAULTS`; runner guard | ✅ Done | xfail #1 flipped (iso divergence gone); byte-identical derived artifacts |
+| 3 One WF config | single `resolve_weekly_fiscal_cfg` normalizer; `_wf_is_enabled` deleted | ✅ Done | kept mirrored-defaults option (not remove-defaults) — no `generator.py` ripple |
+| 4 Correctness & policy | `schema_version:1`, arithmetic WF offsets, raise-on-inverted, week-54 doc | ✅ Done | xfail #2 & #3 flipped; `time` already had a schema_version |
+| 5 Parked decisions | holidays, `FiscalMonthName` dup, single-concat batching, `time.py` import | ⬜ Not done | decision-gated backlog, intentionally deferred |
+
+**Deliberately not done:**
+- **Phase 5 (all items).** Real feature/product decisions, not refactoring: holiday
+  calendar support, the `FiscalMonthName`/`FiscalMonthShort` keep-or-drop decision,
+  the cosmetic single-`concat` batching in `calendar.py`/`fiscal.py`/`iso.py`, and
+  promoting `time.py`'s private `_run_lookup_dim` import.
+- **The "remove all dataclass defaults" variant of Phase 3** — kept the mirrored-
+  defaults + guard-test option instead (byte-preserving, avoids the `generator.py`
+  `WeeklyFiscalConfig()` ripple).
+- **No commit** — left for review; the `schema_version` bump forces a one-time
+  regen of `dates.parquet` for existing users (release-note it).
+
+**Post-review round (`DATES_REFACTOR_REVIEW.md`, 2026-07-04).** Applied findings
+1, 2+7, 5, 6, 8, the docstring half of 4, and two minors — full suite **2089
+passed**, goldens still byte-identical:
+- Unified weekly-fiscal enablement into one shared `weekly_fiscal_enabled`
+  predicate (`static_schemas`, `bool_or`-coerced), used by both output paths;
+  deleted the divergent `_wf_is_enabled`. `weekly_fiscal: false` is now honoured
+  (bool checked before `or {}`).
+- Collapsed the two parallel selection resolvers into one registry-driven
+  `_dates_internal_columns`; `resolve_date_columns` is now a thin spaced-name
+  wrapper over it (removes the duplicated if-ladder + the no-op dedupe; build-time
+  registry-uniqueness assert replaces it). `_dedupe_preserve_order` deleted.
+- Fixed the stale `get_dates_schema` iso-default docstring; rewrote the vacuous
+  "one edit" registry test to assert the real derived artifacts; de-phase-labelled
+  the snapshot module docstring; corrected the inverted-dates docstring.
+- `_fw_asof_indices` now raises instead of silently computing from a wrong year.
+- **Finding 3 fixed** (the "no silent surprises" call): weekly-fiscal now defaults
+  **ON** uniformly — both the Pydantic and dataclass `enabled` default flip to
+  `True`, so a *present-but-partial* block enables (matching an omitted block)
+  instead of silently disabling. The mirror invariant is kept; the single place
+  OFF is the implicit choice is the explicit `WeeklyFiscalConfig(enabled=False)`
+  in `generate_date_table(weekly_cfg=None)`. Byte-identical for every config in
+  this repo (`config.yaml` sets `enabled: true` explicitly; the default fixture
+  omits the block → still on) — only a hypothetical partial block flips off→on.
+  No extra `schema_version` bump: this ships together with the Phase 4.1
+  `schema_version=1` introduction, which already forces the one-time regen that
+  carries the new behavior. Regression tests: partial-block-enables +
+  direct-API-stays-off.
+- **Applied 2026-07-05:** finding 4's deeper half — `config_helpers.parse_global_dates`
+  now raises `ConfigError` on an inverted range (both the override and defaults
+  paths) so employees/products/complaints fail fast and consistently with
+  dates+customers instead of silently swapping. The now-unused `warn` import was
+  dropped; the `test_utils` swap tests assert the raise.
+
+---
+
 Refactor of `src/dimensions/dates/` (runner, generator, calendar, iso, fiscal,
 weekly_fiscal, columns, helpers, time). Driven by the 2026-07 review — the third
 in the series after employees and customers.
@@ -246,6 +312,89 @@ bundle into the phases above.
 Total effort is roughly one-third of the employees plan and one-sixth of the
 customers plan. Phases 0–4 are the complete refactor; Phase 5 is a decision
 backlog. Phases 2 and 3 are independent and can be done in either order.
+
+## Implementation status (2026-07-04)
+
+**Phases 0–4 complete.** Full suite green (2081 passed, 0 xfailed); the golden
+snapshots stayed byte-identical across Phases 1–3 and unchanged in Phase 4 (the
+behavior fixes are all unreachable via the pipeline).
+
+- **Phase 0** — `tests/test_dates_snapshot.py` + `tests/golden/dates_snapshots.json`:
+  golden digests over the default/exotic/53-week fixture matrix, the three-way
+  sync test (`resolve_date_columns` == static_schemas == parquet cols), property
+  tests, and three strict-xfail bug pins.
+- **Phase 1** — removed the dead `warn` import in `runner.py`; fixed the drifted
+  `iso.py` docstring and the stale `dates.py` references in `static_schemas.py`
+  (the plan mis-located these in `columns.py`); annotated `run_dates`/
+  `run_time_table` as `AppConfig`; deleted the provably-dead `_override` backdoor.
+- **Phase 2** — `_DATES_REGISTRY` (name, group, spaced_name, sql_type) in
+  `static_schemas.py` is now the single source; the group lists, `_SPACED_NAMES`,
+  `DATE_COLUMN_GROUPS`, and `STATIC_SCHEMAS["Dates"]` all derive from it. Shared
+  `DATE_GROUP_DEFAULTS` kills the iso divergence (xfail #1 flipped). Runner gained
+  an unregistered-column guard. (Deviation: the registry physically holds the
+  type, but the type authority was never the *duplicated* axis — the win is the
+  group/spaced-name unification + shared defaults.)
+- **Phase 3** — one `resolve_weekly_fiscal_cfg` normalizer at the boundary;
+  `_wf_is_enabled` deleted from the dates package; dataclass defaults proven to
+  mirror the Pydantic authority (guard test). Kept the mirrored-defaults option
+  (not the "remove defaults" variant) — byte-preserving, no `generator.py` ripple.
+- **Phase 4** — `schema_version: 1` added to the dates version key (xfail #3);
+  arithmetic weekly-fiscal offsets replacing the all-zero fallback (xfail #2);
+  `_require_start_end` now raises on an inverted range; CalendarWeekNumber ≥ 54
+  documented at its computation site + tested. `time` already carried a
+  schema_version (verified, no change needed).
+
+**Phase 5 remains parked** (holiday support, FiscalMonthName dup decision, the
+calendar/fiscal/iso single-concat cosmetic batching, `time.py`'s private import).
+
+## Data-quality review of generated output (2026-07-04)
+
+Separate from the structural review above: an empirical validation of the
+values a generated `dates.parquet` actually contains (1999–2030 range,
+fiscal_start_month=5, weekly 445 Last, as_of inside the window — 57 assertions).
+
+**Verified correct** (no action needed):
+
+- `DateKey` unique/contiguous; `DateSerialNumber` matches the Excel epoch
+  (2006-12-31 → 39082); no nulls in any column.
+- ISO week/year match `pandas.isocalendar()` exactly; `ISOWeekStartDate` is
+  always Monday, `CalendarWeekStartDate` always Sunday.
+- Monthly fiscal: May=FM1/April=FM12 under start-month 5, end-year FY labeling,
+  quarters partition the fiscal year, `FiscalDayOfYear`/`FiscalYearDays`
+  (365/366) internally consistent.
+- Weekly fiscal: FW years partition the timeline with **no gaps or overlaps**
+  across 1999–2030; year lengths only 364/371; 53-week years (2000, 2005, 2011,
+  2016, 2022, 2028) put week 53 in FM12/FQ4, Q4 = 98 days, month 3 of Q4 = 42
+  days; `FWMonthDays ∈ {28,35,42}`; per-month row counts equal `FWMonthDays`
+  for interior years; start/end/day-of-period columns mutually consistent.
+- All 12 offset columns are exactly 0 on the `as_of` row and monotone over time.
+- `DatePrevious*` end-of-month clamping is right: Mar 31 → Feb 28,
+  Feb 29 → Feb 28 (prior year), Apr 30 → Mar 31.
+
+**Known/accepted conventions worth documenting in the Phase 2 registry**
+(none are wrong, but each will surprise a BI consumer):
+
+1. `CalendarWeekNumber` can reach **54** (2000-12-31, 2028-12-31) — the
+   Sunday-based partial-first-week convention; already parked as Phase 4.4.
+2. `WeekOfMonth` is `ceil(Day/7)` (day-block based), **not aligned** with the
+   Sunday-week convention of `CalendarWeekStartDate`/`CalendarWeekNumber`.
+   E.g. July 2026: days 1–7 are all WeekOfMonth 1 even though a new Sunday week
+   starts on day 5. Two week definitions coexist in the same table.
+3. `FWPeriodNumber` is a **13×4-week period calendar**, not the 4-4-5 month
+   sequence: it diverges from `FWMonthNumber` from week 13 onward (e.g. week 13
+   is FM3/FQ1 but P4). Deliberate (retail 13-period convention) — document.
+4. `DatePrevious*` / `NextBusinessDay` at the table edges: prior-period dates
+   before the first row simply point outside the table, and the last row's
+   `NextBusinessDay` falls back to itself (even when it is not a business day).
+   Harmless in the pipeline because `buffer_years ≥ 1` keeps fact dates away
+   from the edges, but a `buffer_years: 0` config exposes it.
+5. `IsBusinessDay`/`Next|PreviousBusinessDay` treat only weekends as
+   non-business (no holidays) — already parked as the Phase 5 holiday decision.
+
+The two genuine output-correctness bugs found earlier are already in Phase 4:
+the all-zero weekly-fiscal offset fallback (4.2, unreachable via the pipeline
+because the runner clamps `as_of` into the window) and the silent start/end
+swap (4.3).
 
 ## Standing TODO (bugs found later go here, not into unrelated phases)
 
