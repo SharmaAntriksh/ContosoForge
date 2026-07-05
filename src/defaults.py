@@ -140,6 +140,15 @@ MIN_PHYSICAL_EMPLOYEE_COUNT: int = 2
 ONLINE_STORE_KEY_BASE: int = 10_000
 ONLINE_SALES_REP_ROLE: str = "Online Sales Representative"
 
+# Weight multiplier applied to a store's primary ("anchor") salesperson relative
+# to non-primary staff when sampling which salesperson is credited with a sale:
+# a primary rep at FTE 1.0 is this many times as likely to be picked as a
+# non-primary rep at the same FTE. Single source for the sales salesperson
+# weighting build path (facts/sales) — both the coordinator prebuild
+# (_prebuild_shared_structures) and the worker-side builder
+# (_build_salesperson_effective_by_store) read it, so the two can never drift.
+SALESPERSON_PRIMARY_BOOST: float = 2.0
+
 
 def is_online_store_key(sk):
     """Online iff StoreKey > ONLINE_STORE_KEY_BASE (online keys start at BASE+1).

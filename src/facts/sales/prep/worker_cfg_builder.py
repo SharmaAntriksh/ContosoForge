@@ -16,6 +16,7 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
+from src.defaults import SALESPERSON_PRIMARY_BOOST
 from src.utils.config_helpers import (
     bool_or as _bool_or,
     int_or as _int_or,
@@ -233,7 +234,7 @@ def _build_worker_cfg(
 
         seed_master=int(seed),
         employee_salesperson_seed=int(seed) + 99173,
-        employee_primary_boost=2.0,
+        employee_primary_boost=SALESPERSON_PRIMARY_BOOST,
 
         employee_assign_store_key=emps.employee_assign_store_key,
         employee_assign_employee_key=emps.employee_assign_employee_key,

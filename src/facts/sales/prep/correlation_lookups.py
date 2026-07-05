@@ -21,6 +21,7 @@ from src.defaults import (
     CHANNEL_TO_ELIG_GROUP,
     DEFAULT_CHANNEL_FULFILLMENT_DAYS,
     DEFAULT_CHANNEL_MAP,
+    SALESPERSON_PRIMARY_BOOST,
     STORE_TYPE_CHANNEL_MAP,
 )
 
@@ -214,7 +215,7 @@ def _prebuild_shared_structures(
             assign_end=employee_assign_end_date,
             assign_fte=employee_assign_fte,
             assign_is_primary=employee_assign_is_primary,
-            primary_boost=2.0,
+            primary_boost=SALESPERSON_PRIMARY_BOOST,
             perf_spread=_sp_perf_spread,
             perf_seed=_sp_perf_seed,
         )

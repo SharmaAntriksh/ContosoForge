@@ -16,6 +16,7 @@ from ..output_paths import (
 from ..sales_logic import bind_globals, State
 from ..sales_logic.chunk_builder import reset_worker_caches
 from .schemas import build_worker_schemas_from_cfg
+from src.defaults import SALESPERSON_PRIMARY_BOOST
 from src.exceptions import ConfigError, SalesError
 from src.utils.config_helpers import int_or, float_or, str_or
 from src.utils.logging_utils import warn as _warn
@@ -386,7 +387,7 @@ def _build_salesperson_effective_by_store(
     assign_end: Any,
     assign_fte: Any = None,
     assign_is_primary: Any = None,
-    primary_boost: float = 2.0,
+    primary_boost: float = SALESPERSON_PRIMARY_BOOST,
     perf_spread: float = 0.0,
     perf_seed: int = 0,
 ) -> Optional[dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]:
