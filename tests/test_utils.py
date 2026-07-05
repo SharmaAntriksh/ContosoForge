@@ -229,10 +229,18 @@ class TestParseGlobalDates:
         with pytest.raises(ConfigError, match="defaults.dates"):
             parse_global_dates(cfg, AppConfig.model_validate({}))
 
-    def test_swapped_dates_corrected(self):
+    def test_inverted_defaults_dates_raise(self):
+        # An inverted range is a config bug: raise (matching the dates dimension),
+        # don't silently swap and let other dims generate the wrong window.
         cfg = AppConfig.model_validate({"defaults": {"dates": {"start": "2025-01-01", "end": "2020-01-01"}}})
-        gs, ge = parse_global_dates(cfg, AppConfig.model_validate({}))
-        assert gs < ge
+        with pytest.raises(ConfigError, match="inverted"):
+            parse_global_dates(cfg, AppConfig.model_validate({}))
+
+    def test_inverted_override_dates_raise(self):
+        cfg = AppConfig.model_validate({"defaults": {"dates": {"start": "2020-01-01", "end": "2023-12-31"}}})
+        local = AppConfig.model_validate({"override": {"dates": {"start": "2022-12-31", "end": "2022-06-01"}}})
+        with pytest.raises(ConfigError, match="inverted"):
+            parse_global_dates(cfg, local, allow_override=True)
 
     def test_override_dates_when_allowed(self):
         cfg = AppConfig.model_validate({"defaults": {"dates": {"start": "2020-01-01", "end": "2023-12-31"}}})

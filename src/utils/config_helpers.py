@@ -14,8 +14,6 @@ from src.exceptions import ConfigError
 
 import numpy as np
 
-from src.utils.logging_utils import warn
-
 
 # ---------------------------------------------------------------------------
 # Safe type coercion
@@ -123,6 +121,12 @@ def parse_global_dates(
 
     When *allow_override* is True the function first checks
     ``local_cfg.override.dates.{start, end}`` (testing escape-hatch).
+
+    Raises :class:`ConfigError` if the resolved range is inverted (end < start).
+    An inverted range is a config bug — silently swapping it lets the other
+    dimensions generate against the swapped window before the dates dimension
+    aborts on the same condition, so this fails fast and consistently instead
+    (matching ``dimensions/dates/helpers.py``).
     """
     if allow_override:
         _override = getattr(local_cfg, "override", None)
@@ -135,11 +139,12 @@ def parse_global_dates(
             gs = pd.to_datetime(ov["start"]).normalize()
             ge = pd.to_datetime(ov["end"]).normalize()
             if ge < gs:
-                warn(
-                    f"{dimension_name}: override dates swapped "
-                    f"(start={ov['start']!r}, end={ov['end']!r})"
+                _label = f" for {dimension_name}" if dimension_name else ""
+                raise ConfigError(
+                    f"override dates are inverted{_label}: end ({ov['end']!r}) is "
+                    f"before start ({ov['start']!r}). Fix the config rather than "
+                    "relying on a silent swap."
                 )
-                gs, ge = ge, gs
             return gs, ge
 
     _defaults = getattr(cfg, "defaults", None)
@@ -149,12 +154,12 @@ def parse_global_dates(
         gs = pd.to_datetime(dd["start"]).normalize()
         ge = pd.to_datetime(dd["end"]).normalize()
         if ge < gs:
-            if dimension_name:
-                warn(
-                    f"{dimension_name}: defaults dates swapped "
-                    f"(start={dd['start']!r}, end={dd['end']!r})"
-                )
-            gs, ge = ge, gs
+            _label = f" for {dimension_name}" if dimension_name else ""
+            raise ConfigError(
+                f"defaults.dates are inverted{_label}: end ({dd['end']!r}) is "
+                f"before start ({dd['start']!r}). Fix the config rather than "
+                "relying on a silent swap."
+            )
         return gs, ge
 
     label = f" for {dimension_name}" if dimension_name else ""
