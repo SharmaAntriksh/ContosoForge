@@ -1047,6 +1047,9 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "customer_end_month": customer_end_month,
             "customer_base_weight": customer_base_weight,
             "customer_discovery_month": customer_discovery_month,
+            # CustomerKey -> first start date (epoch days); clamps OrderDate forward
+            # so no order predates the customer's day-granular start date.
+            "customer_first_eff_start_by_key": worker_cfg.get("customer_first_eff_start_by_key"),
             # Global per-month plan
             "sales_rows_per_month": sales_rows_per_month,
             "sales_orders_per_month": sales_orders_per_month,
