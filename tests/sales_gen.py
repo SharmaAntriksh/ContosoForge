@@ -1,7 +1,6 @@
 """Shared helpers for small end-to-end sales-fact generation in tests.
 
-Several determinism / invariance guardrails (Phase 0 of the sales-fact
-improvement plan, and later phase-acceptance tests) need to run the real
+Several determinism / invariance guardrails need to run the real
 pipeline on a tiny, fast, deterministic dataset and inspect the resulting sales
 fact. This module centralises that harness so the individual test files stay
 focused on *what* they assert rather than *how* to generate data.

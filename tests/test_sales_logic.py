@@ -242,7 +242,7 @@ class TestBuildOrders:
 
     def test_empty_date_pool_raises(self):
         rng = _rng()
-        with pytest.raises(RuntimeError, match="date_pool is empty"):
+        with pytest.raises(SalesError, match="date_pool is empty"):
             build_orders(
                 rng, 10, False,
                 np.array([], dtype="datetime64[D]"), None,
@@ -253,7 +253,7 @@ class TestBuildOrders:
     def test_empty_customers_raises(self):
         rng = _rng()
         dp = _date_pool()
-        with pytest.raises(RuntimeError, match="customers array is empty"):
+        with pytest.raises(SalesError, match="customers array is empty"):
             build_orders(
                 rng, 10, False, dp, None,
                 np.array([], dtype=np.int32), len(dp), 0,
@@ -264,7 +264,7 @@ class TestBuildOrders:
         rng = _rng()
         dp = _date_pool()
         customers = np.array([1, 2, 3], dtype=np.int32)
-        with pytest.raises(RuntimeError, match="order_id_start is required"):
+        with pytest.raises(SalesError, match="order_id_start is required"):
             build_orders(
                 rng, 10, False, dp, None,
                 customers, len(dp), len(customers),
@@ -420,7 +420,7 @@ class TestApplyPromotions:
         assert promo_mod._warned_ch_len_mismatch is True
 
     def test_salience_biases_selection(self):
-        """Phase 3.2: a high-salience active promo is redeemed far more often
+        """A high-salience active promo is redeemed far more often
         than a low-salience one (vs ~50/50 under the uniform draw)."""
         dates = np.array(["2023-01-15"] * 4000, dtype="datetime64[D]")
         promo_keys = np.array([1, 10, 20], dtype=np.int32)  # 1 = no_discount_key
@@ -535,7 +535,7 @@ class TestComputeDates:
 
 
 class TestLineFriction:
-    """Phase 3.4: the shared per-line fulfillment friction latent."""
+    """The shared per-line fulfillment friction latent."""
 
     def test_deterministic_and_in_range(self):
         o = np.arange(1, 5000, dtype=np.int64)
@@ -556,7 +556,7 @@ class TestLineFriction:
 
 
 class TestFrictionDelivery:
-    """Phase 3.4: friction-driven delivery bucketing hits the configured shares."""
+    """Friction-driven delivery bucketing hits the configured shares."""
 
     def _cfg(self, **over):
         base = dict(enabled=True, p_early=0.10, p_delayed=0.25,
@@ -1519,7 +1519,7 @@ class TestBuildReturns:
             # Missing other required columns
         })
         cfg = ReturnsConfig(enabled=True, return_rate=1.0)
-        with pytest.raises(RuntimeError, match="missing required column"):
+        with pytest.raises(SalesError, match="missing required column"):
             build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
 
     def test_same_day_return_allowed(self):
@@ -1658,7 +1658,7 @@ class TestBuildWorkerSchemas:
 
 
 class TestDeriveChunkSeed:
-    """Phase 1.4 / Finding #33: the per-chunk RNG seed is a pure function of
+    """Finding #33: the per-chunk RNG seed is a pure function of
     (run_seed, chunk_idx) via the house SeedSequence pattern — independently
     regenerable and independent of chunk dispatch order / worker count."""
 
@@ -1683,7 +1683,7 @@ class TestDeriveChunkSeed:
 
 
 class TestOrderIdInt64PathsAgree:
-    """Phase 1.2 / Finding #21: the parquet (Arrow) and SQL (DDL) OrderNumber
+    """Finding #21: the parquet (Arrow) and SQL (DDL) OrderNumber
     width must be the SAME decision. Both consume one authoritative flag; the
     row-count estimate is only a fallback and must itself be id-space aware so the
     two paths never disagree across a range of total_rows."""

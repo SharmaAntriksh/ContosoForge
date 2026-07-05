@@ -7,6 +7,7 @@ from typing import Callable, Optional, Sequence, Tuple
 import numpy as np
 import pyarrow as pa
 
+from src.exceptions import SalesError
 from ..sales_logic import State
 
 # NOTE: Hard Arrow imports are intentional here. io.py is only ever used in
@@ -102,7 +103,7 @@ def normalize_to_schema(
     got_names = set(table.schema.names)
     exp_names = set(expected.names)
     if got_names != exp_names:
-        raise RuntimeError(
+        raise SalesError(
             "Schema mismatch in writer.\n"
             f"Table: {table_name or 'unknown'}\n"
             f"Missing: {sorted(exp_names - got_names)}\n"
@@ -129,7 +130,7 @@ def normalize_to_schema(
                     col = pc.round(col, ndigits=int(field.type.scale))
                 col = pc.cast(col, field.type, safe=cast_safe)
             except (ValueError, TypeError, ArithmeticError) as ex:
-                raise RuntimeError(
+                raise SalesError(
                     f"[{table_name or 'unknown'}] Failed cast '{field.name}': {col.type} -> {field.type} "
                     f"(safe={cast_safe}): {ex}"
                 ) from ex
@@ -227,7 +228,7 @@ def _dict_cols(table_name: Optional[str]) -> list[str]:
     m = getattr(State, "parquet_dict_cols_by_table", None)
     if table_name and isinstance(m, dict) and table_name in m:
         return list(m[table_name])
-    return list(getattr(State, "parquet_dict_cols", []))
+    return list(getattr(State, "parquet_dict_cols", None) or [])
 
 
 def _schema_partition_cols(expected: pa.Schema) -> tuple[str, ...]:
@@ -240,7 +241,7 @@ def _derive_year_month_from_int_order_date(order_date: pa.ChunkedArray) -> Tuple
     x = order_date.combine_chunks().to_numpy(zero_copy_only=False)
 
     if x.dtype.kind not in {"i", "u"}:
-        raise RuntimeError(f"OrderDate integer derivation expected int dtype, got {x.dtype}")
+        raise SalesError(f"OrderDate integer derivation expected int dtype, got {x.dtype}")
 
     xi = x.astype(np.int64, copy=False)
     if xi.size == 0:
@@ -248,7 +249,7 @@ def _derive_year_month_from_int_order_date(order_date: pa.ChunkedArray) -> Tuple
         return empty, empty.copy()
 
     if np.any(xi == np.iinfo(np.int64).min):
-        raise RuntimeError("OrderDate contains nulls; cannot derive Year/Month")
+        raise SalesError("OrderDate contains nulls; cannot derive Year/Month")
 
     mn = int(xi.min())
     mx = int(xi.max())
@@ -267,7 +268,7 @@ def _derive_year_month_from_int_order_date(order_date: pa.ChunkedArray) -> Tuple
         month = ((months % 12) + 1).astype(np.int16)
         return year, month
 
-    raise RuntimeError(f"OrderDate integer format not recognized; min={mn} max={mx}")
+    raise SalesError(f"OrderDate integer format not recognized; min={mn} max={mx}")
 
 
 def _ensure_partition_cols_for_table(
@@ -313,7 +314,7 @@ def _ensure_partition_cols_for_table(
             table = table.append_column("Month", pa.array(month, type=pa.int16()))
         return table
 
-    raise RuntimeError(f"Cannot derive partition cols {missing} for table={table_name}: {candidates}")
+    raise SalesError(f"Cannot derive partition cols {missing} for table={table_name}: {candidates}")
 
 
 def _csv_postprocess_sales(table: pa.Table) -> pa.Table:

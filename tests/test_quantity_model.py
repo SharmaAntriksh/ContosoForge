@@ -226,7 +226,7 @@ class TestBuildQuantity:
 
 
 # ===================================================================
-# Phase 3.1 — quantity elasticity (price + propensity)
+# Quantity elasticity (price + propensity)
 # ===================================================================
 
 class TestQuantityElasticity:

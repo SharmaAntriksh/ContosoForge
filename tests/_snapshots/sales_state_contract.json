@@ -1,0 +1,12 @@
+{
+  "phantom_state_attrs": [
+    "active_brand_to_row_idx",
+    "active_customer_keys",
+    "cast_safe",
+    "write_statistics",
+    "write_statistics_chunks"
+  ],
+  "undeclared_worker_cfg_keys": [
+    "merged_file"
+  ]
+}

@@ -9,6 +9,8 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 
+from src.exceptions import SalesError
+
 
 # ---------------------------------------------------------------------------
 # Test data helpers
@@ -128,12 +130,12 @@ class TestValidateRequiredColumns:
 
     def test_missing_one_raises(self):
         schema = pa.schema([pa.field("UnitPrice", pa.float64())])
-        with pytest.raises(RuntimeError, match="NetPrice"):
+        with pytest.raises(SalesError, match="NetPrice"):
             validate_required_columns(schema, {"UnitPrice", "NetPrice"})
 
     def test_missing_multiple_raises(self):
         schema = pa.schema([pa.field("Other", pa.int32())])
-        with pytest.raises(RuntimeError, match="required columns"):
+        with pytest.raises(SalesError, match="required columns"):
             validate_required_columns(schema, {"UnitPrice", "NetPrice"})
 
     def test_empty_requirements_no_error(self):
@@ -146,7 +148,7 @@ class TestValidateRequiredColumns:
 
     def test_custom_what_label(self):
         schema = pa.schema([pa.field("a", pa.int32())])
-        with pytest.raises(RuntimeError, match="pricing fields"):
+        with pytest.raises(SalesError, match="pricing fields"):
             validate_required_columns(schema, {"b"}, what="pricing fields")
 
     def test_iterable_input(self):
@@ -155,7 +157,7 @@ class TestValidateRequiredColumns:
 
     def test_schema_with_no_names_attr(self):
         """An object without .names should treat column set as empty."""
-        with pytest.raises(RuntimeError, match="Missing"):
+        with pytest.raises(SalesError, match="Missing"):
             validate_required_columns(object(), {"col"})
 
 
@@ -245,7 +247,7 @@ class TestValidateRequired:
 
     def test_sales_table_with_missing_pricing(self):
         schema = pa.schema([pa.field("OrderDate", pa.date32())])
-        with pytest.raises(RuntimeError, match="required pricing columns"):
+        with pytest.raises(SalesError, match="required pricing columns"):
             _validate_required(schema, table_name="Sales")
 
     def test_non_line_table_no_validation(self):
@@ -302,7 +304,7 @@ class TestProjectTableToSchema:
     def test_cast_error_raises_by_default(self):
         table = pa.table({"a": pa.array(["not_a_number", "two"], type=pa.string())})
         target = pa.schema([pa.field("a", pa.int32())])
-        with pytest.raises(RuntimeError, match="Failed to cast column 'a'"):
+        with pytest.raises(SalesError, match="Failed to cast column 'a'"):
             project_table_to_schema(table, target, cast_safe=False)
 
     def test_on_cast_error_warn_does_not_raise_runtime_error(self):
@@ -424,7 +426,7 @@ class TestValidateChunkColumns:
         _validate_chunk_columns({"a", "b"}, None, strict_expected=True, reject_extra_cols=True, path="f.pq")
 
     def test_strict_missing_raises(self):
-        with pytest.raises(RuntimeError, match="missing expected columns"):
+        with pytest.raises(SalesError, match="missing expected columns"):
             _validate_chunk_columns(
                 {"a"},
                 frozenset({"a", "b"}),
@@ -443,7 +445,7 @@ class TestValidateChunkColumns:
         )
 
     def test_reject_extra_raises(self):
-        with pytest.raises(RuntimeError, match="unexpected columns"):
+        with pytest.raises(SalesError, match="unexpected columns"):
             _validate_chunk_columns(
                 {"a", "b", "extra"},
                 frozenset({"a", "b"}),
@@ -462,7 +464,7 @@ class TestValidateChunkColumns:
         )
 
     def test_path_included_in_error(self):
-        with pytest.raises(RuntimeError, match="my_file.parquet"):
+        with pytest.raises(SalesError, match="my_file.parquet"):
             _validate_chunk_columns(
                 {"a"},
                 frozenset({"a", "b"}),
@@ -482,7 +484,7 @@ class TestValidateChunkColumns:
         )
 
     def test_both_strict_and_reject_fails_on_missing(self):
-        with pytest.raises(RuntimeError, match="missing"):
+        with pytest.raises(SalesError, match="missing"):
             _validate_chunk_columns(
                 {"a"},
                 frozenset({"a", "b"}),
@@ -629,7 +631,7 @@ class TestMergeParquetFiles:
         _write_parquet(src, _make_table(a=[1]))
 
         merged = tmp_path / "merged.parquet"
-        with pytest.raises(RuntimeError, match="required pricing columns"):
+        with pytest.raises(SalesError, match="required pricing columns"):
             merge_parquet_files([str(src)], str(merged), log=False)
 
     def test_sales_table_with_pricing_cols(self, tmp_path):

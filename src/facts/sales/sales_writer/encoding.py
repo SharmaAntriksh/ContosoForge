@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional, Set
 
+from src.exceptions import SalesError
 from ..output_paths import TABLE_SALES, TABLE_SALES_ORDER_DETAIL
 
 # ===============================================================
@@ -36,7 +37,7 @@ def validate_required_columns(
     names = set(getattr(schema, "names", ()) or ())
     missing = req - names
     if missing:
-        raise RuntimeError(f"Missing {what}: {sorted(missing)}")
+        raise SalesError(f"Missing {what}: {sorted(missing)}")
 
 
 def schema_dict_cols(

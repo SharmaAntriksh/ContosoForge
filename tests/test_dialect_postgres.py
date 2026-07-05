@@ -1,4 +1,4 @@
-"""Phase 3: PostgresDialect rendering + end-to-end CREATE TABLE generation.
+"""PostgresDialect rendering + end-to-end CREATE TABLE generation.
 
 These tests cover the renderer in isolation and run it through the
 real ``generate_all_create_tables`` pipeline against a maximal cfg, asserting
@@ -344,7 +344,7 @@ class TestPostgresLoadScriptGeneration:
 
 
 class TestPackagingRouting:
-    """Phase 3 packaging: SQL Server lands at sql/, every other dialect at <run>/<name>/.
+    """Packaging: SQL Server lands at sql/, every other dialect at <run>/<name>/.
 
     These tests exercise ``write_create_table_scripts`` to lock in the routing
     behaviour — a regression caught here when REGISTRY started holding a

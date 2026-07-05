@@ -1,4 +1,4 @@
-"""Tests for Phase 3.3 order-level basket-theme correlation."""
+"""Tests for the order-level basket-theme correlation."""
 from __future__ import annotations
 
 import numpy as np

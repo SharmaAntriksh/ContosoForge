@@ -389,7 +389,7 @@ class TestEdgeCases:
 
 
 class TestFrictionCoupling:
-    """Phase 3.4: the fulfillment friction latent (keyed on OrderNumber+line)
+    """The fulfillment friction latent (keyed on OrderNumber+line)
     couples returns to delivery — higher friction => more / faster returns."""
 
     def _detail(self, n):

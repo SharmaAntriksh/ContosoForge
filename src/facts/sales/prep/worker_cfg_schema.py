@@ -12,9 +12,12 @@ converts them back.  Types here reflect the *logical* contract
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Required, TypedDict, Union
 
 import numpy as np
+
+from src.exceptions import ConfigError
 
 
 class SalesWorkerCfg(TypedDict, total=False):
@@ -54,7 +57,6 @@ class SalesWorkerCfg(TypedDict, total=False):
     new_customer_window_months: int
 
     # -- Customer dimension --------------------------------------------------
-    customers: Optional[np.ndarray]
     customer_keys: Required[np.ndarray]
     customer_is_active_in_sales: Optional[np.ndarray]
     customer_start_month: Optional[np.ndarray]
@@ -88,18 +90,16 @@ class SalesWorkerCfg(TypedDict, total=False):
     row_group_size: int
     compression: str
     delta_output_folder: Optional[str]
-    write_delta: bool
     sales_output: str
     parquet_folder: Optional[str]
     parquet_dict_exclude: Optional[Union[set, list]]
 
     # -- Chunking / order ID -------------------------------------------------
     chunk_size: Required[int]
-    order_id_stride_orders: int
     total_rows: int
     order_id_run_id: int
     max_lines_per_order: int
-    month_stride: int
+    order_id_day_stride: int
     per_chunk_alloc: int
     order_id_int64: bool               # emit OrderNumber as int64 (large runs)
 
@@ -117,21 +117,11 @@ class SalesWorkerCfg(TypedDict, total=False):
     models_cfg: Any
 
     # -- Returns -------------------------------------------------------------
-    returns_enabled: bool
-    returns_rate: float
-    returns_min_lag_days: int
-    returns_max_lag_days: int
-    returns_reason_keys: Optional[Union[list, np.ndarray]]
-    returns_reason_probs: Optional[Union[list, np.ndarray]]
-    returns_full_line_probability: float
-    returns_split_return_rate: float
-    returns_max_splits: int
-    returns_reconcile_cents: bool
-    returns_split_min_gap: int
-    returns_split_max_gap: int
-    returns_lag_distribution: str
-    returns_lag_mode: int
-    returns_logistics_keys: list
+    # The base ReturnsConfig, built once in the coordinator (None when returns
+    # are disabled). The per-chunk event_key_offset/capacity is applied in the
+    # worker task; the capacity stride is kept as its own scalar because it is
+    # chunking arithmetic, not returns policy.
+    returns_policy: Any
     returns_event_key_capacity: int
 
     # -- Employee / salesperson ----------------------------------------------
@@ -193,3 +183,90 @@ class SalesWorkerCfg(TypedDict, total=False):
     _prebuilt_salesperson_effective_by_store: Optional[dict]
     _prebuilt_salesperson_global_pool: Optional[np.ndarray]
     _prebuilt_brand_prob_by_month: Any
+
+
+# Fields the coordinator moves into OS shared memory before spawning the pool
+# (SharedArrayGroup.publish_dict). Each large ndarray value is swapped in-place
+# for a pickle-safe descriptor; workers resolve it back to a zero-copy view via
+# resolve_array. Colocated with the schema so this is the single source of truth
+# for "which worker_cfg fields are broadcast" rather than a list hand-maintained
+# in generate_sales_fact. Small arrays / None pass through untouched, and key
+# order is irrelevant (each field maps to its own uniquely-named block). This is
+# the BASE broadcast only; the derived prebuilds (_brand_flat_*, _assortment_*,
+# _prebuilt_*) publish their own blocks inside _prebuild_shared_structures.
+SHARED_FIELDS: List[str] = [
+    "product_np",
+    "product_brand_key",
+    "customer_keys",
+    "customer_is_active_in_sales",
+    "customer_start_month",
+    "customer_end_month",
+    "customer_base_weight",
+    "customer_discovery_month",
+    "customer_first_eff_start_by_key",
+    "product_subcat_key",
+    "product_popularity",
+    "date_pool",
+    "date_prob",
+    "promo_keys_all",
+    "promo_start_all",
+    "promo_end_all",
+    "employee_assign_store_key",
+    "employee_assign_employee_key",
+    "employee_assign_start_date",
+    "employee_assign_end_date",
+    "employee_assign_fte",
+    "employee_assign_is_primary",
+    "product_seasonality",
+    "customer_geo_key",
+    "geo_to_country_id",
+    "store_to_country_id",
+    "product_channel_eligible",
+    "promo_channel_group",
+    "channel_fulfillment_days",
+    "_channel_to_elig_group",
+    "product_scd2_starts",
+    "product_scd2_data",
+    "customer_scd2_starts",
+    "customer_scd2_keys",
+    "cust_key_to_pool_idx",
+]
+
+
+# The Required[...] fields above, as an explicit list. `from __future__ import
+# annotations` stringizes the annotations, so TypedDict's runtime
+# __required_keys__ comes back empty (total=False makes every stringized field
+# look optional); mirror the Required[...] markers here and keep the two in
+# sync. These are the fields init_sales_worker reads via bare worker_cfg["key"];
+# a missing one would otherwise surface as a KeyError (or a silent None bound
+# onto State) deep inside chunk processing.
+REQUIRED_FIELDS: List[str] = [
+    "product_np",
+    "store_keys",
+    "promo_keys_all",
+    "promo_start_all",
+    "promo_end_all",
+    "customer_keys",
+    "date_pool",
+    "date_prob",
+    "output_paths",
+    "chunk_size",
+    "no_discount_key",
+    "skip_order_cols",
+]
+
+
+def validate_worker_cfg(worker_cfg: Mapping[str, Any]) -> None:
+    """Fail loud, naming the field, if a Required worker_cfg field is missing.
+
+    This is the from-wire completeness check: init_sales_worker calls it once
+    after the wire hop so a typo'd or dropped field aborts at pool spawn instead
+    of surfacing as ``State.x is None`` deep inside chunk processing. SHM
+    publication swaps Required ndarray *values* for descriptors but never removes
+    the key, so a plain membership test is valid before or after resolution.
+    """
+    missing = [k for k in REQUIRED_FIELDS if k not in worker_cfg]
+    if missing:
+        raise ConfigError(
+            "worker_cfg is missing required field(s): " + ", ".join(missing)
+        )

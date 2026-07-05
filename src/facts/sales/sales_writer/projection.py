@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.exceptions import SalesError
 from .utils import _arrow, warn
 
 
@@ -60,7 +61,7 @@ def project_table_to_schema(
                         f"from {col.type} to {field.type}: {ex} – keeping original type"
                     )
                 else:
-                    raise RuntimeError(
+                    raise SalesError(
                         f"Failed to cast column '{name}' from {col.type} to {field.type}: {ex}"
                     ) from ex
 

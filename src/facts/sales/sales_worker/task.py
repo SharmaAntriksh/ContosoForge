@@ -8,6 +8,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from src.exceptions import SalesError
 from ..sales_logic import State, build_chunk_table
 from ..sales_logic.columns import (
     SALES_CHANNEL_CORE_KEYS,
@@ -135,20 +136,20 @@ def write_table_by_format(
     ff = (file_format or "").strip().lower()
     if ff == "deltaparquet":
         if not hasattr(output_paths, "delta_part_path"):
-            raise RuntimeError("output_paths must implement delta_part_path() for deltaparquet")
+            raise SalesError("output_paths must implement delta_part_path() for deltaparquet")
         path = output_paths.delta_part_path(table_name, idx)
         write_parquet_fn(table, path)
         return {"part": os.path.basename(path), "rows": table.num_rows}
 
     if ff == "csv":
         if not hasattr(output_paths, "chunk_path"):
-            raise RuntimeError("output_paths must implement chunk_path() for csv")
+            raise SalesError("output_paths must implement chunk_path() for csv")
         path = output_paths.chunk_path(table_name, idx, "csv")
         write_csv_fn(table, path)
         return path
 
     if not hasattr(output_paths, "chunk_path"):
-        raise RuntimeError("output_paths must implement chunk_path() for parquet")
+        raise SalesError("output_paths must implement chunk_path() for parquet")
     path = output_paths.chunk_path(table_name, idx, "parquet")
     write_parquet_fn(table, path)
     return path
@@ -215,7 +216,7 @@ def _project_for_table(table_name: str, table: pa.Table) -> pa.Table:
     got_set = set(table.column_names)
     missing = [c for c in cols if c not in got_set]
     if missing:
-        raise RuntimeError(
+        raise SalesError(
             f"Cannot project {table_name}: missing columns {sorted(missing)}. "
             f"Available columns: {table.column_names}"
         )
@@ -242,7 +243,7 @@ def _task_require_cols(table: pa.Table, cols: Sequence[str], *, ctx: str) -> Non
     got = set(table.column_names)
     missing = sorted(set(cols) - got)
     if missing:
-        raise RuntimeError(f"{ctx} missing columns: {missing}. Available: {sorted(got)}")
+        raise SalesError(f"{ctx} missing columns: {missing}. Available: {sorted(got)}")
 
 
 def _as_list(v: Any, default: Sequence[Any]) -> list[Any]:
@@ -266,43 +267,18 @@ def _as_list(v: Any, default: Sequence[Any]) -> list[Any]:
 
 
 def _build_returns_config() -> Optional[ReturnsConfig]:
-    """Build the base ReturnsConfig from State, or None if returns disabled.
+    """Return the base ReturnsConfig bound on State (None when returns disabled).
 
-    ``event_key_offset`` is left at 0 here; _worker_task sets the per-chunk
-    offset (idx * returns_event_key_capacity) via dataclasses.replace so each
-    chunk's ReturnEventKey range stays disjoint.
+    The policy is built once in the coordinator and broadcast; _worker_task sets
+    the per-chunk event_key_offset/capacity (idx * returns_event_key_capacity)
+    via dataclasses.replace so each chunk's ReturnEventKey range stays disjoint.
     """
-    if not bool(getattr(State, "returns_enabled", False)):
-        return None
-    if TABLE_SALES_RETURN is None:
-        raise RuntimeError("returns_enabled=True but TABLE_SALES_RETURN is not defined in output_paths.py")
-    # Fulfillment-friction coupling params (read from
-    # models.fulfillment; 0.0 when the feature is off => legacy returns behavior).
-    _mdl = getattr(State, "models_cfg", None)
-    _ff = _mdl.get("fulfillment", None) if _mdl is not None else None
-    _ff_on = bool(_ff.get("enabled", False)) if _ff is not None else False
-    _friction_boost = float(_ff.get("return_prob_boost", 0.0)) if _ff_on else 0.0
-    _friction_shorten = float(_ff.get("return_lag_shorten", 0.0)) if _ff_on else 0.0
-    return ReturnsConfig(
-        enabled=True,
-        return_rate=float(getattr(State, "returns_rate", 0.0) or 0.0),
-        min_lag_days=int(getattr(State, "returns_min_lag_days", 0) or 0),
-        max_lag_days=int(getattr(State, "returns_max_lag_days", 60) or 60),
-        reason_keys=_as_list(getattr(State, "returns_reason_keys", None), default=[1]),
-        reason_probs=_as_list(getattr(State, "returns_reason_probs", None), default=[1.0]),
-        full_line_probability=float(getattr(State, "returns_full_line_probability", 0.85)),
-        split_return_rate=float(getattr(State, "returns_split_return_rate", 0.0)),
-        max_splits=int(getattr(State, "returns_max_splits", 3)),
-        reconcile_cents=bool(getattr(State, "returns_reconcile_cents", False)),
-        split_min_gap=int(getattr(State, "returns_split_min_gap", 3)),
-        split_max_gap=int(getattr(State, "returns_split_max_gap", 20)),
-        lag_distribution=str(getattr(State, "returns_lag_distribution", "uniform") or "uniform"),
-        lag_mode=int(getattr(State, "returns_lag_mode", 7)),
-        event_key_offset=0,
-        logistics_keys=frozenset(getattr(State, "returns_logistics_keys", ())),
-        friction_return_boost=_friction_boost,
-        friction_lag_shorten=_friction_shorten,
-    )
+    policy = getattr(State, "returns_policy", None)
+    if policy is not None and TABLE_SALES_RETURN is None:
+        raise SalesError(
+            "returns are enabled but TABLE_SALES_RETURN is not defined in output_paths.py"
+        )
+    return policy
 
 
 def _maybe_build_returns(
@@ -479,7 +455,7 @@ def build_header_from_detail(detail: pa.Table, *, validate_invariants: bool = Tr
                 parts.append(f"{c}_min={_py(f'{c}_min')}")
                 parts.append(f"{c}_max={_py(f'{c}_max')}")
 
-            raise RuntimeError(
+            raise SalesError(
                 "Invalid OrderNumber invariants: a OrderNumber maps to multiple values. "
                 + " | ".join(parts)
             )
@@ -613,7 +589,7 @@ def _worker_task(args):
     validate_header = bool(getattr(State, "validate_header_invariants", False))
     cap_orders = int(getattr(State, "chunk_size", 0) or 0)
     if cap_orders <= 0:
-        raise RuntimeError(f"State.chunk_size must be > 0, got {cap_orders}")
+        raise SalesError(f"State.chunk_size must be > 0, got {cap_orders}")
 
     no_discount_key = State.no_discount_key
     skip_order_cols_flag = bool(getattr(State, "skip_order_cols_requested", False))
@@ -645,16 +621,22 @@ def _worker_task(args):
         batch_i = int(batch_size)
 
         if cap_orders < batch_i:
-            raise RuntimeError(
+            raise SalesError(
                 f"State.chunk_size={cap_orders} < batch_i={batch_i}; "
                 "chunk_size must be the constant order-id stride and >= the maximum batch size."
             )
 
         chunk_seed = derive_chunk_seed(seed, idx_i)
 
-        # Per-chunk returns config with unique event_key_offset
+        # Per-chunk returns config with unique event_key_offset. Pass the capacity
+        # too so the builder can hard-fail on an over-capacity chunk instead of
+        # silently colliding with the next chunk's ReturnEventKey range.
         if returns_cfg_base is not None:
-            returns_cfg = _dc_replace(returns_cfg_base, event_key_offset=idx_i * returns_capacity)
+            returns_cfg = _dc_replace(
+                returns_cfg_base,
+                event_key_offset=idx_i * returns_capacity,
+                event_key_capacity=returns_capacity,
+            )
         else:
             returns_cfg = None
 
@@ -688,13 +670,13 @@ def _worker_task(args):
             got = set(detail_table.column_names)
             missing = sorted(so_require - got)
             if missing:
-                raise RuntimeError(
+                raise SalesError(
                     f"sales_output={mode} / Header build missing columns: {missing}. "
                     f"Available: {detail_table.column_names}")
 
             header_missing = sorted(header_need_set - got)
             if header_missing:
-                raise RuntimeError(
+                raise SalesError(
                     f"Header build missing columns: {header_missing}. "
                     f"Available: {detail_table.column_names}")
 

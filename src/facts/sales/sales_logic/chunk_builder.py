@@ -14,6 +14,7 @@ import pyarrow as pa
 
 from src.defaults import PHYSICAL_CHANNELS, DIGITAL_CHANNELS
 from src.exceptions import SalesError
+from src.utils.logging_utils import warn
 from .globals import PA_AVAILABLE, State
 from .core import (
     _normalize_cdf,
@@ -27,6 +28,43 @@ from .core import (
 )
 from .core.basket import apply_basket_theme, reset_basket_cache
 from .columns import build_extra_columns, SALES_CHANNEL_CORE_KEYS
+
+
+def _drop_orphan_employee_key_rows(cols: dict, n_rows: int, m_offset: int) -> int:
+    """Drop whole-order ``EmployeeKey == -1`` lines and return the new row count.
+
+    A -1 means the sampled (store, month) had no salesperson — only possible when
+    the dimensions leave a coverage gap, which the coverage model
+    (abort/skip/repair) is designed to prevent. Salesperson is assigned per ORDER
+    and broadcast to its lines, so -1 lines are whole orders; dropping them keeps
+    order/line integrity but silently shortens the month below its plan target
+    (``sum n_lines == R[m]`` no longer holds). Previously this happened silently;
+    now it warns loudly. Normal configs have full coverage and drop nothing.
+
+    (A future refactor should resolve coverage before materialization so this
+    becomes a hard precondition rather than a post-hoc filter.)
+    """
+    ek = cols.get("EmployeeKey")
+    if ek is None or np.isscalar(ek):
+        return n_rows
+    ek_arr = np.asarray(ek)
+    if not ek_arr.size or not (ek_arr == -1).any():
+        return n_rows
+
+    keep = ek_arr != -1
+    new_n = int(keep.sum())
+    dropped = int(ek_arr.size - new_n)
+    warn(
+        f"chunk_builder dropped {dropped} EmployeeKey=-1 line(s) at month offset "
+        f"{m_offset} (of {n_rows} rows): a salesperson-coverage gap reached row "
+        "assembly, so this month is now short of its plan target. This should not "
+        "happen under a passing coverage preflight — check sales.coverage_policy "
+        "and the employee_store_assignments bridge."
+    )
+    for cname, cval in list(cols.items()):
+        if isinstance(cval, np.ndarray) and cval.shape[:1] == (n_rows,):
+            cols[cname] = cval[keep]
+    return new_n
 
 # ------------------------------------------------------------
 # Helpers
@@ -1283,7 +1321,7 @@ def build_chunk_table(
     from ..sales_models import build_quantity, build_prices
 
     if not PA_AVAILABLE:
-        raise RuntimeError("pyarrow is required")
+        raise SalesError("pyarrow is required")
 
     rng = np.random.default_rng(int(seed))
     skip_cols = bool(State.skip_order_cols)
@@ -1301,7 +1339,7 @@ def build_chunk_table(
     # and within each day each chunk gets its own non-overlapping slot.
     # This guarantees OrderNumber increases monotonically with OrderDate
     # even across parallel chunks.
-    _day_stride = np.int64(State.month_stride or 0)
+    _day_stride = np.int64(State.order_id_day_stride or 0)
     _per_chunk_alloc = np.int64(State.per_chunk_alloc or 0)
     _use_day_ids = _day_stride > 0 and _per_chunk_alloc > 0
     _order_id_int64 = bool(getattr(State, "order_id_int64", False))
@@ -2088,24 +2126,10 @@ def build_chunk_table(
                 )
             cols.update(extra)
 
-        # --------------------------------------------------------
-        # HARD GUARANTEE: never emit EmployeeKey=-1 (orphan FK).
-        # A -1 means the sampled (store, date) had no salesperson — only
-        # possible when the dimensions leave a coverage gap (the coverage
-        # pre-flight reports/aborts/repairs this upstream). Salesperson is
-        # assigned per ORDER and broadcast to its lines, so -1 lines are whole
-        # orders; dropping them preserves order/line integrity. Normal configs
-        # have full coverage and drop nothing.
-        _ek = cols.get("EmployeeKey")
-        if _ek is not None and not np.isscalar(_ek):
-            _ek_arr = np.asarray(_ek)
-            if _ek_arr.size and (_ek_arr == -1).any():
-                _keep = _ek_arr != -1
-                _new_n = int(_keep.sum())
-                for _cname, _cval in list(cols.items()):
-                    if isinstance(_cval, np.ndarray) and _cval.shape[:1] == (n_rows,):
-                        cols[_cname] = _cval[_keep]
-                n_rows = _new_n
+        # HARD GUARANTEE: never emit EmployeeKey=-1 (orphan FK). Drop such whole
+        # orders, but loudly — a drop means a coverage gap slipped past the
+        # preflight and shortened this month below its plan target.
+        n_rows = _drop_orphan_employee_key_rows(cols, n_rows, m_offset)
 
         # Accumulate per-column numpy buffers (defer Arrow conversion to end)
         for f in schema:

@@ -1,4 +1,4 @@
-"""Tests for Pydantic config schema models (Phase 3).
+"""Tests for Pydantic config schema models.
 
 Validates that:
 - AppConfig and ModelsConfig parse actual YAML files
@@ -308,7 +308,7 @@ class TestValidationErrors:
 
 
 # =========================================================================
-# Phase 3: load_config integration (attribute access)
+# load_config integration (attribute access)
 # =========================================================================
 
 class TestLoadConfigIntegration:

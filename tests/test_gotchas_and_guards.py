@@ -288,7 +288,7 @@ class TestSkipOrderBlocksFeature:
 
 
 # ===================================================================
-# Config normalizer coverage (new normalizers from Phase 1)
+# Config normalizer coverage
 # ===================================================================
 
 class TestNewNormalizers:

@@ -203,6 +203,7 @@ def _merge_fact_csv_chunks(
         header = f.readline()  # raw header bytes, including the line terminator
 
     # Write to a temp directory so we never clobber source chunks.
+    import shutil
     import tempfile
     tmp_dir = Path(tempfile.mkdtemp(dir=out_dir, prefix=".merge_"))
 
@@ -241,24 +242,39 @@ def _merge_fact_csv_chunks(
         if out_f is not None:
             out_f.close()
 
-    # Remove original chunks
+    # Move the merged files into out_dir BEFORE deleting any source chunk, so a
+    # failed move never destroys data that currently lives only in the temp dir.
+    # (The old order deleted every source first, then moved — a move failure lost
+    # the whole fact.) os.replace is atomic and overwrites any same-named source
+    # chunk, whose rows are already captured in the merge.
+    out_names: set[str] = set()
+    try:
+        for tmp_f in tmp_files:
+            dest = out_dir / tmp_f.name
+            tmp_f.replace(dest)
+            out_names.add(tmp_f.name)
+    except OSError as exc:
+        # Sources are still intact (deletion happens only after this loop); drop
+        # the temp dir and fail loudly rather than ship a half-moved fact.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise PackagingError(
+            f"Failed to move merged CSV chunk into {out_dir}: {exc}"
+        ) from exc
+
+    # Delete source chunks NOT already overwritten by a same-named merged file:
+    # their rows are in the merged output, so leaving them would duplicate data.
+    # This cleanup is unconditional — the re-chunk reuses the chunk filenames, so
+    # (unlike the parquet merge, whose merged file has a distinct name) the
+    # delete_chunks flag cannot gate it without duplicating rows.
     for f in csv_chunks:
+        if f.name in out_names:
+            continue
         try:
             f.unlink()
         except OSError:
             pass
 
-    # Move merged files from temp into out_dir
-    out_files: list[Path] = []
-    for tmp_f in tmp_files:
-        dest = out_dir / tmp_f.name
-        try:
-            tmp_f.replace(dest)
-        except OSError as exc:
-            raise PackagingError(f"Failed to move merged chunk {tmp_f.name} to {dest}: {exc}") from exc
-        out_files.append(dest)
-
-    # Clean up temp directory
+    # Temp dir is now empty (all files moved out); remove it.
     try:
         tmp_dir.rmdir()
     except OSError:

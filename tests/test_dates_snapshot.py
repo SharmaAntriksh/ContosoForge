@@ -1,7 +1,7 @@
 """Guardrail suite for the dates package refactor.
 
-These tests are the byte-identity gate for the behavior-preserving refactor
-phases. The dates package consumes no RNG, so any diff in ``dates.parquet`` /
+These tests are the byte-identity gate for behavior-preserving refactors. The
+dates package consumes no RNG, so any diff in ``dates.parquet`` /
 ``time.parquet`` is a real diff — the golden snapshots below will catch it.
 
 Test groups

@@ -369,7 +369,7 @@ def compute_month_distinct_targets(
     Returns an int64 array of length ``T`` with ``D[m] <= orders_per_month[m]``.
 
     ``distinct_ratio <= 0`` means "no participation throttle" → maximum diversity
-    (``D[m] = min(orders, eligible)``), matching the pre-Phase-2 organic behavior
+    (``D[m] = min(orders, eligible)``), matching the earlier organic behavior
     where a non-positive ratio meant *no distinct target*. It must NOT collapse to
     zero, which would leave every month with an empty pool and silently drop all
     rows (the chunk skips months whose pool is empty).

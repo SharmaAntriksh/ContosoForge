@@ -24,7 +24,7 @@ from src.facts.sales.sales_logic.globals import State
 
 
 class TestGlobalStartMonth:
-    """Phase 1.3 / Finding #30: the inflation anchor is the *configured* dataset
+    """Finding #30: the inflation anchor is the *configured* dataset
     start (State.date_pool) — a single per-run epoch, never a per-chunk
     min(order_dates). So the inflation factor for a (product, month) is identical
     across chunks regardless of which order dates each chunk happens to contain."""
@@ -415,7 +415,7 @@ class TestSnapDiscount:
 
 
 # ===================================================================
-# Phase 3.5 — markdown ↔ PromotionKey reconciliation
+# Markdown ↔ PromotionKey reconciliation
 # ===================================================================
 
 class TestPromotionReconciliation:
@@ -519,7 +519,7 @@ class TestPromotionReconciliation:
 
 
 # ===================================================================
-# Phase 4.1 — deterministic posted price per (product, month)
+# Deterministic posted price per (product, month)
 # ===================================================================
 
 class TestDeterministicPostedPrice:

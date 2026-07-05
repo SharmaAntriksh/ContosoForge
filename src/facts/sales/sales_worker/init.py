@@ -16,12 +16,12 @@ from ..output_paths import (
 from ..sales_logic import bind_globals, State
 from ..sales_logic.chunk_builder import reset_worker_cdf_cache
 from .schemas import build_worker_schemas_from_cfg
-from src.exceptions import SalesError
+from src.exceptions import ConfigError, SalesError
 from src.utils.config_helpers import int_or, float_or, str_or
 from src.utils.logging_utils import warn as _warn
 from src.utils.shared_arrays import resolve_array
 from src.utils.hashing import GOLDEN, splitmix64
-from ..prep.worker_cfg_schema import SalesWorkerCfg
+from ..prep.worker_cfg_schema import SalesWorkerCfg, validate_worker_cfg
 
 
 EMPLOYEE_KEY_MIN_NON_MANAGER = 40_000_000
@@ -551,13 +551,20 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     from .io import reset_dir_cache
     from .task import reset_task_caches
     from ..sales_logic.columns import reset_sales_channels_cache
+    from ..sales_logic.core.orders import _reset_month_demand
     from ..sales_models.quantity_model import _reset_cache as _reset_quantity_cache
     from ..sales_models.pricing_pipeline import _reset_caches as _reset_pricing_caches
     reset_dir_cache()
     reset_task_caches()
     reset_sales_channels_cache()
+    # _MONTH_DEMAND caches the lines-per-order curve derived from State.models_cfg;
+    # a reused worker rebound to a different run must not serve the previous curve.
+    _reset_month_demand()
     _reset_quantity_cache()
     _reset_pricing_caches()
+    # from-wire completeness check: abort at pool spawn (naming the field) if the
+    # wire dict lost a Required field, rather than KeyError-ing deep in a chunk.
+    validate_worker_cfg(worker_cfg)
     # Resolve any shared-memory descriptors back into numpy array views.
     # This is a no-op for values that are already plain arrays/None.
     _REQUIRED_ARRAYS = {"product_np", "store_keys", "customer_keys", "date_pool", "date_prob"}
@@ -566,7 +573,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     # Validate that required arrays resolved successfully
     for _rk in _REQUIRED_ARRAYS:
         if _rk in worker_cfg and worker_cfg[_rk] is None:
-            raise RuntimeError(
+            raise SalesError(
                 f"Failed to resolve shared array for required key '{_rk}'. "
                 "Shared memory descriptor may be corrupted."
             )
@@ -618,14 +625,14 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
 
         op = worker_cfg["output_paths"]
         if not isinstance(op, Mapping):
-            raise RuntimeError("output_paths must be a dict")
+            raise ConfigError("output_paths must be a dict")
 
         file_format = worker_cfg.get("file_format") or op.get("file_format")
         out_folder = worker_cfg.get("out_folder") or op.get("out_folder")
         if not file_format:
-            raise RuntimeError("file_format is required (worker_cfg.file_format or output_paths.file_format)")
+            raise ConfigError("file_format is required (worker_cfg.file_format or output_paths.file_format)")
         if not out_folder:
-            raise RuntimeError("out_folder is required (worker_cfg.out_folder or output_paths.out_folder)")
+            raise ConfigError("out_folder is required (worker_cfg.out_folder or output_paths.out_folder)")
 
         row_group_size = int(worker_cfg.get("row_group_size", 2_000_000))
         compression = str(worker_cfg.get("compression", "snappy"))
@@ -633,59 +640,37 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         # ------------------------------------------------------------
         # CRITICAL: OrderNumber uniqueness depends on a CONSTANT
         # per-run stride for chunk order-id ranges (NOT per-task batch size).
-        # Prefer 'order_id_stride_orders'; fall back to 'chunk_size'.
+        # chunk_size carries that per-run constant (the coordinator passes the
+        # configured chunk_size, held fixed across the whole run).
         # ------------------------------------------------------------
-        stride_raw = worker_cfg.get("order_id_stride_orders", None)
-        if stride_raw is None:
-            stride_raw = worker_cfg.get("chunk_size", None)
-
-        chunk_size = int(stride_raw or 0)
+        chunk_size = int(worker_cfg.get("chunk_size", 0) or 0)
         if chunk_size <= 0:
-            raise RuntimeError(
-                "Missing/invalid order-id stride. Set worker_cfg.order_id_stride_orders (preferred) "
-                "or worker_cfg.chunk_size to a positive int. This value partitions OrderNumber "
-                "space across chunks and must be constant across the run."
+            raise ConfigError(
+                "Missing/invalid order-id stride. Set worker_cfg.chunk_size to a positive int. "
+                "This value partitions OrderNumber space across chunks and must be "
+                "constant across the run."
             )
 
-        month_stride = int(worker_cfg.get("month_stride", 0) or 0)
+        order_id_day_stride = int(worker_cfg.get("order_id_day_stride", 0) or 0)
         per_chunk_alloc = int(worker_cfg.get("per_chunk_alloc", 0) or 0)
         order_id_int64 = bool(worker_cfg.get("order_id_int64", False))
 
         no_discount_key = worker_cfg["no_discount_key"]
         delta_output_folder = worker_cfg.get("delta_output_folder") or op.get("delta_output_folder")
         merged_file = worker_cfg.get("merged_file") or op.get("merged_file")
-        write_delta = worker_cfg.get("write_delta", False)
 
         skip_order_cols = worker_cfg["skip_order_cols"]
         sales_output = str_or(worker_cfg.get("sales_output"), "sales").lower()
         if sales_output not in {"sales", "sales_order", "both"}:
-            raise RuntimeError(f"Invalid sales_output: {sales_output}")
+            raise ConfigError(f"Invalid sales_output: {sales_output}")
 
         skip_order_cols_requested = bool(worker_cfg.get("skip_order_cols_requested", skip_order_cols))
 
-        returns_enabled = bool(worker_cfg.get("returns_enabled", False))
-        returns_rate = float(worker_cfg.get("returns_rate", 0.0))
-        returns_min_lag_days = int(worker_cfg.get("returns_min_lag_days", 0))
-        returns_max_lag_days = int(worker_cfg.get("returns_max_lag_days", 60))
-        if returns_min_lag_days < 0:
-            returns_min_lag_days = 0
-        if returns_max_lag_days < 0:
-            returns_max_lag_days = 0
-        if returns_min_lag_days > returns_max_lag_days:
-            # Clamp defensively to avoid crashing the pool on bad configs.
-            returns_min_lag_days = returns_max_lag_days
-        returns_reason_keys = worker_cfg.get("returns_reason_keys")
-        returns_reason_probs = worker_cfg.get("returns_reason_probs")
-        returns_full_line_probability = float(worker_cfg.get("returns_full_line_probability", 0.85))
-        returns_split_return_rate = float(worker_cfg.get("returns_split_return_rate", 0.0))
-        returns_max_splits = int(worker_cfg.get("returns_max_splits", 3))
-        returns_reconcile_cents = bool(worker_cfg.get("returns_reconcile_cents", False))
-        returns_split_min_gap = int(worker_cfg.get("returns_split_min_gap", 3))
-        returns_split_max_gap = int(worker_cfg.get("returns_split_max_gap", 20))
-        returns_lag_distribution = str(worker_cfg.get("returns_lag_distribution", "uniform") or "uniform")
-        returns_lag_mode = int(worker_cfg.get("returns_lag_mode", 7))
+        # The base returns policy is built once in the coordinator and flows as a
+        # single object (None when disabled); only the per-chunk capacity stride
+        # is still a loose scalar here.
+        returns_policy = worker_cfg.get("returns_policy")
         returns_event_key_capacity = int(worker_cfg.get("returns_event_key_capacity", 100000))
-        returns_logistics_keys = worker_cfg.get("returns_logistics_keys", [])
 
         if sales_output in {"sales_order", "both"}:
             skip_order_cols = False
@@ -697,10 +682,10 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         # NEW: configurable cap for OrderLineNumber per OrderNumber
         max_lines_per_order = int_or(worker_cfg.get("max_lines_per_order"), 5)
         if max_lines_per_order < 1:
-            raise RuntimeError(f"max_lines_per_order must be >= 1, got {max_lines_per_order}")
+            raise ConfigError(f"max_lines_per_order must be >= 1, got {max_lines_per_order}")
 
     except KeyError as e:
-        raise RuntimeError(f"Missing worker_cfg key: {e}") from e
+        raise ConfigError(f"Missing worker_cfg key: {e}") from e
 
     product_np = np.asarray(product_np)
 
@@ -730,7 +715,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     elif product_brand_key is not None:
         product_brand_key = as_int32(product_brand_key)
         if product_brand_key.shape[0] != product_np.shape[0]:
-            raise RuntimeError("product_brand_key must align with product_np row count")
+            raise SalesError("product_brand_key must align with product_np row count")
         brand_to_row_idx = _build_buckets_from_brand_key(product_brand_key)
     else:
         brand_to_row_idx = None
@@ -880,7 +865,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             emp_key = np.asarray(employee_assign_employee_key, dtype=np.int32)
 
             if employee_assign_role is None:
-                raise RuntimeError(
+                raise SalesError(
                     "RoleAtStore is required in employee_store_assignments.parquet. "
                     "Regenerate the bridge table."
                 )
@@ -889,7 +874,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             mask = np.isin(role_arr, allowed)
 
             if not mask.any():
-                raise RuntimeError(
+                raise SalesError(
                     f"No employees with role in {salesperson_roles} found in bridge. "
                     f"Roles present: {np.unique(role_arr).tolist()}"
                 )
@@ -995,27 +980,27 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     if customer_is_active_in_sales is not None:
         customer_is_active_in_sales = as_int32(customer_is_active_in_sales)
         if customer_is_active_in_sales.shape[0] != customer_keys.shape[0]:
-            raise RuntimeError("customer_is_active_in_sales must align with customer_keys length")
+            raise SalesError("customer_is_active_in_sales must align with customer_keys length")
 
     if customer_start_month is not None:
         customer_start_month = as_int64(customer_start_month)
         if customer_start_month.shape[0] != customer_keys.shape[0]:
-            raise RuntimeError("customer_start_month must align with customer_keys length")
+            raise SalesError("customer_start_month must align with customer_keys length")
 
     if customer_end_month is not None:
         customer_end_month = as_int64(customer_end_month)
         if customer_end_month.shape[0] != customer_keys.shape[0]:
-            raise RuntimeError("customer_end_month must align with customer_keys length")
+            raise SalesError("customer_end_month must align with customer_keys length")
 
     if customer_base_weight is not None:
         customer_base_weight = np.asarray(customer_base_weight, dtype=np.float64)
         if customer_base_weight.shape[0] != customer_keys.shape[0]:
-            raise RuntimeError("customer_base_weight must align with customer_keys length")
+            raise SalesError("customer_base_weight must align with customer_keys length")
 
     if customer_discovery_month is not None:
         customer_discovery_month = as_int64(customer_discovery_month)
         if customer_discovery_month.shape[0] != customer_keys.shape[0]:
-            raise RuntimeError("customer_discovery_month must align with customer_keys length")
+            raise SalesError("customer_discovery_month must align with customer_keys length")
 
     # Global per-month plan arrays are length-T (months); coerce to int64.
     if sales_rows_per_month is not None:
@@ -1072,7 +1057,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         tables.append(TABLE_SALES)
     if sales_output in {"sales_order", "both"}:
         tables += [TABLE_SALES_ORDER_DETAIL, TABLE_SALES_ORDER_HEADER]
-    if returns_enabled:
+    if returns_policy is not None:
         tables.append(TABLE_SALES_RETURN)
     for t in tables:
         output_paths.ensure_dirs(t)
@@ -1126,8 +1111,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
 
             # CRITICAL: constant per-run stride used to partition OrderNumber ranges
             "chunk_size": int(max(1, chunk_size)),
-            "order_id_stride_orders": int(max(1, chunk_size)),
-            "month_stride": month_stride,
+            "order_id_day_stride": order_id_day_stride,
             "per_chunk_alloc": per_chunk_alloc,
             "order_id_int64": order_id_int64,
             "max_lines_per_order": int(max_lines_per_order),
@@ -1139,7 +1123,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "skip_order_cols_requested": bool(skip_order_cols_requested),
             "skip_order_cols": bool(skip_order_cols),
             "delta_output_folder": os.path.normpath(delta_output_folder) if delta_output_folder else None,
-            "write_delta": bool(write_delta),
             "no_discount_key": no_discount_key,
             "partition_enabled": bool(partition_enabled),
             "partition_cols": list(partition_cols),
@@ -1155,22 +1138,8 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "parquet_dict_cols_by_table": bundle.parquet_dict_cols_by_table,
             "parquet_dict_exclude": bundle.parquet_dict_exclude,
             "parquet_dict_cols": bundle.parquet_dict_cols,
-            "returns_enabled": bool(returns_enabled),
-            "returns_rate": float(returns_rate),
-            "returns_min_lag_days": int(max(0, returns_min_lag_days)),
-            "returns_max_lag_days": int(returns_max_lag_days),
-            "returns_reason_keys": returns_reason_keys,
-            "returns_reason_probs": returns_reason_probs,
-            "returns_full_line_probability": returns_full_line_probability,
-            "returns_split_return_rate": returns_split_return_rate,
-            "returns_max_splits": returns_max_splits,
-            "returns_reconcile_cents": returns_reconcile_cents,
-            "returns_split_min_gap": returns_split_min_gap,
-            "returns_split_max_gap": returns_split_max_gap,
-            "returns_lag_distribution": returns_lag_distribution,
-            "returns_lag_mode": returns_lag_mode,
+            "returns_policy": returns_policy,
             "returns_event_key_capacity": returns_event_key_capacity,
-            "returns_logistics_keys": returns_logistics_keys,
             # EMPLOYEE assignment (canonical day-accurate bridge)
             "salesperson_effective_by_store": salesperson_effective_by_store,
             "salesperson_global_pool": salesperson_global_pool,

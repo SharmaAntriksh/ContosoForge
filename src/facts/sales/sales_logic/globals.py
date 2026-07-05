@@ -16,6 +16,7 @@ try:
 except ImportError:  # pragma: no cover
     pa = None
 
+from src.exceptions import SalesError
 from src.tools.sql.dialect import ColumnSpec, SqlType
 from src.utils.static_schemas import get_sales_schema
 
@@ -52,7 +53,7 @@ def _spec_to_pa_type(spec: ColumnSpec):
 def _logical_to_arrow_schema(logical_schema):
     """Convert logical (name, ColumnSpec) schema into a PyArrow schema."""
     if not PA_AVAILABLE:
-        raise RuntimeError("pyarrow is required to build Arrow schema")
+        raise SalesError("pyarrow is required to build Arrow schema")
 
     return pa.schema(
         [pa.field(str(name), _spec_to_pa_type(spec)) for name, spec in logical_schema]
@@ -89,10 +90,7 @@ class State:
     product_np = None
     active_product_np = None
 
-    # Backward-compat customer key pool
-    customers = None
-
-    # New lifecycle-aware customer dimension arrays (aligned by row index)
+    # Lifecycle-aware customer dimension arrays (aligned by row index)
     customer_keys = None
     customer_is_active_in_sales = None
     customer_start_month = None
@@ -131,6 +129,12 @@ class State:
     store_demand_weight = None   # dense float by StoreKey (all-ones = uniform); bound at worker init
 
     models_cfg = None
+
+    # Base returns policy (a ReturnsConfig, or None when returns are disabled),
+    # built once in the coordinator; the worker task applies the per-chunk
+    # event_key_offset/capacity. Replaces the old 16 loose returns_* attrs.
+    returns_policy = None
+
     # --------------------------------------------------------------
     # Promotions
     # --------------------------------------------------------------
@@ -207,11 +211,8 @@ class State:
     row_group_size = None
     compression = None
 
-    # Forward-compat aliases for OrderNumber generation
-    order_id_stride_orders = None      # usually == chunk_size
-
     # Day-based order ID ranges (ensures OrderNumber ~ OrderDate)
-    month_stride = None                # total ID space per day (num_chunks * per_chunk_alloc)
+    order_id_day_stride = None         # total ID space per day (num_chunks * per_chunk_alloc)
     per_chunk_alloc = None             # ID slots each chunk owns within a day
     order_id_int64 = False             # emit OrderNumber as int64 (large runs)
 
@@ -228,7 +229,6 @@ class State:
     # --------------------------------------------------------------
     no_discount_key = None
     delta_output_folder = None
-    write_delta = None
 
     # --------------------------------------------------------------
     # Partitioning
@@ -248,6 +248,41 @@ class State:
     schema_with_order_delta = None
 
     # --------------------------------------------------------------
+    # Attributes bind_globals sets from the worker init gdict. These were bound
+    # dynamically but never declared, so they read as "phantom" attributes. They
+    # are declared here so the bind_globals allowlist (below) accepts them and
+    # the class body is the single source of the bound surface. Every one is set
+    # unconditionally by init's gdict before any chunk read, so the None default
+    # is a pre-bind placeholder only (the getattr(..., <default>) reads that
+    # remain are post-bind defensive fallbacks).
+    # --------------------------------------------------------------
+    brand_to_row_idx = None
+    brand_prob_by_month = None
+    product_brand_key = None
+    product_popularity = None
+    product_seasonality = None
+    product_subcat_key = None
+    promo_salience_all = None
+    _channel_to_elig_group = None
+    sales_output = None
+    output_paths = None
+    parquet_folder = None
+    returns_event_key_capacity = None
+    validate_header_invariants = None
+    salesperson_effective_by_store = None
+    salesperson_global_pool = None
+    inventory_enabled = None
+    inventory_store_to_warehouse = None
+    wishlists_enabled = None
+    complaints_enabled = None
+    # Output-schema / dict-encoding descriptors carried from the schema bundle.
+    date_cols_by_table = None
+    schema_by_table = None
+    sales_schema_out = None
+    parquet_dict_cols = None
+    parquet_dict_cols_by_table = None
+
+    # --------------------------------------------------------------
     # Lifecycle helpers
     # --------------------------------------------------------------
     @staticmethod
@@ -264,10 +299,29 @@ class State:
                 continue
             setattr(State, key, None)
 
+        # Also clear the module-level scratch cache derived from State.models_cfg
+        # (the lines-per-order month-demand curve), so a between-run reset in the
+        # same process starts clean. Function-local import breaks the
+        # globals <-> core.orders import cycle.
+        from .core.orders import _reset_month_demand
+        _reset_month_demand()
+
 
 # ===============================================================
 # Binding
 # ===============================================================
+
+# The attributes bind_globals is permitted to set: exactly the data attributes
+# declared on the State class body. Computed once at import (before any bind, so
+# no dynamic setattr can widen it) — the class body is the single source of the
+# bindable surface. A gdict key outside this set means someone added a bound
+# value without declaring it, which would otherwise surface only as a phantom
+# read deep in a worker.
+_ALLOWED_STATE_ATTRS = frozenset(
+    k for k in vars(State)
+    if not k.startswith("__") and not callable(getattr(State, k))
+)
+
 
 def bind_globals(gdict: dict):
     """
@@ -278,8 +332,14 @@ def bind_globals(gdict: dict):
     if not isinstance(gdict, dict):
         raise TypeError("bind_globals expects a dict")
 
-    # Bind raw values (allow injecting additional attrs for debugging)
+    # Bind raw values, rejecting any key not declared on the State class.
     for k, v in gdict.items():
+        if k not in _ALLOWED_STATE_ATTRS:
+            raise SalesError(
+                f"bind_globals received an undeclared State attribute: {k!r}. "
+                "Declare it on the State class — the bind allowlist is the "
+                "declared class surface."
+            )
         setattr(State, k, v)
 
     # --------------------------------------------------------------
@@ -301,7 +361,7 @@ def bind_globals(gdict: dict):
     # --------------------------------------------------------------
     if PA_AVAILABLE and State.sales_schema is None:
         if State.skip_order_cols is None:
-            raise RuntimeError("skip_order_cols must be bound before Sales schema initialization")
+            raise SalesError("skip_order_cols must be bound before Sales schema initialization")
 
         logical_schema = get_sales_schema(bool(State.skip_order_cols))
         State.sales_schema = _logical_to_arrow_schema(logical_schema)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from src.exceptions import SalesError
 from src.facts.sales.sales_logic.globals import State, bind_globals, fmt
 
 
@@ -57,6 +58,19 @@ class TestBindGlobals:
     def test_non_dict_raises(self):
         with pytest.raises(TypeError, match="expects a dict"):
             bind_globals("not a dict")
+
+    def test_undeclared_key_raises(self):
+        # The setattr allowlist is the declared State surface: a gdict key with
+        # no class declaration is rejected up front (naming it) rather than
+        # silently widening State and surfacing as a phantom read in a worker.
+        with pytest.raises(SalesError, match="not_a_real_state_attr"):
+            bind_globals({"skip_order_cols": False, "not_a_real_state_attr": 1})
+
+    def test_declared_keys_bind(self):
+        # A representative previously-phantom (now declared) key binds cleanly.
+        bind_globals({"skip_order_cols": False, "sales_output": "both"})
+
+        assert State.sales_output == "both"
 
     def test_discovery_month_binds_through(self):
         # Discovery is a static broadcast array now (no mutable seen_customers).

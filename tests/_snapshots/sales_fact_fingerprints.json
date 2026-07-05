@@ -1,0 +1,17 @@
+{
+  "default/w1_big": "38a6625809c16080213c8cb21dc055e5c9e716bfaf19b416f68015e9d10edc9f",
+  "default/w1_small": "acaea17c612b9092179c6a4110cb77b64f7f8e03bc9b8585a8d6cbe3b417340d",
+  "default/w4_small": "acaea17c612b9092179c6a4110cb77b64f7f8e03bc9b8585a8d6cbe3b417340d",
+  "delta_partitioned/w1_big": "eb57c93eb83c4d8d7259a5feee6fdfd1247aba4beea47485c2d4a98f6798b6a8",
+  "delta_partitioned/w1_small": "ad6e79d5ae5a28385419238eb61f7dbeddc92eebc2a70106c014624c3ce7c922",
+  "delta_partitioned/w4_small": "ad6e79d5ae5a28385419238eb61f7dbeddc92eebc2a70106c014624c3ce7c922",
+  "returns_both_csv/w1_big": "65b22df4651d567163d10fa9caed2a14adb93a1647534b8d3fc9d694b78c4197",
+  "returns_both_csv/w1_small": "7b9999d69c552abe50144489cef81359c283d854f436178f1f7ad094e076b6cb",
+  "returns_both_csv/w4_small": "7b9999d69c552abe50144489cef81359c283d854f436178f1f7ad094e076b6cb",
+  "scd2/w1_big": "6f245eb0bff04e6181c78e2c4ba80b3f33173f1ea67a283905388ccbd27c2e4a",
+  "scd2/w1_small": "3402879e7d25127eef7a4ccf27a59eb1b0a76b4bfd6737e32adec66e2f880dc1",
+  "scd2/w4_small": "3402879e7d25127eef7a4ccf27a59eb1b0a76b4bfd6737e32adec66e2f880dc1",
+  "skip_order_cols/w1_big": "4d813700acc85eb15bf48af3f51a018d2433b98b2288cd342d7497893f6d7832",
+  "skip_order_cols/w1_small": "d4581963619a196a139cac8cc2eda00555958a4b67f7b086b691a15e0507b9c7",
+  "skip_order_cols/w4_small": "d4581963619a196a139cac8cc2eda00555958a4b67f7b086b691a15e0507b9c7"
+}

@@ -7,14 +7,14 @@ This module is the falsifiability harness for the cluster refactor documented in
    enrichment, ``warehouses``, ``employees``, ``employee_store_assignments``) for
    two fixtures: the default shifted-window cluster and the mid-window-openings
    cluster (``midwindow/`` keys, with stores opening — and closing — inside the
-   data window).  Behavior-preserving phases must leave every fingerprint
-   unchanged; behavior phases regenerate them once via
+   data window).  A behavior-preserving change must leave every fingerprint
+   unchanged; a change that intentionally alters output regenerates them once via
    ``REGEN_STORE_CLUSTER_SNAPSHOT=1``.
 2. **Characterization tests** that pin the invariants worth keeping (staffing
    contract, warehouse FK/uniqueness, one-primary/no-overlap bridge, key-band
    integrity, store lifecycle sanity, salesperson coverage).
 3. **Bug-pinning tests** marked ``xfail(strict=True)``; each asserts the desired
-   post-fix behavior and names the phase that will flip it green.
+   post-fix behavior that flips it green when the fix lands.
 
 The chain is driven through the real ``run_*`` entry points so the fingerprint
 captures ``stores.parquet`` *after* the warehouse enrichment rewrite — the state
@@ -238,7 +238,7 @@ def test_golden_fingerprint(cluster, cluster_midwindow):
     Covers both the default (shifted-window) cluster and the mid-window-openings
     cluster (``midwindow/`` keys). First run (or ``REGEN_STORE_CLUSTER_SNAPSHOT=1``)
     records the baseline and skips; thereafter it asserts equality per table.
-    Behavior phases regenerate.
+    An output-altering change regenerates the baseline.
     """
     current = {
         **_current_fingerprints(cluster),
@@ -262,7 +262,7 @@ def test_golden_fingerprint(cluster, cluster_midwindow):
     }
     assert not mismatches, (
         "Store-cluster output changed vs golden baseline for: "
-        f"{sorted(mismatches)}. If this change is intended (a behavior phase), "
+        f"{sorted(mismatches)}. If this change is intended (an output-altering change), "
         "rerun with REGEN_STORE_CLUSTER_SNAPSHOT=1 to regenerate the baseline."
     )
 
@@ -694,7 +694,7 @@ def test_bugpin_4_warehouse_missing_geo_columns_raises_dimensionerror(tmp_path):
 
 def test_bugpin_5_boundary_predicate_agrees_at_base():
     """The online/physical boundary is spelled four ways across the cluster and
-    they disagree at exactly ``ONLINE_STORE_KEY_BASE``.  Phase 2 introduces one
+    they disagree at exactly ``ONLINE_STORE_KEY_BASE``.  A later refactor introduced one
     canonical predicate; this pins its existence and its rule (online ⇔ > BASE)."""
     from src.defaults import is_online_store_key, is_physical_store_key
     b = ONLINE_STORE_KEY_BASE
@@ -774,7 +774,7 @@ def _assert_bridge_invariants(frames: dict[str, pd.DataFrame], seed: int) -> Non
 @pytest.mark.parametrize("seed", list(range(200, 220)))
 def test_bridge_invariants_across_seeds(tmp_path_factory, seed):
     """Build the full cluster for 20 seeds and assert the bridge invariants hold
-    after renovation and transfers — the Phase 5 acceptance guard."""
+    after renovation and transfers — the acceptance guard."""
     root = tmp_path_factory.mktemp(f"props{seed}")
     with _isolated_version_dir(root / "versioning"):
         folder = root / "data"

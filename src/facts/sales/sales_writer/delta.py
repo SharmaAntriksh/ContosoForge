@@ -8,6 +8,7 @@ from typing import Callable, Iterable, List, Optional, Sequence, TYPE_CHECKING, 
 if TYPE_CHECKING:
     import pyarrow as pa
 
+from src.exceptions import SalesError
 from .utils import _arrow, info, warn
 from .encoding import _validate_required
 from .projection import project_table_to_schema
@@ -35,7 +36,7 @@ def _delta_import_write_deltalake():
             from deltalake.writer import write_deltalake  # type: ignore
             return write_deltalake
         except ImportError as e2:
-            raise RuntimeError(
+            raise SalesError(
                 "deltalake is required for Delta output, but import failed. "
                 f"top-level error={e1!r}; fallback error={e2!r}"
             ) from e2
@@ -103,7 +104,7 @@ def _resolve_partition_cols(
     missing = [c for c in pcols if c not in canonical_names]
     if missing:
         if on_missing == "error":
-            raise RuntimeError(f"Partition columns missing from schema: {missing}")
+            raise SalesError(f"Partition columns missing from schema: {missing}")
         pcols = [c for c in pcols if c in canonical_names]
         info(
             f"[DELTA] Partition cols missing for table={table_name or 'unknown'}; "
@@ -250,7 +251,7 @@ def write_delta_single_commit(
     # signature, so this is a genuine failure (e.g. a reader/schema problem),
     # not an unsupported-kwarg case — surface it instead of silently no-op'ing
     # the write and reporting success to the caller.
-    raise RuntimeError(
+    raise SalesError(
         f"Delta write failed for {delta_output_abs}: {last_exc}"
     ) from last_exc
 
@@ -283,7 +284,7 @@ def write_delta_from_parquet_parts(
 
     part_files = _delta_resolve_part_files(parts_folder=parts_folder_abs, parts=parts)
     if not part_files:
-        raise RuntimeError(
+        raise SalesError(
             f"No delta part files found in folder: {parts_folder_abs or '(no folder specified)'}"
         )
 

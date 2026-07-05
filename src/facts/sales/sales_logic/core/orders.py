@@ -103,7 +103,7 @@ def build_orders(
       - if skip_cols=False: order_ids_int, line_num, order_ids_str
     """
     if not isinstance(skip_cols, bool):
-        raise RuntimeError("skip_cols must be a boolean")
+        raise SalesError("skip_cols must be a boolean")
 
     n = int(n)
     if n <= 0:
@@ -114,11 +114,11 @@ def build_orders(
 
     date_pool = np.asarray(date_pool)
     if date_pool.size == 0:
-        raise RuntimeError("date_pool is empty")
+        raise SalesError("date_pool is empty")
 
     customers = np.asarray(customers, dtype=np.int32)
     if customers.size == 0:
-        raise RuntimeError("customers array is empty")
+        raise SalesError("customers array is empty")
 
     # ------------------------------------------------------------
     # Order count: derived from the pre-sampled customers array.
@@ -129,7 +129,7 @@ def build_orders(
 
     max_lines = int(getattr(State, "max_lines_per_order", 6) or 6)
     if max_lines < 1:
-        raise RuntimeError(f"State.max_lines_per_order must be >= 1, got {max_lines}")
+        raise SalesError(f"State.max_lines_per_order must be >= 1, got {max_lines}")
 
     # ------------------------------------------------------------
     # Order-level date sampling
@@ -155,7 +155,7 @@ def build_orders(
     # 1-based so that order ID 0 is never emitted.
     # ------------------------------------------------------------
     if order_id_start is None:
-        raise RuntimeError(
+        raise SalesError(
             "order_id_start is required to guarantee unique OrderNumber "
             "(caller must assign a disjoint range per chunk)."
         )
@@ -250,7 +250,7 @@ def build_orders(
         # Need more lines: increment orders that are below max_lines
         candidates = np.flatnonzero(repeats < max_lines)
         if candidates.size == 0:
-            raise RuntimeError(
+            raise SalesError(
                 f"Need {delta} more lines but all orders are at max_lines_per_order={max_lines}. "
                 "Increase max_lines_per_order or increase order_count."
             )
@@ -259,7 +259,7 @@ def build_orders(
         total_headroom = int(headroom.sum())
 
         if total_headroom < delta:
-            raise RuntimeError(
+            raise SalesError(
                 f"Need {delta} more lines but only {total_headroom} headroom available. "
                 "Increase max_lines_per_order or increase order_count."
             )
@@ -299,7 +299,7 @@ def build_orders(
         excess = -delta
         candidates = np.flatnonzero(repeats > 1)
         if candidates.size == 0:
-            raise RuntimeError(
+            raise SalesError(
                 "Unable to reduce repeats to match n without violating min 1 line/order."
             )
 
@@ -330,13 +330,13 @@ def build_orders(
                 repeats[chosen] -= 1
                 remaining -= take
         else:
-            raise RuntimeError(
+            raise SalesError(
                 "Unable to reduce repeats to match n without violating min 1 line/order."
             )
 
     expanded_len = int(repeats.sum())
     if expanded_len != n:
-        raise RuntimeError("Internal error: repeats sum != n after adjustment")
+        raise SalesError("Internal error: repeats sum != n after adjustment")
 
     # expand to line level
     customer_keys = np.repeat(order_customers, repeats)

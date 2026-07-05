@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Iterable, Optional, Sequence, Set, Union
 
+from src.exceptions import SalesError
 from .utils import _arrow, _ensure_dir_for_file, done, info, skip, warn
 from .projection import _project_table_to_schema, project_table_to_schema
 from .encoding import _schema_dict_cols, _validate_required, required_pricing_cols_for_table
@@ -98,7 +99,7 @@ def _pm_restrict_schema_to_expected(schema, expected_cols: Sequence[str], pa, *,
     fields = {f.name: f for f in schema}
     missing = [c for c in expected_cols if c not in fields]
     if missing:
-        raise RuntimeError(
+        raise SalesError(
             f"[{table_name}] canonical schema missing expected columns {missing}. "
             "This usually means wrong chunk files were passed to the merge."
         )
@@ -129,7 +130,7 @@ def _pm_read_row_group_projected(
     if required_cols:
         missing_required = required_cols - available
         if missing_required:
-            raise RuntimeError(
+            raise SalesError(
                 f"Parquet chunk is missing required columns {sorted(missing_required)}; "
                 f"file={getattr(reader, 'path', '')}"
             )
@@ -231,11 +232,11 @@ def _validate_chunk_columns(
     if strict_expected:
         missing = sorted(expected_set - chunk_cols)
         if missing:
-            raise RuntimeError(f"Chunk missing expected columns {missing}: {path}")
+            raise SalesError(f"Chunk missing expected columns {missing}: {path}")
     if reject_extra_cols:
         extra = sorted(chunk_cols - expected_set)
         if extra:
-            raise RuntimeError(f"Chunk has unexpected columns {extra}: {path}")
+            raise SalesError(f"Chunk has unexpected columns {extra}: {path}")
 
 
 def _write_chunk_row_groups(
@@ -330,8 +331,13 @@ def _merge_parquet_files_common(
     if log:
         info(f"{log_prefix}Merging {len(files)} chunks: {os.path.basename(merged_file_abs)}".strip())
 
+    # Write to a temp sibling and atomically rename on success, so a mid-merge
+    # crash never leaves a truncated-but-plausible file at the final path (which
+    # the path-probing packager would happily ship). Mirrors the tmp + os.replace
+    # pattern optimize_parquet already uses.
+    tmp_path = merged_file_abs + ".tmp"
     schema, writer = _prepare_schema_and_writer(
-        files, merged_file_abs,
+        files, tmp_path,
         schema_strategy=schema_strategy,
         canonical_schema=canonical_schema,
         expected_cols=expected_cols,
@@ -346,6 +352,7 @@ def _merge_parquet_files_common(
 
     expected_set = frozenset(expected_cols) if expected_cols else None
 
+    ok = False
     try:
         for path in files:
             src, reader = _pm_open_parquet(path, pa, pq)
@@ -372,8 +379,18 @@ def _merge_parquet_files_common(
                     src.close()
                 except OSError:
                     pass
+        ok = True
     finally:
         writer.close()
+        # A failed merge must not leave a partial temp behind, and must never
+        # touch the final path (the previous good file, if any, survives).
+        if not ok and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    os.replace(tmp_path, merged_file_abs)
 
     if delete_after:
         for path in files:
@@ -423,7 +440,7 @@ def _read_row_group_projected(reader, rg_index: int, schema, *, table_name: str 
     available = set(reader.schema_arrow.names)
     missing_required = required - available
     if missing_required:
-        raise RuntimeError(
+        raise SalesError(
             f"Parquet chunk is missing required columns {sorted(missing_required)}; "
             f"file={getattr(reader, 'path', '')}"
         )
@@ -595,11 +612,17 @@ def optimize_parquet(
         pf.close() if hasattr(pf, "close") else None
         return None
 
-    # Determine dictionary encoding columns (string/binary)
+    # Determine dictionary-encoding columns (string/binary), minus the merge's
+    # DICT_EXCLUDE set (high-cardinality keys like OrderNumber/CustomerKey). This
+    # keeps a re-optimized file's encoding policy consistent with the merge,
+    # which deliberately excludes those columns; computing an independent list
+    # here re-introduced dictionary encoding on exactly the excluded columns.
+    from .encoding import DICT_EXCLUDE
     dict_cols = [
         f.name for f in schema
-        if pa.types.is_string(f.type) or pa.types.is_large_string(f.type)
-        or pa.types.is_binary(f.type) or pa.types.is_large_binary(f.type)
+        if (pa.types.is_string(f.type) or pa.types.is_large_string(f.type)
+            or pa.types.is_binary(f.type) or pa.types.is_large_binary(f.type))
+        and f.name not in DICT_EXCLUDE
     ]
 
     tmp_path = file_path + ".optimize_tmp"

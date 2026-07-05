@@ -59,7 +59,13 @@ from .prep.correlation_lookups import (
     _prebuild_shared_structures,
 )
 
-from .prep.worker_cfg_builder import _build_worker_cfg, _setup_accumulators
+from .prep.worker_cfg_builder import (
+    _build_worker_cfg,
+    _setup_accumulators,
+    build_returns_policy,
+)
+from .prep.run_config import MonthPlan, SalesRunConfig
+from .prep.worker_cfg_schema import SHARED_FIELDS
 
 
 # =====================================================================
@@ -137,24 +143,19 @@ def batch_tasks(tasks: List[Tuple[int, int, int]], batch_size: int) -> List[List
 
 
 def _resolve_partitioning(cfg: dict, partition_enabled: bool, partition_cols: Optional[Sequence[str]]) -> Tuple[bool, Optional[List[str]]]:
-    sales_cfg = getattr(cfg, "sales", None) if isinstance(cfg, Mapping) else None
-    sales_cfg = sales_cfg if isinstance(sales_cfg, Mapping) else {}
+    # Read partition config via _cfg_get, which resolves both attribute-shaped
+    # (AppConfig) and plain-dict cfgs. A bare getattr(cfg, "sales") silently
+    # returns None for a dict cfg — dicts have no ".sales" attribute — which used
+    # to drop the partition config entirely. Support both the flat
+    # sales.partition_enabled/partition_cols spelling and the nested
+    # sales.partitioning.enabled/columns block, flat taking precedence.
+    cfg_enabled = _cfg_get(cfg, ["sales", "partition_enabled"], None)
+    if cfg_enabled is None:
+        cfg_enabled = _cfg_get(cfg, ["sales", "partitioning", "enabled"], None)
 
-    cfg_enabled = None
-    if hasattr(sales_cfg, "partition_enabled"):
-        cfg_enabled = getattr(sales_cfg, "partition_enabled", None)
-    elif hasattr(sales_cfg, "partitioning"):
-        _part = getattr(sales_cfg, "partitioning", None)
-        if isinstance(_part, Mapping):
-            cfg_enabled = getattr(_part, "enabled", None)
-
-    cfg_cols = None
-    if hasattr(sales_cfg, "partition_cols"):
-        cfg_cols = getattr(sales_cfg, "partition_cols", None)
-    elif hasattr(sales_cfg, "partitioning"):
-        _part = getattr(sales_cfg, "partitioning", None)
-        if isinstance(_part, Mapping):
-            cfg_cols = getattr(_part, "columns", None)
+    cfg_cols = _cfg_get(cfg, ["sales", "partition_cols"], None)
+    if cfg_cols is None:
+        cfg_cols = _cfg_get(cfg, ["sales", "partitioning", "columns"], None)
 
     partition_enabled = _apply_cfg_default(
         partition_enabled,
@@ -194,7 +195,6 @@ def generate_sales_fact(
     file_format="parquet",
     workers=None,
     tune_chunk=False,
-    write_delta=False,     # legacy (ignored)
     delta_output_folder=None,
     skip_order_cols=False,
     partition_enabled=False,
@@ -204,8 +204,16 @@ def generate_sales_fact(
     # Normalize cfg defaults (cfg is source-of-truth when call-site omits)
     # ------------------------------------------------------------
     cfg = cfg if isinstance(cfg, Mapping) else {}
-    sales_cfg = getattr(cfg, "sales", None)
-    sales_cfg = sales_cfg if isinstance(sales_cfg, Mapping) else {}
+    # Resolve the sales section dict- and attribute-agnostically. A bare
+    # getattr(cfg, "sales") returns None for a plain-dict cfg, so every
+    # getattr(sales_cfg, ...) below silently fell back to the call-site arg and
+    # the config was ignored. _cfg_get returns the section for both shapes; wrap a
+    # plain dict in SimpleNamespace so the attribute reads below work unchanged.
+    sales_cfg = _cfg_get(cfg, ["sales"], None)
+    if isinstance(sales_cfg, dict):
+        sales_cfg = SimpleNamespace(**sales_cfg)
+    elif not isinstance(sales_cfg, Mapping):
+        sales_cfg = SimpleNamespace()
 
     file_format_cfg = getattr(sales_cfg, "file_format", None)
     if file_format_cfg is not None:
@@ -424,15 +432,15 @@ def generate_sales_fact(
     _emps = _load_employees(parquet_folder_p, cfg, end_date)
 
     # Locals needed by auto-adjust customer discovery and correlation lookups
-    store_keys = _stores["store_keys"]
-    product_np = _prod["product_np"]
-    date_pool = _prod["date_pool"]
-    is_active_in_sales = _cust["is_active_in_sales"]
-    customer_start_month = _cust["customer_start_month"]
+    store_keys = _stores.store_keys
+    product_np = _prod.product_np
+    date_pool = _prod.date_pool
+    is_active_in_sales = _cust.is_active_in_sales
+    customer_start_month = _cust.customer_start_month
 
     _corr = _build_correlation_lookups(
-        parquet_folder_p, store_keys, _stores["store_to_geo"], _stores["store_type_map"],
-        product_np, _promos["promo_keys_all"], _promos["promo_df"],
+        parquet_folder_p, store_keys, _stores.store_to_geo, _stores.store_type_map,
+        product_np, _promos.promo_keys_all, _promos.promo_df,
     )
 
     # ------------------------------------------------------------
@@ -615,11 +623,11 @@ def generate_sales_fact(
     _cust_mdl_final = getattr(State.models_cfg, "customers", None)
     _discovery_lag_scale = float(getattr(_cust_mdl_final, "discovery_lag_scale", 1.0)) \
         if _cust_mdl_final is not None else 1.0
-    _cust["customer_discovery_month"] = compute_discovery_months(
-        customer_keys=_cust["customer_keys"],
-        is_active_in_sales=_cust["is_active_in_sales"],
-        start_month=_cust["customer_start_month"],
-        end_month=_cust["customer_end_month"],
+    _discovery_month_g = compute_discovery_months(
+        customer_keys=_cust.customer_keys,
+        is_active_in_sales=_cust.is_active_in_sales,
+        start_month=_cust.customer_start_month,
+        end_month=_cust.customer_end_month,
         T=_T_months,
         run_seed=int(seed),
         lag_scale=_discovery_lag_scale,
@@ -635,13 +643,13 @@ def generate_sales_fact(
     # and per-chunk distinct target that made both depend on chunk_size.
     # ------------------------------------------------------------
     _end_month_norm_g = _normalize_end_month(
-        _cust.get("customer_end_month"),
-        int(np.asarray(_cust["customer_keys"]).shape[0]),
+        _cust.customer_end_month,
+        int(np.asarray(_cust.customer_keys).shape[0]),
     )
     _elig_counts_g = _eligible_counts_fast(
         T=_T_months,
-        is_active_in_sales=_cust["is_active_in_sales"],
-        start_month=_cust["customer_start_month"],
+        is_active_in_sales=_cust.is_active_in_sales,
+        start_month=_cust.customer_start_month,
         end_month_norm=_end_month_norm_g,
     )
     _macro_cfg_plan = State.models_cfg.get("macro_demand", {}) or {}
@@ -689,9 +697,7 @@ def generate_sales_fact(
     else:
         _month_cal_index = np.zeros(_T_months, dtype=np.int64)
 
-    _cust["sales_rows_per_month"] = _rows_per_month_g
-    _cust["sales_orders_per_month"] = _orders_per_month_g
-    _cust["sales_distinct_target"] = compute_month_distinct_targets(
+    _distinct_target_g = compute_month_distinct_targets(
         seed=int(seed),
         T=_T_months,
         eligible_counts=_elig_counts_g,
@@ -705,23 +711,62 @@ def generate_sales_fact(
         min_distinct_customers=_min_distinct_customers_g,
     )
 
-    # Worker configuration
-    worker_cfg = _build_worker_cfg(
-        _cust, _prod, _stores, _emps, _corr, _promos,
-        cfg, sales_cfg, output_paths, out_folder_p,
-        file_format, chunk_size, total_rows, seed, order_id_run_id,
-        sales_output, skip_order_cols, write_delta, delta_output_folder,
-        partition_enabled, partition_cols, row_group_size, compression,
-        returns_enabled_effective, returns_rate,
-        returns_min_lag_days, returns_max_lag_days,
-        returns_reason_keys, returns_reason_probs,
-        returns_full_line_prob, returns_split_rate,
-        returns_max_splits, returns_split_min_gap, returns_split_max_gap,
-        returns_lag_distribution, returns_lag_mode,
-        returns_logistics_keys, returns_event_key_capacity,
-        month_stride=_day_stride, per_chunk_alloc=_per_chunk_alloc,
-        order_id_int64=_order_id_int64, total_chunks=total_chunks,
+    # The global per-month plan, bundled into one holder instead of injected back
+    # into the customer loader's dict (which is now a frozen CustomerPool).
+    _month_plan = MonthPlan(
+        customer_discovery_month=_discovery_month_g,
+        sales_rows_per_month=_rows_per_month_g,
+        sales_orders_per_month=_orders_per_month_g,
+        sales_distinct_target=_distinct_target_g,
+    )
+
+    # Build the base returns policy once (None when returns are disabled), so the
+    # worker-config builder takes one object instead of 15 loose returns scalars.
+    _returns_policy = build_returns_policy(
+        returns_enabled_effective=returns_enabled_effective,
+        returns_rate=returns_rate,
+        returns_min_lag_days=returns_min_lag_days,
+        returns_max_lag_days=returns_max_lag_days,
+        returns_reason_keys=returns_reason_keys,
+        returns_reason_probs=returns_reason_probs,
+        returns_full_line_prob=returns_full_line_prob,
+        returns_split_rate=returns_split_rate,
+        returns_max_splits=returns_max_splits,
         returns_reconcile_cents=returns_reconcile_cents,
+        returns_split_min_gap=returns_split_min_gap,
+        returns_split_max_gap=returns_split_max_gap,
+        returns_lag_distribution=returns_lag_distribution,
+        returns_lag_mode=returns_lag_mode,
+        returns_logistics_keys=returns_logistics_keys,
+        models_cfg=getattr(State, "models_cfg", None),
+    )
+
+    # Worker configuration: bundle the resolved run-level scalars into one typed
+    # holder so the builder takes a handful of containers + config objects
+    # instead of a long positional tail.
+    _run_cfg = SalesRunConfig(
+        file_format=file_format,
+        out_folder=str(out_folder_p),
+        chunk_size=chunk_size,
+        total_rows=total_rows,
+        seed=seed,
+        order_id_run_id=order_id_run_id,
+        sales_output=sales_output,
+        skip_order_cols=skip_order_cols,
+        delta_output_folder=delta_output_folder,
+        partition_enabled=partition_enabled,
+        partition_cols=partition_cols,
+        row_group_size=row_group_size,
+        compression=compression,
+        order_id_day_stride=_day_stride,
+        per_chunk_alloc=_per_chunk_alloc,
+        order_id_int64=_order_id_int64,
+        total_chunks=total_chunks,
+    )
+    worker_cfg = _build_worker_cfg(
+        _cust, _month_plan, _prod, _stores, _emps, _corr, _promos,
+        cfg, sales_cfg, output_paths, _run_cfg,
+        _returns_policy, returns_event_key_capacity,
     )
 
     # Streaming accumulators (budget, inventory, wishlists, complaints)
@@ -734,44 +779,7 @@ def generate_sales_fact(
     # so worker processes get zero-copy views instead of pickle copies.
     # ------------------------------------------------------------
     _shm = SharedArrayGroup()
-    _shm.publish_dict(worker_cfg, [
-        "product_np",
-        "product_brand_key",
-        "customers",              # alias for customer_keys
-        "customer_keys",
-        "customer_is_active_in_sales",
-        "customer_start_month",
-        "customer_end_month",
-        "customer_base_weight",
-        "customer_discovery_month",
-        "customer_first_eff_start_by_key",
-        "product_subcat_key",
-        "product_popularity",
-        "date_pool",
-        "date_prob",
-        "promo_keys_all",
-        "promo_start_all",
-        "promo_end_all",
-        "employee_assign_store_key",
-        "employee_assign_employee_key",
-        "employee_assign_start_date",
-        "employee_assign_end_date",
-        "employee_assign_fte",
-        "employee_assign_is_primary",
-        "product_seasonality",
-        "customer_geo_key",
-        "geo_to_country_id",
-        "store_to_country_id",
-        "product_channel_eligible",
-        "promo_channel_group",
-        "channel_fulfillment_days",
-        "_channel_to_elig_group",
-        "product_scd2_starts",
-        "product_scd2_data",
-        "customer_scd2_starts",
-        "customer_scd2_keys",
-        "cust_key_to_pool_idx",
-    ])
+    _shm.publish_dict(worker_cfg, SHARED_FIELDS)
 
     # Pre-build expensive derived structures (brand buckets, assortment, salesperson, brand probs)
     _prebuild_shared_structures(worker_cfg, _shm, _prod, _stores, _emps, seed)

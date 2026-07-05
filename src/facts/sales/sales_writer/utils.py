@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Union
 
+from src.exceptions import SalesError
+
 # ---------------------------------------------------------------------
 # Logging (soft dependency)
 # ---------------------------------------------------------------------
@@ -38,7 +40,7 @@ def _arrow():
         import pyarrow.parquet as pq  # type: ignore
         return pa, pc, pq
     except ImportError as e:
-        raise RuntimeError("pyarrow is required for Parquet merge/Delta writes") from e
+        raise SalesError("pyarrow is required for Parquet merge/Delta writes") from e
 
 
 def arrow():

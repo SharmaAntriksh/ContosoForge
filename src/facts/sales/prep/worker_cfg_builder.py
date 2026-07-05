@@ -25,6 +25,7 @@ from src.utils.logging_utils import info
 
 from .dimension_loaders import _compute_promo_salience
 from ..sales_logic import State
+from ..sales_worker.returns_builder import ReturnsConfig
 from .worker_cfg_schema import SalesWorkerCfg
 
 # Budget streaming aggregation (lazy import to avoid hard dependency)
@@ -54,23 +55,87 @@ except ImportError:
     _COMPLAINTS_AVAILABLE = False
 
 
-def _build_worker_cfg(
-    cust, prod, stores, emps, corr, promos,
-    cfg, sales_cfg, output_paths, out_folder_p,
-    file_format, chunk_size, total_rows, seed, order_id_run_id,
-    sales_output, skip_order_cols, write_delta, delta_output_folder,
-    partition_enabled, partition_cols, row_group_size, compression,
-    returns_enabled_effective, returns_rate,
-    returns_min_lag_days, returns_max_lag_days,
-    returns_reason_keys, returns_reason_probs,
-    returns_full_line_prob, returns_split_rate,
-    returns_max_splits, returns_split_min_gap, returns_split_max_gap,
-    returns_lag_distribution, returns_lag_mode,
-    returns_logistics_keys, returns_event_key_capacity,
-    month_stride=0, per_chunk_alloc=0, order_id_int64=False,
-    total_chunks=1, returns_reconcile_cents=False,
+def build_returns_policy(
+    *,
+    returns_enabled_effective,
+    returns_rate,
+    returns_min_lag_days,
+    returns_max_lag_days,
+    returns_reason_keys,
+    returns_reason_probs,
+    returns_full_line_prob,
+    returns_split_rate,
+    returns_max_splits,
+    returns_reconcile_cents,
+    returns_split_min_gap,
+    returns_split_max_gap,
+    returns_lag_distribution,
+    returns_lag_mode,
+    returns_logistics_keys,
+    models_cfg,
 ):
-    """Build the worker_cfg dict from typed containers."""
+    """Build the base ``ReturnsConfig`` once in the coordinator (``None`` when
+    returns are disabled).
+
+    Used to be relayed as 16 loose scalars through worker_cfg -> init -> State
+    and reassembled per task; now the coordinator builds the one object and
+    passes it to ``_build_worker_cfg``. Fulfillment friction couples returns to
+    delivery; it is read from ``models.fulfillment`` off the same ``models_cfg``
+    the workers are given, so the value is byte-identical.
+    """
+    if not bool(returns_enabled_effective):
+        return None
+    _ff = models_cfg.get("fulfillment", None) if models_cfg is not None else None
+    _ff_on = bool(_ff.get("enabled", False)) if _ff is not None else False
+    return ReturnsConfig(
+        enabled=True,
+        return_rate=float(returns_rate),
+        min_lag_days=int(max(0, returns_min_lag_days)),
+        max_lag_days=int(returns_max_lag_days),
+        reason_keys=list(returns_reason_keys) if returns_reason_keys is not None else [1],
+        reason_probs=list(returns_reason_probs) if returns_reason_probs is not None else [1.0],
+        full_line_probability=float(returns_full_line_prob),
+        split_return_rate=float(returns_split_rate),
+        max_splits=int(returns_max_splits),
+        reconcile_cents=bool(returns_reconcile_cents),
+        split_min_gap=int(returns_split_min_gap),
+        split_max_gap=int(returns_split_max_gap),
+        lag_distribution=str(returns_lag_distribution),
+        lag_mode=int(returns_lag_mode),
+        event_key_offset=0,
+        logistics_keys=frozenset(returns_logistics_keys or ()),
+        friction_return_boost=float(_ff.get("return_prob_boost", 0.0)) if _ff_on else 0.0,
+        friction_lag_shorten=float(_ff.get("return_lag_shorten", 0.0)) if _ff_on else 0.0,
+    )
+
+
+def _build_worker_cfg(
+    cust, month_plan, prod, stores, emps, corr, promos,
+    cfg, sales_cfg, output_paths, run_cfg,
+    returns_policy, returns_event_key_capacity,
+):
+    """Build the worker_cfg dict from typed containers and the run config."""
+    # Unpack the resolved run config into the local names the dict-construction
+    # body below uses, so that body is unchanged. out_folder_p holds the already
+    # ``str`` out_folder (the ``str()`` call further down is then a no-op).
+    file_format = run_cfg.file_format
+    out_folder_p = run_cfg.out_folder
+    chunk_size = run_cfg.chunk_size
+    total_rows = run_cfg.total_rows
+    seed = run_cfg.seed
+    order_id_run_id = run_cfg.order_id_run_id
+    sales_output = run_cfg.sales_output
+    skip_order_cols = run_cfg.skip_order_cols
+    delta_output_folder = run_cfg.delta_output_folder
+    partition_enabled = run_cfg.partition_enabled
+    partition_cols = run_cfg.partition_cols
+    row_group_size = run_cfg.row_group_size
+    compression = run_cfg.compression
+    order_id_day_stride = run_cfg.order_id_day_stride
+    per_chunk_alloc = run_cfg.per_chunk_alloc
+    order_id_int64 = run_cfg.order_id_int64
+    total_chunks = run_cfg.total_chunks
+
     # Salesperson performance spread (Part 2): resolved once here so both the
     # main-process prebuild and the worker-side fallback use identical values.
     # Seed is derived from the run seed so it tracks defaults.seed / random mode.
@@ -80,50 +145,49 @@ def _build_worker_cfg(
     _perf_seed = int(seed) ^ 0x5A1E5
 
     worker_cfg: SalesWorkerCfg = SalesWorkerCfg(
-        product_np=prod["product_np"],
-        product_brand_key=prod["product_brand_key"],
-        brand_names=prod["brand_names"],
-        store_keys=stores["store_keys"],
-        store_open_month=stores["store_open_month"],
-        store_close_month=stores["store_close_month"],
-        store_open_day=stores["store_open_day"],
-        store_close_day=stores["store_close_day"],
-        store_reno_start_day=stores["store_reno_start_day"],
-        store_reno_end_day=stores["store_reno_end_day"],
-        store_demand_weight=stores["store_demand_weight"],
+        product_np=prod.product_np,
+        product_brand_key=prod.product_brand_key,
+        brand_names=prod.brand_names,
+        store_keys=stores.store_keys,
+        store_open_month=stores.store_open_month,
+        store_close_month=stores.store_close_month,
+        store_open_day=stores.store_open_day,
+        store_close_day=stores.store_close_day,
+        store_reno_start_day=stores.store_reno_start_day,
+        store_reno_end_day=stores.store_reno_end_day,
+        store_demand_weight=stores.store_demand_weight,
         salesperson_perf_spread=_perf_spread,
         salesperson_perf_seed=_perf_seed,
-        promo_keys_all=promos["promo_keys_all"],
-        promo_start_all=promos["promo_start_all"],
-        promo_end_all=promos["promo_end_all"],
+        promo_keys_all=promos.promo_keys_all,
+        promo_start_all=promos.promo_start_all,
+        promo_end_all=promos.promo_end_all,
         # Per-promo salience weights (None => uniform promo draw).
         promo_salience_all=_compute_promo_salience(
-            promos["promo_df"], promos["promo_keys_all"],
+            promos.promo_df, promos.promo_keys_all,
             getattr(State, "models_cfg", None),
         ),
-        new_customer_promo_keys=promos["new_customer_promo_keys"],
+        new_customer_promo_keys=promos.new_customer_promo_keys,
         new_customer_window_months=int((getattr(cfg, "promotions", None) or {}).get("new_customer_window_months", 3)),
 
-        customers=cust["customer_keys"],
-        customer_keys=cust["customer_keys"],
-        customer_is_active_in_sales=cust["is_active_in_sales"],
-        customer_start_month=cust["customer_start_month"],
-        customer_end_month=cust["customer_end_month"],
-        customer_base_weight=cust["customer_base_weight"],
-        customer_discovery_month=cust.get("customer_discovery_month"),
-        customer_first_eff_start_by_key=cust["customer_first_eff_start_by_key"],
+        customer_keys=cust.customer_keys,
+        customer_is_active_in_sales=cust.is_active_in_sales,
+        customer_start_month=cust.customer_start_month,
+        customer_end_month=cust.customer_end_month,
+        customer_base_weight=cust.customer_base_weight,
+        customer_discovery_month=month_plan.customer_discovery_month,
+        customer_first_eff_start_by_key=cust.customer_first_eff_start_by_key,
 
         # Global per-month plan: tiny length-T arrays + scalars.
-        sales_rows_per_month=cust.get("sales_rows_per_month"),
-        sales_orders_per_month=cust.get("sales_orders_per_month"),
-        sales_distinct_target=cust.get("sales_distinct_target"),
+        sales_rows_per_month=month_plan.sales_rows_per_month,
+        sales_orders_per_month=month_plan.sales_orders_per_month,
+        sales_distinct_target=month_plan.sales_distinct_target,
         sales_plan_seed=int(seed),
         total_chunks=int(total_chunks),
 
-        store_to_geo=stores["store_to_geo"],
-        geo_to_currency=stores["geo_to_currency"],
-        date_pool=prod["date_pool"],
-        date_prob=prod["date_prob"],
+        store_to_geo=stores.store_to_geo,
+        geo_to_currency=stores.geo_to_currency,
+        date_pool=prod.date_pool,
+        date_prob=prod.date_prob,
 
         output_paths={
             "file_format": output_paths.file_format,
@@ -137,10 +201,9 @@ def _build_worker_cfg(
         compression=_str_or(compression, "snappy"),
 
         chunk_size=int(chunk_size),
-        order_id_stride_orders=int(chunk_size),
         total_rows=int(total_rows),
         order_id_run_id=int(order_id_run_id),
-        month_stride=int(month_stride),
+        order_id_day_stride=int(order_id_day_stride),
         per_chunk_alloc=int(per_chunk_alloc),
         order_id_int64=bool(order_id_int64),
         max_lines_per_order=int(getattr(sales_cfg, "max_lines_per_order", 5) or 5),
@@ -153,7 +216,6 @@ def _build_worker_cfg(
         ),
 
         delta_output_folder=delta_output_folder,
-        write_delta=write_delta,
         skip_order_cols=bool(skip_order_cols),
         skip_order_cols_requested=bool(skip_order_cols),
 
@@ -162,40 +224,26 @@ def _build_worker_cfg(
 
         models_cfg=State.models_cfg,
 
-        returns_enabled=bool(returns_enabled_effective),
-        returns_rate=float(returns_rate),
-        returns_min_lag_days=int(returns_min_lag_days),
-        returns_max_lag_days=int(returns_max_lag_days),
-        returns_reason_keys=returns_reason_keys,
-        returns_reason_probs=returns_reason_probs,
-        returns_full_line_probability=float(returns_full_line_prob),
-        returns_split_return_rate=float(returns_split_rate),
-        returns_max_splits=int(returns_max_splits),
-        returns_reconcile_cents=bool(returns_reconcile_cents),
-        returns_split_min_gap=int(returns_split_min_gap),
-        returns_split_max_gap=int(returns_split_max_gap),
-        returns_lag_distribution=str(returns_lag_distribution),
-        returns_lag_mode=int(returns_lag_mode),
-        returns_logistics_keys=returns_logistics_keys,
+        returns_policy=returns_policy,
         returns_event_key_capacity=int(returns_event_key_capacity),
 
         seed_master=int(seed),
         employee_salesperson_seed=int(seed) + 99173,
         employee_primary_boost=2.0,
 
-        employee_assign_store_key=emps["employee_assign_store_key"],
-        employee_assign_employee_key=emps["employee_assign_employee_key"],
-        employee_assign_start_date=emps["employee_assign_start_date"],
-        employee_assign_end_date=emps["employee_assign_end_date"],
-        employee_assign_fte=emps["employee_assign_fte"],
-        employee_assign_is_primary=emps["employee_assign_is_primary"],
-        employee_assign_role=emps["employee_assign_role"],
-        salesperson_roles=emps["salesperson_roles"],
+        employee_assign_store_key=emps.employee_assign_store_key,
+        employee_assign_employee_key=emps.employee_assign_employee_key,
+        employee_assign_start_date=emps.employee_assign_start_date,
+        employee_assign_end_date=emps.employee_assign_end_date,
+        employee_assign_fte=emps.employee_assign_fte,
+        employee_assign_is_primary=emps.employee_assign_is_primary,
+        employee_assign_role=emps.employee_assign_role,
+        salesperson_roles=emps.salesperson_roles,
 
-        product_popularity=prod["product_popularity"],
-        product_seasonality=prod["product_seasonality"],
+        product_popularity=prod.product_popularity,
+        product_seasonality=prod.product_seasonality,
 
-        customer_geo_key=cust["customer_geo_key"],
+        customer_geo_key=cust.customer_geo_key,
         geo_to_country_id=corr["geo_to_country_id"],
         store_to_country_id=corr["store_to_country_id"],
         country_to_store_keys=corr["country_to_store_keys"],
@@ -206,25 +254,25 @@ def _build_worker_cfg(
         channel_fulfillment_days=corr["channel_fulfillment_days"],
         _channel_to_elig_group=corr["_channel_to_elig_group"],
 
-        product_scd2_active=prod["product_scd2_active"],
-        product_scd2_starts=prod["product_scd2_starts"],
-        product_scd2_data=prod["product_scd2_data"],
-        customer_scd2_active=cust["customer_scd2_active"],
-        customer_scd2_starts=cust["customer_scd2_starts"],
-        customer_scd2_keys=cust["customer_scd2_keys"],
-        cust_key_to_pool_idx=cust["cust_key_to_pool_idx"],
+        product_scd2_active=prod.product_scd2_active,
+        product_scd2_starts=prod.product_scd2_starts,
+        product_scd2_data=prod.product_scd2_data,
+        customer_scd2_active=cust.customer_scd2_active,
+        customer_scd2_starts=cust.customer_scd2_starts,
+        customer_scd2_keys=cust.customer_scd2_keys,
+        cust_key_to_pool_idx=cust.cust_key_to_pool_idx,
     )
 
     # Store-product assortment (optional)
-    assortment_cfg = prod["assortment_cfg"]
-    product_subcat_key = prod["product_subcat_key"]
+    assortment_cfg = prod.assortment_cfg
+    product_subcat_key = prod.product_subcat_key
     # Publish SubcategoryKey whenever available — the basket-theme
     # correlation needs it even when store assortment is disabled.
     if product_subcat_key is not None:
         worker_cfg["product_subcat_key"] = product_subcat_key
-    if assortment_cfg.get("enabled") and product_subcat_key is not None and stores["store_type_map"] is not None:
+    if assortment_cfg.get("enabled") and product_subcat_key is not None and stores.store_type_map is not None:
         worker_cfg["assortment"] = dict(assortment_cfg)
-        worker_cfg["store_type_map"] = stores["store_type_map"]
+        worker_cfg["store_type_map"] = stores.store_type_map
         info("Store-product assortment: enabled")
 
     return worker_cfg

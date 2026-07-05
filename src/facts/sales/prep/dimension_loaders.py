@@ -26,6 +26,7 @@ from .sales_helpers import (
     load_parquet_df,
     resolve_salesperson_roles,
 )
+from .pools import CustomerPool, EmployeeBridge, ProductPool, PromoPool, StorePool
 from .scd2_grid import _build_scd2_customer_versions, _build_scd2_product_versions
 
 
@@ -34,10 +35,10 @@ def _load_customers(
     cfg,
     start_date,
     seed: int,
-) -> dict:
+) -> CustomerPool:
     """Load customer dimension arrays for the sales pool.
 
-    Returns a dict with all customer-related arrays that the caller
+    Returns a CustomerPool with all customer-related arrays that the caller
     needs for worker_cfg and correlation lookups.
     """
     customers_path = parquet_folder_p / "customers.parquet"
@@ -198,19 +199,19 @@ def _load_customers(
             info(f"Customer SCD2: {_customer_scd2_starts.shape[1]} max versions × "
                  f"{_customer_scd2_starts.shape[0]:,} customers")
 
-    return {
-        "customer_keys": customer_keys,
-        "customer_start_month": customer_start_month,
-        "customer_end_month": customer_end_month,
-        "is_active_in_sales": is_active_in_sales,
-        "customer_base_weight": customer_base_weight,
-        "customer_geo_key": customer_geo_key,
-        "customer_first_eff_start_by_key": customer_first_eff_start_by_key,
-        "customer_scd2_active": _customer_scd2_active,
-        "customer_scd2_starts": _customer_scd2_starts,
-        "customer_scd2_keys": _customer_scd2_keys,
-        "cust_key_to_pool_idx": _cust_key_to_pool_idx,
-    }
+    return CustomerPool(
+        customer_keys=customer_keys,
+        customer_start_month=customer_start_month,
+        customer_end_month=customer_end_month,
+        is_active_in_sales=is_active_in_sales,
+        customer_base_weight=customer_base_weight,
+        customer_geo_key=customer_geo_key,
+        customer_first_eff_start_by_key=customer_first_eff_start_by_key,
+        customer_scd2_active=_customer_scd2_active,
+        customer_scd2_starts=_customer_scd2_starts,
+        customer_scd2_keys=_customer_scd2_keys,
+        cust_key_to_pool_idx=_cust_key_to_pool_idx,
+    )
 
 
 def _load_products(
@@ -220,10 +221,10 @@ def _load_products(
     start_date,
     end_date,
     active_product_np=None,
-) -> dict:
+) -> ProductPool:
     """Load product dimension arrays, profile, date pool, and SCD2 versions.
 
-    Returns a dict with all product-related arrays plus date_pool/date_prob.
+    Returns a ProductPool with all product-related arrays plus date_pool/date_prob.
     """
     product_brand_key = None
     brand_names = None
@@ -437,23 +438,23 @@ def _load_products(
     # Free the full product DataFrame now that SCD2 is built
     del _prod_df_full
 
-    return {
-        "product_np": product_np,
-        "product_brand_key": product_brand_key,
-        "brand_names": brand_names,
-        "product_subcat_key": product_subcat_key,
-        "product_popularity": product_popularity,
-        "product_seasonality": product_seasonality,
-        "date_pool": date_pool,
-        "date_prob": date_prob,
-        "product_scd2_active": _product_scd2_active,
-        "product_scd2_starts": _product_scd2_starts,
-        "product_scd2_data": _product_scd2_data,
-        "assortment_cfg": assortment_cfg,
-    }
+    return ProductPool(
+        product_np=product_np,
+        product_brand_key=product_brand_key,
+        brand_names=brand_names,
+        product_subcat_key=product_subcat_key,
+        product_popularity=product_popularity,
+        product_seasonality=product_seasonality,
+        date_pool=date_pool,
+        date_prob=date_prob,
+        product_scd2_active=_product_scd2_active,
+        product_scd2_starts=_product_scd2_starts,
+        product_scd2_data=_product_scd2_data,
+        assortment_cfg=assortment_cfg,
+    )
 
 
-def _load_stores(parquet_folder_p, end_date, weight_cfg=None):
+def _load_stores(parquet_folder_p, end_date, weight_cfg=None) -> StorePool:
     """Load store dimension arrays for the sales pool.
 
     ``weight_cfg`` (optional ``{by_type, revenue_class}``) enables per-store
@@ -557,34 +558,34 @@ def _load_stores(parquet_folder_p, end_date, weight_cfg=None):
 
     geo_to_currency = dict(zip(_as_np(geo_df["GeographyKey"], np.int32), _as_np(geo_df["CurrencyKey"], np.int32)))
 
-    return {
-        "store_keys": store_keys,
-        "store_to_geo": store_to_geo,
-        "store_open_month": store_open_month,
-        "store_close_month": store_close_month,
-        "store_open_day": store_open_day,
-        "store_close_day": store_close_day,
-        "store_reno_start_day": store_reno_start_day,
-        "store_reno_end_day": store_reno_end_day,
-        "store_type_map": store_type_map,
-        "store_demand_weight": store_demand_weight,
-        "geo_to_currency": geo_to_currency,
-    }
+    return StorePool(
+        store_keys=store_keys,
+        store_to_geo=store_to_geo,
+        store_open_month=store_open_month,
+        store_close_month=store_close_month,
+        store_open_day=store_open_day,
+        store_close_day=store_close_day,
+        store_reno_start_day=store_reno_start_day,
+        store_reno_end_day=store_reno_end_day,
+        store_type_map=store_type_map,
+        store_demand_weight=store_demand_weight,
+        geo_to_currency=geo_to_currency,
+    )
 
 
-def _load_promotions(parquet_folder_p, promo_df=None):
+def _load_promotions(parquet_folder_p, promo_df=None) -> PromoPool:
     """Load promotion arrays for the sales pool."""
     if promo_df is None:
         promo_df = load_parquet_df(parquet_folder_p / "promotions.parquet")
 
     if promo_df.empty:
-        return {
-            "promo_df": promo_df,
-            "promo_keys_all": np.array([], dtype=np.int32),
-            "promo_start_all": np.array([], dtype="datetime64[D]"),
-            "promo_end_all": np.array([], dtype="datetime64[D]"),
-            "new_customer_promo_keys": np.array([], dtype=np.int32),
-        }
+        return PromoPool(
+            promo_df=promo_df,
+            promo_keys_all=np.array([], dtype=np.int32),
+            promo_start_all=np.array([], dtype="datetime64[D]"),
+            promo_end_all=np.array([], dtype="datetime64[D]"),
+            new_customer_promo_keys=np.array([], dtype=np.int32),
+        )
 
     promo_start = _normalize_dt_any(promo_df["StartDate"])
     promo_end = _normalize_dt_any(promo_df["EndDate"])
@@ -599,13 +600,13 @@ def _load_promotions(parquet_folder_p, promo_df=None):
     else:
         new_customer_promo_keys = np.array([], dtype=np.int32)
 
-    return {
-        "promo_df": promo_df,
-        "promo_keys_all": promo_keys_all,
-        "promo_start_all": promo_start_all,
-        "promo_end_all": promo_end_all,
-        "new_customer_promo_keys": new_customer_promo_keys,
-    }
+    return PromoPool(
+        promo_df=promo_df,
+        promo_keys_all=promo_keys_all,
+        promo_start_all=promo_start_all,
+        promo_end_all=promo_end_all,
+        new_customer_promo_keys=new_customer_promo_keys,
+    )
 
 
 def _compute_promo_salience(promo_df, promo_keys_all, models_cfg):
@@ -646,7 +647,7 @@ def _compute_promo_salience(promo_df, promo_keys_all, models_cfg):
     return sal.astype(np.float64)
 
 
-def _load_employees(parquet_folder_p, cfg, end_date):
+def _load_employees(parquet_folder_p, cfg, end_date) -> EmployeeBridge:
     """Load employee store assignments for salesperson resolution."""
     emp_assign_path = parquet_folder_p / "employee_store_assignments.parquet"
 
@@ -685,18 +686,18 @@ def _load_employees(parquet_folder_p, cfg, end_date):
     end_dt_col = pd.to_datetime(emp_assign_df["EndDate"], errors="coerce").dt.normalize()
     end_dt_col = end_dt_col.fillna(end_dt)
 
-    result = {
-        "employee_assign_store_key": _as_np(emp_assign_df["StoreKey"], np.int32),
-        "employee_assign_employee_key": _as_np(emp_assign_df["EmployeeKey"], np.int32),
-        "employee_assign_start_date": _as_np(start_dt, "datetime64[D]"),
-        "employee_assign_end_date": _as_np(end_dt_col, "datetime64[D]"),
-        "employee_assign_role": _as_np(emp_assign_df["RoleAtStore"].astype(str)),
-        "employee_assign_fte": None,
-        "employee_assign_is_primary": None,
-        "salesperson_roles": salesperson_roles,
-    }
-    if "FTE" in emp_assign_df.columns:
-        result["employee_assign_fte"] = _as_np(emp_assign_df["FTE"], np.float64)
-    if "IsPrimary" in emp_assign_df.columns:
-        result["employee_assign_is_primary"] = _as_np(emp_assign_df["IsPrimary"], bool)
-    return result
+    _fte = _as_np(emp_assign_df["FTE"], np.float64) if "FTE" in emp_assign_df.columns else None
+    _is_primary = (
+        _as_np(emp_assign_df["IsPrimary"], bool)
+        if "IsPrimary" in emp_assign_df.columns else None
+    )
+    return EmployeeBridge(
+        employee_assign_store_key=_as_np(emp_assign_df["StoreKey"], np.int32),
+        employee_assign_employee_key=_as_np(emp_assign_df["EmployeeKey"], np.int32),
+        employee_assign_start_date=_as_np(start_dt, "datetime64[D]"),
+        employee_assign_end_date=_as_np(end_dt_col, "datetime64[D]"),
+        employee_assign_role=_as_np(emp_assign_df["RoleAtStore"].astype(str)),
+        employee_assign_fte=_fte,
+        employee_assign_is_primary=_is_primary,
+        salesperson_roles=salesperson_roles,
+    )

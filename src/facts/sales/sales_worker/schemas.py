@@ -300,7 +300,7 @@ def build_worker_schemas_from_cfg(worker_cfg: Mapping) -> WorkerSchemaBundle:
     if sales_output in {"sales_order", "both"}:
         skip_order_cols = False
 
-    returns_enabled = bool(worker_cfg.get("returns_enabled", False))
+    returns_enabled = worker_cfg.get("returns_policy") is not None
     order_id_int64 = bool(worker_cfg.get("order_id_int64", False))
     partition_cols = worker_cfg.get("partition_cols") or []
     models_cfg = worker_cfg.get("models_cfg")

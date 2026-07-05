@@ -228,6 +228,9 @@ def build_output_paths_from_sales_cfg(sales_cfg) -> OutputPaths:
     return OutputPaths(
         file_format=file_format,
         out_folder=str(out_folder_p),
-        merged_file=str(merged_file),
+        # A None merged_file means "caller omitted it": leave it None so
+        # OutputPaths.merged_path falls back to the table's default filename
+        # (sales.parquet). str(None) would ship a file literally named "None".
+        merged_file=str(merged_file) if merged_file is not None else None,
         delta_output_folder=delta_output_folder,
     )

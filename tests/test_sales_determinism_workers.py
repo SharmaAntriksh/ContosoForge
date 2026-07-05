@@ -1,4 +1,4 @@
-"""Phase 0.1 guardrail — sales output must be independent of worker count.
+"""Guardrail — sales output must be independent of worker count.
 
 ContosoForge advertises "deterministic, idempotent datasets": the same config +
 seed must yield the same data regardless of how the work is parallelised. These
@@ -19,7 +19,7 @@ What these tests pin down (verified empirically while authoring):
   across chunks, so with ``imap_unordered`` (no chunk→worker affinity) the set of
   "already discovered" customers a chunk saw depended on which other chunks landed
   on the same worker, and ``--workers 1`` vs ``--workers 4`` diverged (~93% of
-  rows). Phase 1.1 replaced that accumulator with a static, hash-seeded
+  rows). A later fix replaced that accumulator with a static, hash-seeded
   ``customer_discovery_month`` schedule computed once in the coordinator and
   broadcast read-only (review Finding #5/#6), so every chunk is now a pure function
   of its own inputs and worker count no longer affects output. This test was
@@ -110,7 +110,7 @@ def test_single_chunk_output_independent_of_worker_count(run_sales):
 def test_multi_chunk_output_independent_of_worker_count(run_sales):
     """The advertised guarantee: identical multi-chunk output regardless of --workers.
 
-    Hard regression guard for Phase 1.1: the closed-form ``customer_discovery_month``
+    Hard regression guard for the closed-form ``customer_discovery_month``
     schedule makes each chunk a pure function of its own inputs, so 1, 2, and 4
     workers must all produce a byte-identical sales fact for the same config + seed.
     """

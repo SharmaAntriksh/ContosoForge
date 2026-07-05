@@ -1,14 +1,14 @@
-"""Phase 3 acceptance — statistical-fidelity properties on the real sales fact.
+"""Statistical-fidelity properties on the real sales fact.
 
 These generate one small end-to-end dataset (via ``tests/sales_gen``) with all
-Phase 3 features at their default-on settings, then assert the *connected*
-structure each sub-phase is supposed to introduce. Unlike the pure-unit tests
+all correlated-fact features at their default-on settings, then assert the *connected*
+structure each feature is supposed to introduce. Unlike the pure-unit tests
 (e.g. ``test_pricing_pipeline``), these exercise the full chunk-builder wiring —
 they fail if a feature is implemented in isolation but never threaded into the
 pipeline.
 
 The dataset is generated once per module (returns enabled) and shared across the
-per-sub-phase assertions to amortize the ~10s generation cost.
+per-feature assertions to amortize the ~10s generation cost.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ NO_DISCOUNT_KEY = 1  # the "no promotion" sentinel PromotionKey (default)
 @pytest.fixture(scope="module")
 def phase3_env(tmp_path_factory):
     """Generate one small sales fact (returns enabled) and expose the run dir +
-    loaded DataFrame, shared across all Phase 3 acceptance assertions."""
+    loaded DataFrame, shared across all the acceptance assertions."""
     base = tmp_path_factory.mktemp("phase3")
     dims_dir = base / "dims"
     dims_dir.mkdir()

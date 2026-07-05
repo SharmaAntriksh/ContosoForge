@@ -1,4 +1,4 @@
-"""Unit tests for the SQL dialect layer (Phase 1).
+"""Unit tests for the SQL dialect layer.
 
 Asserts that every SqlType renders to the exact SQL Server string the
 previous string-based helpers produced, for both NULL and NOT NULL.
@@ -168,7 +168,7 @@ class _RecordingDialect(SqlServerDialect):
 
 
 class TestDialectInjection:
-    """Phase 2: create_table_from_schema must honour the dialect parameter."""
+    """create_table_from_schema must honour the dialect parameter."""
 
     def test_create_table_uses_injected_dialect(self) -> None:
         from src.tools.sql.generate_create_table_scripts import create_table_from_schema
