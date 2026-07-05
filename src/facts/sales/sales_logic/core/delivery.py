@@ -152,21 +152,25 @@ def _friction_delivery_offset(n, has_orders, order_ids_int, line_numbers,
 # compute_dates
 # ----------------------------------------------------------------
 
-def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
+def compute_dates(n, product_keys, order_ids_int, order_dates,
                    *, channel_keys=None, channel_fulfillment_days=None,
                    unique_orders=None, inv_idx=None,
                    line_numbers=None, fulfillment_cfg=None):
     """
     Compute due dates, delivery dates, delivery status, and order delay flag.
 
+    Fully deterministic — no RNG. Delivery timing is driven by the per-line
+    fulfillment-friction latent (a hash of the order/line keys), so a line gets
+    the same delivery outcome regardless of chunk_size, worker count, or RNG
+    state.
+
     Supports:
     - order_ids_int present  → order-level coherent behavior
     - order_ids_int is None → row-level fallback (skip_order_cols=True)
     - channel_keys + channel_fulfillment_days → channel-aware due date offsets
-    - fulfillment_cfg → friction-driven early/on-time/delayed
-      bucketing with an explicit named delay-magnitude distribution, replacing
-      the legacy mod-100 ladder + RNG early draws. Deterministic (no RNG). When
-      None/disabled, the legacy path is used unchanged.
+    - fulfillment_cfg enabled → friction-driven early/on-time/delayed bucketing
+      with an explicit named delay-magnitude distribution. When absent/disabled,
+      deliveries arrive on the due date (no early/late variation).
 
     Returns dict of numpy arrays:
       due_date: datetime64[D]
@@ -240,42 +244,9 @@ def compute_dates(rng, n, product_keys, order_ids_int, order_dates,
             n, has_orders, order_ids_int, line_numbers, hash_vals, fulfillment_cfg
         )
     else:
-        # Legacy mod-100 ladder + per-order RNG early draws.
-        # order_seed = hash % 100; product_seed = (hash + product_keys) % 100;
-        # line_seed == product_seed under mod 100.
-        hs = hash_vals % 100
-        pk = product_keys % 100
-        order_seed = hs
-        product_seed = (hs + pk) % 100
-        line_seed = product_seed
-
+        # Fulfillment friction disabled/absent: deliveries arrive on the due
+        # date, no early/late variation. Deterministic, no RNG.
         delivery_offset = np.zeros(n, dtype=np.int64)
-
-        # Condition C: small delay (1..4)
-        mask_c = (order_seed >= 60) & (order_seed < 85) & (product_seed >= 60)
-        if mask_c.any():
-            delivery_offset[mask_c] = (line_seed[mask_c] % 4) + 1
-
-        # Condition D: larger delay (2..6) – filter by product_seed so some
-        # lines stay non-delayed, allowing all 3 statuses within one order.
-        mask_d = (order_seed >= 85) & (product_seed >= 40)
-        if mask_d.any():
-            delivery_offset[mask_d] = (product_seed[mask_d] % 5) + 2
-
-        # Early deliveries (line-item mixed even when has order ids).
-        if has_orders:
-            n_orders = len(unique_orders)
-            early_order = rng.random(n_orders) < 0.10
-            early_days_per_order = rng.integers(1, 3, size=n_orders, dtype=np.int64)
-            early_mask = early_order[inv_idx] & (rng.random(n) < 0.35)
-            if early_mask.any():
-                early_days_rows = early_days_per_order[inv_idx]
-                delivery_offset[early_mask] = -early_days_rows[early_mask]
-        else:
-            early_mask = rng.random(n) < 0.10
-            if early_mask.any():
-                early_days = rng.integers(1, 3, size=n, dtype=np.int64)
-                delivery_offset[early_mask] = -early_days[early_mask]
 
     # Final delivery date (never before order date)
     delivery_date = due_date + delivery_offset.astype("timedelta64[D]")

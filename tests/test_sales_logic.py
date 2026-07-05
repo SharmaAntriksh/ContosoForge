@@ -478,7 +478,7 @@ class TestYYYYMMDDFromDays:
 
 class TestComputeDates:
     def test_zero_n_returns_empty(self):
-        result = compute_dates(_rng(), 0, [], None, [])
+        result = compute_dates(0, [], None, [])
         assert result["due_date"].shape == (0,)
         assert result["delivery_date"].shape == (0,)
         assert result["delivery_status"].shape == (0,)
@@ -486,33 +486,36 @@ class TestComputeDates:
 
     def test_output_lengths_match(self):
         n = 50
-        rng = _rng()
         pk = np.arange(1, n + 1, dtype=np.int32)
         oids = np.arange(1, n + 1, dtype=np.int64)
         dates = np.array(["2023-03-15"] * n, dtype="datetime64[D]")
-        result = compute_dates(rng, n, pk, oids, dates)
+        result = compute_dates(n, pk, oids, dates)
         for key in ("due_date", "delivery_date", "delivery_status", "is_order_delayed"):
             assert result[key].shape == (n,), f"{key} wrong shape"
 
     def test_due_date_after_order_date(self):
         n = 100
-        rng = _rng()
         pk = np.ones(n, dtype=np.int32)
         oids = np.arange(1, n + 1, dtype=np.int64)
         dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
-        result = compute_dates(rng, n, pk, oids, dates)
+        result = compute_dates(n, pk, oids, dates)
         # Due date is 3-7 days after order
         offsets = (result["due_date"] - dates).astype(int)
         assert np.all(offsets >= 3)
         assert np.all(offsets <= 7)
 
     def test_delivery_status_values(self):
+        # Fulfillment friction on so all three statuses can appear; the labels
+        # must be a subset of the known set regardless.
         n = 200
-        rng = _rng()
         pk = np.arange(1, n + 1, dtype=np.int32)
         oids = np.arange(1, n + 1, dtype=np.int64)
+        line = np.ones(n, dtype=np.int32)
         dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
-        result = compute_dates(rng, n, pk, oids, dates)
+        result = compute_dates(
+            n, pk, oids, dates, line_numbers=line,
+            fulfillment_cfg=dict(enabled=True, p_early=0.10, p_delayed=0.25),
+        )
         valid_statuses = {"On Time", "Early Delivery", "Delayed"}
         actual_statuses = set(result["delivery_status"])
         assert actual_statuses.issubset(valid_statuses)
@@ -520,19 +523,17 @@ class TestComputeDates:
     def test_no_order_ids_fallback(self):
         """order_ids_int=None triggers row-level hash fallback."""
         n = 30
-        rng = _rng()
         pk = np.arange(1, n + 1, dtype=np.int32)
         dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
-        result = compute_dates(rng, n, pk, None, dates)
+        result = compute_dates(n, pk, None, dates)
         assert result["due_date"].shape == (n,)
 
     def test_is_order_delayed_dtype(self):
         n = 20
-        rng = _rng()
         pk = np.ones(n, dtype=np.int32)
         oids = np.arange(1, n + 1, dtype=np.int64)
         dates = np.array(["2023-03-15"] * n, dtype="datetime64[D]")
-        result = compute_dates(rng, n, pk, oids, dates)
+        result = compute_dates(n, pk, oids, dates)
         assert result["is_order_delayed"].dtype == bool
 
 
@@ -569,13 +570,12 @@ class TestFrictionDelivery:
 
     def test_delivery_status_shares_match_config(self):
         n = 40_000
-        rng = _rng()
         pk = np.ones(n, dtype=np.int32)
         oids = np.arange(1, n + 1, dtype=np.int64)  # one line per order
         line = np.ones(n, dtype=np.int32)
         dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
         res = compute_dates(
-            rng, n, pk, oids, dates,
+            n, pk, oids, dates,
             line_numbers=line, fulfillment_cfg=self._cfg(p_early=0.10, p_delayed=0.25),
         )
         status = res["delivery_status"]
@@ -584,20 +584,34 @@ class TestFrictionDelivery:
         assert abs(delayed_share - 0.25) < 0.02, f"delayed={delayed_share:.3f}"
         assert abs(early_share - 0.10) < 0.02, f"early={early_share:.3f}"
 
-    def test_disabled_uses_legacy_ladder(self):
-        # Without fulfillment_cfg, the (rng-driven) legacy path is used, so the
-        # result differs from the deterministic friction path for the same input.
+    def test_disabled_delivers_all_on_time(self):
+        # With fulfillment friction absent/disabled there is no early/late
+        # variation: every line delivers on its due date, deterministically and
+        # without consuming RNG (the legacy mod-100 ladder is gone).
         n = 2000
         pk = np.ones(n, dtype=np.int32)
         oids = np.arange(1, n + 1, dtype=np.int64)
         line = np.ones(n, dtype=np.int32)
         dates = np.array(["2023-06-01"] * n, dtype="datetime64[D]")
-        legacy = compute_dates(_rng(), n, pk, oids, dates)
+
+        off = compute_dates(n, pk, oids, dates)
+        assert np.all(off["delivery_status"] == "On Time")
+        assert np.array_equal(off["delivery_date"], off["due_date"])
+        assert not off["is_order_delayed"].any()
+
+        # Explicit enabled=False behaves the same as an absent config.
+        disabled = compute_dates(
+            n, pk, oids, dates, line_numbers=line,
+            fulfillment_cfg=self._cfg(enabled=False),
+        )
+        assert np.array_equal(disabled["delivery_status"], off["delivery_status"])
+
+        # And it differs from the (deterministic) friction path, which does vary.
         friction = compute_dates(
-            _rng(), n, pk, oids, dates,
+            n, pk, oids, dates,
             line_numbers=line, fulfillment_cfg=self._cfg(),
         )
-        assert not np.array_equal(legacy["delivery_status"], friction["delivery_status"])
+        assert not np.array_equal(off["delivery_status"], friction["delivery_status"])
 
 
 # ===================================================================

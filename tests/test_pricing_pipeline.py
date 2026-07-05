@@ -434,9 +434,14 @@ class TestPromotionReconciliation:
         State.reset()
         _reset_caches()
 
-    def _bind_state(self, *, reconcile: bool):
+    def _bind_state(self, *, reconcile: bool, ladder=None):
         # Plain-dict models_cfg (build_prices reads via .get); appearance off so
         # a nonzero drawn discount is not snapped away, inflation off (factor 1).
+        if ladder is None:
+            ladder = [
+                {"kind": "none", "value": 0.0, "weight": 0.5},
+                {"kind": "pct", "value": 0.20, "weight": 0.5},
+            ]
         State.models_cfg = {
             "pricing": {
                 "inflation": {
@@ -451,10 +456,7 @@ class TestPromotionReconciliation:
                     "min_net_price": 0.01,
                     "allow_negative_margin": False,
                     "reconcile_promotions": reconcile,
-                    "ladder": [
-                        {"kind": "none", "value": 0.0, "weight": 0.5},
-                        {"kind": "pct", "value": 0.20, "weight": 0.5},
-                    ],
+                    "ladder": ladder,
                 },
             }
         }
@@ -471,8 +473,8 @@ class TestPromotionReconciliation:
             "final_net_price": up_arr.copy(),
         }
 
-    def _run(self, *, reconcile, promo_keys, n=None):
-        self._bind_state(reconcile=reconcile)
+    def _run(self, *, reconcile, promo_keys, n=None, ladder=None):
+        self._bind_state(reconcile=reconcile, ladder=ladder)
         n = int(n if n is not None else len(promo_keys))
         order_dates = np.full(n, np.datetime64("2022-06-15"), dtype="datetime64[D]")
         rng = np.random.default_rng(20260701)
@@ -516,6 +518,36 @@ class TestPromotionReconciliation:
         # Full ladder includes nonzero entries, so some rows get a discount
         # regardless of any (absent) promotion assignment.
         assert (disc > 0.0).any()
+
+    def test_reconcile_draws_only_for_promoted_lines(self):
+        # A discount is drawn per PROMOTED line (the draw is compacted to the
+        # promoted subset), so the k-th promoted line's discount depends on its
+        # rank k, not its absolute row index. Two layouts with the same promoted
+        # count but different positions therefore yield the same promoted-discount
+        # sequence. A multi-entry nonzero ladder makes the per-line draw vary, so
+        # this fails under a size-n over-draw (which keys discounts to absolute
+        # position) and passes under the compacted draw.
+        ladder = [
+            {"kind": "none", "value": 0.0, "weight": 0.4},
+            {"kind": "pct", "value": 0.10, "weight": 0.3},
+            {"kind": "pct", "value": 0.30, "weight": 0.3},
+        ]
+        n = 60
+        pk_front = np.full(n, self.NO_DISCOUNT_KEY, dtype=np.int32)
+        pk_front[:20] = 5
+        pk_spread = np.full(n, self.NO_DISCOUNT_KEY, dtype=np.int32)
+        pk_spread[::3] = 5  # 20 promoted, different positions
+
+        disc_front, _ = self._run(reconcile=True, promo_keys=pk_front, ladder=ladder)
+        disc_spread, _ = self._run(reconcile=True, promo_keys=pk_spread, ladder=ladder)
+
+        np.testing.assert_allclose(
+            disc_front[pk_front != self.NO_DISCOUNT_KEY],
+            disc_spread[pk_spread != self.NO_DISCOUNT_KEY],
+        )
+        # Non-promoted lines never carry a discount.
+        assert np.all(disc_front[pk_front == self.NO_DISCOUNT_KEY] == 0.0)
+        assert np.all(disc_spread[pk_spread == self.NO_DISCOUNT_KEY] == 0.0)
 
 
 # ===================================================================

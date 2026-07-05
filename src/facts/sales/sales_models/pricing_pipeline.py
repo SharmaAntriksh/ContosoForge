@@ -716,23 +716,25 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
 
     disc = np.zeros(n, dtype=np.float64)
 
-    # When reconciling, a discount is a consequence of a promotion —
-    # only promoted lines draw one, and they draw from the *nonzero* ladder so a
-    # promoted line always carries a real markdown while a "no promotion" line
-    # never does. Consumes the same one rng.choice(size=n) as the legacy path,
-    # so the RNG stream position afterward is unchanged.
+    # When reconciling, a discount is a consequence of a promotion — only
+    # promoted lines draw one, from the *nonzero* ladder, so a promoted line
+    # always carries a real markdown while a "no promotion" line never does. The
+    # draw is compacted to the promoted subset (one draw per promoted line), so
+    # a non-promoted line consumes no randomness at all.
     _reconcile = (
         reconcile and md_enabled and promo_keys is not None
         and nz_kind_codes is not None and nz_kind_codes.size > 0
     )
     if _reconcile:
         promo_mask = np.asarray(promo_keys, dtype=np.int64) != int(no_discount_key)
-        idx = rng.choice(nz_kind_codes.size, size=n, replace=True, p=nz_probs)
-        kc = nz_kind_codes[idx]
-        v = nz_values[idx]
-        disc = np.where(kc == 1, up * v, disc)   # pct of snapped price
-        disc = np.where(kc == 2, v,      disc)   # flat amt
-        disc = np.where(promo_mask, disc, 0.0)   # no promotion -> no discount
+        n_promo = int(promo_mask.sum())
+        if n_promo > 0:
+            idx = rng.choice(nz_kind_codes.size, size=n_promo, replace=True, p=nz_probs)
+            kc = nz_kind_codes[idx]
+            v = nz_values[idx]
+            promo_disc = np.where(kc == 1, up[promo_mask] * v, 0.0)  # pct of snapped price
+            promo_disc = np.where(kc == 2, v, promo_disc)            # flat amt
+            disc[promo_mask] = promo_disc
     elif md_enabled and kind_codes.size > 0:
         idx = rng.choice(kind_codes.size, size=n, replace=True, p=probs)
         kc = kind_codes[idx]

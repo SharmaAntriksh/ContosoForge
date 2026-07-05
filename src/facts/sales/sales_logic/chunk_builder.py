@@ -1885,7 +1885,6 @@ def build_chunk_table(
         _inv_for_dates = order_idx if (
             order_ids_int is not None and order_idx is not None) else None
         dates = compute_dates(
-            rng=rng,
             n=n_lines,
             product_keys=product_keys,
             order_ids_int=order_ids_int,
