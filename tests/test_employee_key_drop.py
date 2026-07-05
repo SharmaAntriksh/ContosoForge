@@ -1,19 +1,25 @@
-"""An EmployeeKey=-1 row drop (a salesperson-coverage gap that reached chunk
-assembly) must be surfaced loudly, not swallowed silently.
+"""An EmployeeKey=-1 at chunk assembly (a salesperson-coverage gap) is handled
+per the coverage policy, never swallowed silently.
 
-The drop breaks the per-month plan invariant (sum n_lines == R[m]); previously it
-happened with no signal at all. The fix keeps the drop (so orphan FKs never ship)
-but warns with the count and month, so the invariant violation is visible. Making
-coverage a hard precondition is left to a future refactor.
+- ``abort`` / ``repair`` guarantee full coverage upstream, so a -1 reaching row
+  assembly is a hard precondition violation -> ``SalesError``.
+- ``skip`` accepts uncovered store-months, so the -1 orders are dropped (keeping
+  FK / order-line integrity) with a loud warning that the month is short of plan.
+- A fully covered chunk has no -1 and this is a silent no-op.
 """
 from __future__ import annotations
 
 import numpy as np
+import pytest
+
+from src.exceptions import SalesError
 
 
-def test_drop_orphan_employee_key_rows_drops_and_warns(monkeypatch):
+def test_drop_orphan_employee_key_rows_drops_and_warns_under_skip(monkeypatch):
     from src.facts.sales.sales_logic import chunk_builder as cb
+    from src.facts.sales.sales_logic.globals import State
 
+    monkeypatch.setattr(State, "coverage_policy", "skip")
     warnings: list[str] = []
     monkeypatch.setattr(cb, "warn", lambda msg: warnings.append(msg))
 
@@ -32,9 +38,28 @@ def test_drop_orphan_employee_key_rows_drops_and_warns(monkeypatch):
     assert "EmployeeKey=-1" in warnings[0] and "month offset 7" in warnings[0]
 
 
+def test_drop_orphan_employee_key_rows_raises_under_guaranteeing_policy(monkeypatch):
+    from src.facts.sales.sales_logic import chunk_builder as cb
+    from src.facts.sales.sales_logic.globals import State
+
+    # abort/repair must guarantee coverage upstream; a -1 here is a bug, not a
+    # silently-shortened month.
+    monkeypatch.setattr(State, "coverage_policy", "abort")
+
+    cols = {
+        "EmployeeKey": np.array([1, -1, 2], dtype=np.int64),
+        "CustomerKey": np.array([10, 11, 12], dtype=np.int32),
+    }
+    with pytest.raises(SalesError, match="coverage_policy"):
+        cb._drop_orphan_employee_key_rows(cols, 3, m_offset=4)
+
+
 def test_drop_orphan_employee_key_rows_is_silent_noop_when_clean(monkeypatch):
     from src.facts.sales.sales_logic import chunk_builder as cb
+    from src.facts.sales.sales_logic.globals import State
 
+    # No -1 present -> returns before the policy check, regardless of policy.
+    monkeypatch.setattr(State, "coverage_policy", "abort")
     warnings: list[str] = []
     monkeypatch.setattr(cb, "warn", lambda msg: warnings.append(msg))
 

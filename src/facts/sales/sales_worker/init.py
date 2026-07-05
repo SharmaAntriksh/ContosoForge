@@ -14,7 +14,7 @@ from ..output_paths import (
     TABLE_SALES_RETURN,
 )
 from ..sales_logic import bind_globals, State
-from ..sales_logic.chunk_builder import reset_worker_cdf_cache
+from ..sales_logic.chunk_builder import reset_worker_caches
 from .schemas import build_worker_schemas_from_cfg
 from src.exceptions import ConfigError, SalesError
 from src.utils.config_helpers import int_or, float_or, str_or
@@ -518,7 +518,7 @@ def _build_brand_prob_by_month_rotate_winner(
 
 
 def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
-    reset_worker_cdf_cache()
+    reset_worker_caches()
     # Clear the other worker-lifetime caches too, so a reused worker process
     # (web server / in-process tests) never serves stale per-run state. Local
     # imports avoid the init<->task module-load circular import. The two model
@@ -1073,6 +1073,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "sales_output": sales_output,
             "skip_order_cols_requested": bool(skip_order_cols_requested),
             "skip_order_cols": bool(skip_order_cols),
+            "coverage_policy": str(worker_cfg.get("coverage_policy", "abort") or "abort").lower(),
             "delta_output_folder": os.path.normpath(delta_output_folder) if delta_output_folder else None,
             "no_discount_key": no_discount_key,
             "partition_enabled": bool(partition_enabled),

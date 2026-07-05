@@ -24,7 +24,6 @@ from src.utils.config_helpers import (
 from src.utils.logging_utils import info
 
 from .dimension_loaders import _compute_promo_salience
-from ..sales_logic import State
 from ..sales_worker.returns_builder import ReturnsConfig
 from .worker_cfg_schema import SalesWorkerCfg
 
@@ -112,9 +111,14 @@ def build_returns_policy(
 def _build_worker_cfg(
     cust, month_plan, prod, stores, emps, corr, promos,
     cfg, sales_cfg, output_paths, run_cfg,
-    returns_policy, returns_event_key_capacity,
+    returns_policy, returns_event_key_capacity, models_cfg,
 ):
-    """Build the worker_cfg dict from typed containers and the run config."""
+    """Build the worker_cfg dict from typed containers and the run config.
+
+    ``models_cfg`` is the (possibly demand-adjusted) models config threaded in by
+    the coordinator, not read off ``State`` — the worker receives it via
+    ``worker_cfg['models_cfg']`` and binds it in ``init_sales_worker``.
+    """
     # Unpack the resolved run config into the local names the dict-construction
     # body below uses, so that body is unchanged. out_folder_p holds the already
     # ``str`` out_folder (the ``str()`` call further down is then a no-op).
@@ -164,7 +168,7 @@ def _build_worker_cfg(
         # Per-promo salience weights (None => uniform promo draw).
         promo_salience_all=_compute_promo_salience(
             promos.promo_df, promos.promo_keys_all,
-            getattr(State, "models_cfg", None),
+            models_cfg,
         ),
         new_customer_promo_keys=promos.new_customer_promo_keys,
         new_customer_window_months=int((getattr(cfg, "promotions", None) or {}).get("new_customer_window_months", 3)),
@@ -214,6 +218,7 @@ def _build_worker_cfg(
         validate_header_invariants=_bool_or(
             getattr(sales_cfg, "validate_header_invariants", None), False
         ),
+        coverage_policy=str(getattr(sales_cfg, "coverage_policy", "abort") or "abort").lower(),
 
         delta_output_folder=delta_output_folder,
         skip_order_cols=bool(skip_order_cols),
@@ -222,7 +227,7 @@ def _build_worker_cfg(
         partition_enabled=partition_enabled,
         partition_cols=partition_cols,
 
-        models_cfg=State.models_cfg,
+        models_cfg=models_cfg,
 
         returns_policy=returns_policy,
         returns_event_key_capacity=int(returns_event_key_capacity),

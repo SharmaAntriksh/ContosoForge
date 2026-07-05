@@ -87,6 +87,11 @@ class State:
     # --------------------------------------------------------------
     skip_order_cols = None
 
+    # Coverage policy (abort|skip|repair) broadcast from the coordinator: gates
+    # whether an EmployeeKey=-1 at row assembly is a hard precondition violation
+    # (abort/repair guarantee coverage) or an expected drop (skip accepts gaps).
+    coverage_policy = None
+
     product_np = None
     active_product_np = None
 

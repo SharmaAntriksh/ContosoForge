@@ -34,18 +34,20 @@ from .weights import cdf_from_probs, normalize_prob, weighted_pick_indices
 
 
 def _drop_orphan_employee_key_rows(cols: dict, n_rows: int, m_offset: int) -> int:
-    """Drop whole-order ``EmployeeKey == -1`` lines and return the new row count.
+    """Handle whole-order ``EmployeeKey == -1`` lines; return the new row count.
 
-    A -1 means the sampled (store, month) had no salesperson — only possible when
-    the dimensions leave a coverage gap, which the coverage model
-    (abort/skip/repair) is designed to prevent. Salesperson is assigned per ORDER
-    and broadcast to its lines, so -1 lines are whole orders; dropping them keeps
-    order/line integrity but silently shortens the month below its plan target
-    (``sum n_lines == R[m]`` no longer holds). Previously this happened silently;
-    now it warns loudly. Normal configs have full coverage and drop nothing.
+    A -1 means the sampled (store, month) had no salesperson — only possible on a
+    dimension coverage gap. The coverage policy decides what a gap here means:
 
-    (A future refactor should resolve coverage before materialization so this
-    becomes a hard precondition rather than a post-hoc filter.)
+    - ``abort`` / ``repair`` guarantee full coverage upstream, so a -1 reaching
+      row assembly is a **precondition violation** — raise ``SalesError`` loudly
+      rather than silently shorten the month below its plan target
+      (``sum n_lines == R[m]``).
+    - ``skip`` accepts uncovered store-months, so -1 lines are expected: drop the
+      whole orders (salesperson is per-order, broadcast to lines) to keep FK /
+      order-line integrity, warning that the month is now short of plan.
+
+    Normal (fully covered) configs never hit a -1 and this is a no-op.
     """
     ek = cols.get("EmployeeKey")
     if ek is None or np.isscalar(ek):
@@ -57,12 +59,21 @@ def _drop_orphan_employee_key_rows(cols: dict, n_rows: int, m_offset: int) -> in
     keep = ek_arr != -1
     new_n = int(keep.sum())
     dropped = int(ek_arr.size - new_n)
+
+    policy = str(getattr(State, "coverage_policy", "abort") or "abort").lower()
+    if policy != "skip":
+        raise SalesError(
+            f"chunk_builder hit {dropped} EmployeeKey=-1 line(s) at month offset "
+            f"{m_offset} (of {n_rows} rows): a salesperson-coverage gap reached row "
+            f"assembly under coverage_policy={policy!r}, which must guarantee full "
+            "coverage. Fix the employee_store_assignments bridge (or set "
+            "sales.coverage_policy: skip to accept the missing sales)."
+        )
+
     warn(
         f"chunk_builder dropped {dropped} EmployeeKey=-1 line(s) at month offset "
-        f"{m_offset} (of {n_rows} rows): a salesperson-coverage gap reached row "
-        "assembly, so this month is now short of its plan target. This should not "
-        "happen under a passing coverage preflight — check sales.coverage_policy "
-        "and the employee_store_assignments bridge."
+        f"{m_offset} (of {n_rows} rows) under coverage_policy=skip: this month is "
+        "now short of its plan target because the store-month had no salesperson."
     )
     for cname, cval in list(cols.items()):
         if isinstance(cval, np.ndarray) and cval.shape[:1] == (n_rows,):
@@ -141,63 +152,69 @@ def _within_day_cursor(d_off: np.ndarray) -> np.ndarray:
     return cursor
 
 
-# Cached partition cols (read once from the per-worker State; avoids per-chunk getattr).
-_cached_delta_pcols: set[str] | None = None
+class _WorkerCaches:
+    """Worker-lifetime scratch for the chunk builder, grouped under one lifecycle.
+
+    Every entry is a deterministic function of worker-bound constants (the
+    lifecycle arrays, store assortment, brand buckets, product weights, run seed),
+    so a worker builds each at most once and reuses it across all the chunks it
+    processes. ``reset()`` clears every field and runs once per worker init — now
+    including ``brand_flat`` and ``delta_pcols``, which previously had no reset
+    path and could serve stale state to a reused (in-process / web-server) worker.
+
+    Fields:
+    - ``cdf``: weighted product-sampling CDFs, keyed by (pool, brand_or_merged,
+      month). Intersections + CDFs depend only on store assortment / brand
+      buckets / product weights.
+    - ``eligible``: per-month eligible customer row indices, keyed by month count
+      ``T``. The eligibility predicate depends only on the (worker-invariant)
+      lifecycle arrays; the discovery schedule does NOT enter it, so caching by
+      ``T`` alone is safe.
+    - ``prodweight``: per-calendar-month (1-12) product weights.
+    - ``month_pool``: per-month distinct-customer ``(pool, cdf)``, keyed by month
+      offset alone (per CLAUDE.md gotcha #27, ``m`` fully determines the value
+      given the worker-constant inputs).
+    - ``brand_flat_ref`` / ``brand_flat_data``: flat brand-index + offsets, guarded
+      by an identity check against the source ``brand_to_rows``.
+    - ``delta_pcols``: the Delta partition-column set read once from State.
+    """
+
+    __slots__ = (
+        "cdf", "eligible", "prodweight", "month_pool",
+        "brand_flat_ref", "brand_flat_data", "delta_pcols",
+    )
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.cdf: dict = {}
+        self.eligible: dict = {}
+        self.prodweight: dict = {}
+        self.month_pool: dict = {}
+        self.brand_flat_ref = None
+        self.brand_flat_data = None
+        self.delta_pcols = None
+
+
+_CACHES = _WorkerCaches()
+
+
+def reset_worker_caches() -> None:
+    """Clear every worker-lifetime chunk-builder cache (called once per worker init)."""
+    _CACHES.reset()
+    reset_basket_cache()
+
+
+# Backwards-compatible alias for the previous (narrower) name.
+reset_worker_cdf_cache = reset_worker_caches
 
 
 def _delta_partition_cols() -> set[str]:
-    global _cached_delta_pcols
-    if _cached_delta_pcols is None:
+    if _CACHES.delta_pcols is None:
         raw = getattr(State, "partition_cols", None)
-        _cached_delta_pcols = set(raw) if isinstance(raw, (list, tuple)) and raw else {"Year", "Month"}
-    return _cached_delta_pcols
-
-
-# Module-level cache for brand flat index + offsets (rebuilt once per worker).
-_brand_flat_cache_ref: list | None = None
-_brand_flat_cache_data: tuple | None = None  # (flat_idx, offsets)
-
-# Worker-lifetime CDF cache for weighted product sampling.
-# Keyed by (pool_id, brand_or_merged, cal_month).  Contents are deterministic
-# (intersections + CDFs depend only on store assortment, brand buckets,
-# and product weights — all identical across chunks in the same worker).
-_worker_cdf_cache: dict = {}
-
-# Worker-lifetime cache of per-month eligible customer row indices.
-# The eligibility predicate depends only on the lifecycle arrays
-# (is_active / start_month / end_month), which bind_globals sets once per
-# worker and never reassigns — so the same masks would otherwise be rebuilt
-# for every chunk the worker processes.  The discovery schedule
-# (customer_discovery_month) is likewise static and does NOT enter the
-# eligibility predicate, so caching the eligible index set is safe.  Keyed on
-# the month count T alone: the lifecycle arrays are invariant within a worker
-# and this cache is cleared at each worker init, so no per-chunk array key is
-# needed (end_month_norm is now the once-per-bind State.customer_end_month_norm
-# broadcast, not a per-chunk allocation).
-_worker_eligible_cache: dict = {}
-
-# Worker-lifetime cache of per-calendar-month product weights (12 distinct).
-# _build_product_weight_for_month depends only on cal_month (1-12) once the
-# popularity base is fixed for the worker, so over a long horizon it is
-# otherwise rebuilt T times instead of at most 12.
-_worker_prodweight_cache: dict = {}
-
-# Worker-lifetime cache of per-month distinct-customer pools. The pool
-# + weighted CDF for month m depend only on (m, run seed, static customer arrays,
-# distinct target) — all worker-bound constants — so a worker builds each month's
-# pool at most once and reuses it across every chunk it processes. Keyed on the
-# month offset alone (per CLAUDE.md gotcha #27, m fully determines the value given
-# the worker-constant inputs), so slicing it is O(orders-in-this-chunk).
-_worker_month_pool_cache: dict = {}
-
-
-def reset_worker_cdf_cache() -> None:
-    """Clear the worker-lifetime caches (called once per worker init)."""
-    _worker_cdf_cache.clear()
-    _worker_eligible_cache.clear()
-    _worker_prodweight_cache.clear()
-    _worker_month_pool_cache.clear()
-    reset_basket_cache()
+        _CACHES.delta_pcols = set(raw) if isinstance(raw, (list, tuple)) and raw else {"Year", "Month"}
+    return _CACHES.delta_pcols
 
 
 def _eligible_idx_by_month(T, is_active, start_month, end_month_norm) -> list:
@@ -209,14 +226,14 @@ def _eligible_idx_by_month(T, is_active, start_month, end_month_norm) -> list:
     the month count T alone.
     """
     T = int(T)
-    cached = _worker_eligible_cache.get(T)
+    cached = _CACHES.eligible.get(T)
     if cached is not None:
         return cached
 
     idx_by_month = EligibilityWindow.from_lifecycle(
         is_active, start_month, end_month_norm
     ).indices_by_month(T)
-    _worker_eligible_cache[T] = idx_by_month
+    _CACHES.eligible[T] = idx_by_month
     return idx_by_month
 
 
@@ -231,7 +248,7 @@ def _get_month_pool(
     correct (CLAUDE.md gotcha #27) and makes per-chunk customer assignment cheap.
     """
     m = int(m_offset)
-    cached = _worker_month_pool_cache.get(m)
+    cached = _CACHES.month_pool.get(m)
     if cached is not None:
         return cached
     pool, cdf = build_month_customer_pool(
@@ -244,15 +261,14 @@ def _get_month_pool(
         end_month_norm=end_month_norm,
         seed=int(plan_seed),
     )
-    _worker_month_pool_cache[m] = (pool, cdf)
+    _CACHES.month_pool[m] = (pool, cdf)
     return pool, cdf
 
 
 def _get_brand_flat_cache(brand_to_rows: list, B: int) -> tuple:
     """Return (flat_idx, offsets) for brand_to_rows, caching across calls."""
-    global _brand_flat_cache_ref, _brand_flat_cache_data
-    if _brand_flat_cache_ref is brand_to_rows and _brand_flat_cache_data is not None:
-        return _brand_flat_cache_data
+    if _CACHES.brand_flat_ref is brand_to_rows and _CACHES.brand_flat_data is not None:
+        return _CACHES.brand_flat_data
 
     flat_parts = []
     lengths = np.zeros(B, dtype=np.int64)
@@ -263,8 +279,8 @@ def _get_brand_flat_cache(brand_to_rows: list, B: int) -> tuple:
     offsets = np.zeros(B + 1, dtype="int64")
     np.cumsum(lengths, out=offsets[1:])
     flat_idx = np.concatenate(flat_parts) if flat_parts else np.empty(0, dtype=np.int32)
-    _brand_flat_cache_ref = brand_to_rows
-    _brand_flat_cache_data = (flat_idx, offsets)
+    _CACHES.brand_flat_ref = brand_to_rows
+    _CACHES.brand_flat_data = (flat_idx, offsets)
     return flat_idx, offsets
 
 
@@ -428,7 +444,9 @@ def _sample_products_per_store(
     ``product_weight`` (popularity) within each store's full pool.
 
     Performance: per-(store, brand) intersection arrays and CDFs are
-    cached in ``_cdf_cache`` keyed by ``(pool_key, brand, cal_month)``.
+    cached in ``_cdf_cache`` keyed by ``(store_key, brand, cal_month)`` — a
+    semantic key (the store's assortment pool is worker-constant), not an
+    ``id(pool)`` that a freed-then-reallocated array could collide on.
     """
     n = len(store_key_arr)
     n_products = len(product_np)
@@ -488,9 +506,10 @@ def _sample_products_per_store(
                 _sample_brand_aware(
                     rng, out, orig_idx, count, pool,
                     brand_probs, B, product_weight, _cdf_cache, m_offset,
+                    int(_sk_list[i]),
                 )
             elif _has_weight and pool_sz > 1:
-                cache_key = (id(pool), -1, _cal_month)
+                cache_key = (int(_sk_list[i]), -1, _cal_month)
                 cached = _cache_get(cache_key) if _cache_get is not None else None
                 if cached is not None:
                     _, cdf = cached
@@ -521,7 +540,7 @@ def _sample_products_per_store(
 
 def _sample_brand_aware(
     rng, out, orig_idx, count, pool, brand_probs, B,
-    product_weight, _cdf_cache, m_offset,
+    product_weight, _cdf_cache, m_offset, store_key,
 ):
     """Sample products using merged brand × popularity CDF (no brand loop).
 
@@ -538,8 +557,9 @@ def _sample_brand_aware(
     later same-calendar-month absolute month (e.g. Jan-2023 reusing Jan-2022's
     brand mix), which made product sampling depend on chunk→worker scheduling.
     """
-    pool_set_key = id(pool)
-    merged_key = (pool_set_key, "_merged_", int(m_offset))
+    # Semantic key: the store's assortment pool is worker-constant, so keying by
+    # store_key (not id(pool)) is stable and cannot collide on a reused address.
+    merged_key = (int(store_key), "_merged_", int(m_offset))
 
     if _cdf_cache is not None and merged_key in _cdf_cache:
         merged_pool, merged_cdf = _cdf_cache[merged_key]
@@ -604,7 +624,7 @@ def _build_product_weight_for_month(
     # horizon this avoids rebuilding the length-n_products array T times.
     # Downstream consumers treat the weight as read-only (the CDF cache keyed by
     # cal_month already relies on this), so returning the shared array is safe.
-    cached = _worker_prodweight_cache.get(cal_month)
+    cached = _CACHES.prodweight.get(cal_month)
     if cached is not None:
         return cached
 
@@ -621,7 +641,7 @@ def _build_product_weight_for_month(
                 if mask.any():
                     w[mask] *= 1.0 + boosts[cal_month]
 
-    _worker_prodweight_cache[cal_month] = w
+    _CACHES.prodweight[cal_month] = w
     return w
 
 
@@ -1197,6 +1217,182 @@ def _apply_new_customer_promo(
 # ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
+def _compute_order_grouping(skip_cols, line_num):
+    """Group lines into orders.
+
+    Returns ``(order_starts, order_idx, n_unique_orders)`` — the line-1 mask, the
+    0-based order index per line, and the unique-order count — or ``(None, None,
+    0)`` when there are no order identifiers (skip_order_cols). Pure, no RNG.
+    """
+    if not skip_cols and line_num is not None:
+        order_starts = (np.asarray(line_num) == 1)
+        order_idx = np.cumsum(order_starts.astype(np.int64)) - 1
+        n_unique_orders = int(order_idx.max() + 1) if order_idx.size else 0
+    else:
+        order_starts = None
+        order_idx = None
+        n_unique_orders = 0
+    return order_starts, order_idx, n_unique_orders
+
+
+def _resolve_row_prices(prod_idx, order_epoch_days, product_np):
+    """Resolve per-line ProductKey / UnitPrice / UnitCost.
+
+    With product SCD2 active, pick the version effective on each line's OrderDate
+    (last version whose start <= order day); otherwise read straight from the
+    current-version ``product_np``. Pure lookup, no RNG.
+    """
+    _pscd2_starts = getattr(State, "product_scd2_starts", None)
+    _pscd2_data = getattr(State, "product_scd2_data", None)
+    if getattr(State, "product_scd2_active", False) and _pscd2_starts is not None and _pscd2_data is not None:
+        # For each sale: find the last version where start <= order_day
+        _p_starts = _pscd2_starts[prod_idx]         # (n_lines, max_ver)
+        _ver_idx = np.sum(_p_starts <= order_epoch_days[:, np.newaxis], axis=1) - 1
+        _ver_idx = np.clip(_ver_idx, 0, _p_starts.shape[1] - 1)
+        _p_data = _pscd2_data[prod_idx]             # (n_lines, max_ver, 3)
+        _row_range = np.arange(len(prod_idx))
+        product_keys = _p_data[_row_range, _ver_idx, 0].astype(np.int32)
+        unit_price   = _p_data[_row_range, _ver_idx, 1].astype(np.float64)
+        unit_cost    = _p_data[_row_range, _ver_idx, 2].astype(np.float64)
+    else:
+        product_keys = product_np[prod_idx, 0].astype(np.int32, copy=False)
+        unit_price   = product_np[prod_idx, 1].astype(np.float64, copy=False)
+        unit_cost    = product_np[prod_idx, 2].astype(np.float64, copy=False)
+    return product_keys, unit_price, unit_cost
+
+
+def _remap_customer_scd2(customer_keys_out, order_epoch_days):
+    """SCD2: remap the IsCurrent CustomerKey to the version-specific key
+    effective on each line's OrderDate.
+
+    Returns ``customer_keys_out`` unchanged when customer SCD2 is inactive or no
+    key resolves to a pool index. Pure lookup, no RNG.
+    """
+    _cscd2_starts = getattr(State, "customer_scd2_starts", None)
+    _cscd2_keys = getattr(State, "customer_scd2_keys", None)
+    _ckey_to_pidx = getattr(State, "cust_key_to_pool_idx", None)
+    if (getattr(State, "customer_scd2_active", False)
+            and _cscd2_starts is not None and _cscd2_keys is not None
+            and _ckey_to_pidx is not None):
+        _ckeys_i32 = np.asarray(customer_keys_out, dtype=np.int32)
+        # Bounds check: keys outside the lookup array cannot be remapped
+        _in_bounds = (_ckeys_i32 >= 0) & (_ckeys_i32 < len(_ckey_to_pidx))
+        _pool_idx = np.full(len(_ckeys_i32), -1, dtype=np.int32)
+        _pool_idx[_in_bounds] = _ckey_to_pidx[_ckeys_i32[_in_bounds]]
+        _valid = _pool_idx >= 0
+        if _valid.any():
+            _v_pool = _pool_idx[_valid]
+            _v_days = order_epoch_days[_valid]
+            _c_starts = _cscd2_starts[_v_pool]           # (N_valid, max_ver)
+            _ver_idx = np.sum(_c_starts <= _v_days[:, np.newaxis], axis=1) - 1
+            _ver_idx = np.clip(_ver_idx, 0, _c_starts.shape[1] - 1)
+            _c_keys = _cscd2_keys[_v_pool]               # (N_valid, max_ver)
+            _row_range = np.arange(len(_v_pool))
+            _remapped = np.array(customer_keys_out, dtype=np.int32, copy=True)
+            _remapped[_valid] = _c_keys[_row_range, _ver_idx]
+            customer_keys_out = _remapped
+    return customer_keys_out
+
+
+def _compute_day_based_order_ids(
+    order_dates, line_num, reps, date_pool_min_day,
+    day_stride, per_chunk_alloc, chunk_idx, order_id_int64, int32_max,
+):
+    """Assign day-banded OrderNumbers (line-level, via repeat).
+
+    Each calendar day gets a disjoint id band and each chunk a non-overlapping
+    slot within it, so OrderNumber increases monotonically with OrderDate even
+    across parallel chunks. Pure id arithmetic, no RNG. Emits the schema dtype
+    (int64 for large runs; int32 otherwise, with a loud overflow guard).
+    """
+    _od_D = order_dates[line_num == 1].astype("datetime64[D]")
+    _d_off = _od_D.astype(np.int64) - date_pool_min_day
+
+    # CHUNK-1: the customer-start clamp runs AFTER build_orders sorted by date,
+    # so _d_off is no longer guaranteed sorted. Derive each order's within-day
+    # rank from a stable sort (see helper) so the cursor is correct regardless of
+    # clamp-induced reordering.
+    _cursor = _within_day_cursor(_d_off)
+
+    # Guard on cursor magnitude (the value that actually overflows the per-chunk
+    # band). max(cursor)+1 is the largest per-day order count.
+    _max_day_count = int(_cursor.max(initial=-1)) + 1
+    if _max_day_count > int(per_chunk_alloc):
+        raise SalesError(
+            f"per_chunk_alloc too small: {_max_day_count} orders on one "
+            f"day but alloc={int(per_chunk_alloc)} per chunk per day."
+        )
+
+    _new_ids = (
+        _d_off * day_stride
+        + np.int64(chunk_idx) * per_chunk_alloc
+        + _cursor
+        + np.int64(1)
+    )
+
+    # int32 cast (and the schema's safe=False conversion) would wrap silently, so
+    # backstop with a loud overflow guard when int64 promotion wasn't enabled.
+    if order_id_int64:
+        return np.repeat(_new_ids, reps)
+    if _new_ids.size > 0 and int(_new_ids.max()) >= int(int32_max):
+        raise SalesError(
+            f"Day-based OrderNumber would overflow int32: "
+            f"max_id={int(_new_ids.max())} >= {int(int32_max)} "
+            "but int64 promotion was not enabled for this run."
+        )
+    return np.repeat(_new_ids.astype(np.int32), reps)
+
+
+def _assign_salespersons(
+    skip_cols, order_ids_int, order_starts, order_idx,
+    store_key_arr, order_dates, eff, rng,
+):
+    """Assign EmployeeKey (salesperson) per line, drawing off ``rng``.
+
+    When order identifiers exist, sample one salesperson per unique order via the
+    day-accurate effective-dated store bridge and broadcast to the order's lines;
+    otherwise sample per line. No eligible salesperson for a (store, date) yields
+    -1 (dropped downstream by the HARD GUARANTEE; the coverage preflight
+    reports/aborts/repairs this upstream). Never emits Store Manager keys.
+
+    The order-level path reuses the chunk's precomputed grouping
+    (order_starts/order_idx) when order ids are ascending — equal to np.unique's
+    return_index/return_inverse in O(n) — but falls back to np.unique when the
+    day-based ids are reordered, which would otherwise change both the unique
+    ordering and the per-order draw sequence.
+    """
+    if not skip_cols and order_ids_int is not None:
+        _ids_ascending = (
+            order_starts is not None and order_idx is not None
+            and (order_ids_int.size < 2
+                 or bool((order_ids_int[1:] >= order_ids_int[:-1]).all()))
+        )
+        if _ids_ascending:
+            first_idx = np.flatnonzero(order_starts)
+            uniq_orders = order_ids_int[first_idx]
+            inv_idx = order_idx
+        else:
+            uniq_orders, first_idx, inv_idx = np.unique(
+                order_ids_int, return_index=True, return_inverse=True)
+        order_store_sp = store_key_arr[first_idx]
+        order_date_sp = order_dates[first_idx].astype("datetime64[D]", copy=False)
+
+        if isinstance(eff, dict) and eff:
+            salesperson_order = _sample_salesperson_vectorized(
+                order_store_sp, order_date_sp, eff, rng)
+        else:
+            salesperson_order = np.full(uniq_orders.size, -1, dtype=np.int32)
+
+        return salesperson_order[inv_idx]
+
+    # Line-level sampling (when order ids do not exist)
+    s_ids = np.asarray(store_key_arr, dtype=np.int32)
+    d_ids = np.asarray(order_dates, dtype="datetime64[D]")
+    if isinstance(eff, dict) and eff:
+        return _sample_salesperson_vectorized(s_ids, d_ids, eff, rng)
+    return np.full(s_ids.size, -1, dtype=np.int32)
+
+
 def build_chunk_table(
     n: int,
     seed: int,
@@ -1440,7 +1636,7 @@ def build_chunk_table(
 
     # CDF cache: use worker-lifetime cache so subsequent chunks skip
     # intersection + CDF recomputation entirely (contents are deterministic).
-    _product_cdf_cache = _worker_cdf_cache
+    _product_cdf_cache = _CACHES.cdf
 
     # Per-month eligible row indices, computed once per worker (chunk-invariant).
     eligible_idx_all = _eligible_idx_by_month(
@@ -1538,48 +1734,11 @@ def build_chunk_table(
             order_dates = _clamp_order_dates_to_customer_start(order_dates, customer_keys_out)
 
             if _use_day_ids:
-                _oc = orders["_order_count"]
-                _reps = orders["_repeats"]
-
-                _od_D = order_dates[line_num == 1].astype("datetime64[D]")
-                _d_off = _od_D.astype(np.int64) - _date_pool_min_day
-
-                # CHUNK-1: the customer-start clamp above runs AFTER build_orders
-                # sorted by date, so _d_off is no longer guaranteed sorted. Derive
-                # each order's within-day rank from a stable sort (see helper) so
-                # the cursor is correct regardless of clamp-induced reordering.
-                _cursor = _within_day_cursor(_d_off)
-
-                # Guard on cursor magnitude (the value that actually overflows the
-                # per-chunk band). max(cursor)+1 is the largest per-day order count.
-                _max_day_count = int(_cursor.max(initial=-1)) + 1
-                if _max_day_count > int(_per_chunk_alloc):
-                    raise SalesError(
-                        f"per_chunk_alloc too small: {_max_day_count} orders on one "
-                        f"day but alloc={int(_per_chunk_alloc)} per chunk per day."
-                    )
-
-                _new_ids = (
-                    _d_off * _day_stride
-                    + np.int64(chunk_idx) * _per_chunk_alloc
-                    + _cursor
-                    + np.int64(1)
+                order_ids_int = _compute_day_based_order_ids(
+                    order_dates, line_num, orders["_repeats"],
+                    _date_pool_min_day, _day_stride, _per_chunk_alloc,
+                    chunk_idx, _order_id_int64, INT32_MAX,
                 )
-
-                # Emit the dtype the schema expects (single-sourced from sales.py's
-                # _order_id_int64). int64 for large runs; int32 otherwise, with a
-                # loud overflow guard as a backstop since the int32 cast (and the
-                # schema's safe=False conversion) would otherwise wrap silently.
-                if _order_id_int64:
-                    order_ids_int = np.repeat(_new_ids, _reps)
-                else:
-                    if _new_ids.size > 0 and int(_new_ids.max()) >= int(INT32_MAX):
-                        raise SalesError(
-                            f"Day-based OrderNumber would overflow int32: "
-                            f"max_id={int(_new_ids.max())} >= {int(INT32_MAX)} "
-                            "but int64 promotion was not enabled for this run."
-                        )
-                    order_ids_int = np.repeat(_new_ids.astype(np.int32), _reps)
             else:
                 order_ids_int = orders["order_ids_int"]
 
@@ -1603,14 +1762,7 @@ def build_chunk_table(
         # STORE (sampled first — needed for assortment filtering)
         #   Agreement: 1 Store per Order (when order ids exist)
         # --------------------------------------------------------
-        if not skip_cols and line_num is not None:
-            order_starts = (np.asarray(line_num) == 1)
-            order_idx = np.cumsum(order_starts.astype(np.int64)) - 1
-            n_unique_orders = int(order_idx.max() + 1) if order_idx.size else 0
-        else:
-            order_starts = None
-            order_idx = None
-            n_unique_orders = 0
+        order_starts, order_idx, n_unique_orders = _compute_order_grouping(skip_cols, line_num)
 
         # Use per-month eligible stores if available, else fall back to all stores
         _month_stores = store_keys
@@ -1719,23 +1871,9 @@ def build_chunk_table(
         # Convert order dates to epoch days for SCD2 per-row version lookups
         _order_epoch_days = order_dates.astype(np.int64)  # datetime64[D] → epoch days
 
-        # SCD2: resolve per-row product version using actual OrderDate
-        _pscd2_starts = getattr(State, "product_scd2_starts", None)
-        _pscd2_data = getattr(State, "product_scd2_data", None)
-        if getattr(State, "product_scd2_active", False) and _pscd2_starts is not None and _pscd2_data is not None:
-            # For each sale: find the last version where start <= order_day
-            _p_starts = _pscd2_starts[prod_idx]         # (n_lines, max_ver)
-            _ver_idx = np.sum(_p_starts <= _order_epoch_days[:, np.newaxis], axis=1) - 1
-            _ver_idx = np.clip(_ver_idx, 0, _p_starts.shape[1] - 1)
-            _p_data = _pscd2_data[prod_idx]             # (n_lines, max_ver, 3)
-            _row_range = np.arange(len(prod_idx))
-            product_keys = _p_data[_row_range, _ver_idx, 0].astype(np.int32)
-            unit_price   = _p_data[_row_range, _ver_idx, 1].astype(np.float64)
-            unit_cost    = _p_data[_row_range, _ver_idx, 2].astype(np.float64)
-        else:
-            product_keys = product_np[prod_idx, 0].astype(np.int32, copy=False)
-            unit_price   = product_np[prod_idx, 1].astype(np.float64, copy=False)
-            unit_cost    = product_np[prod_idx, 2].astype(np.float64, copy=False)
+        # SCD2: resolve per-row product version + price using actual OrderDate
+        product_keys, unit_price, unit_cost = _resolve_row_prices(
+            prod_idx, _order_epoch_days, product_np)
 
         geo_arr = st2g_arr[store_key_arr]
         if np.any(geo_arr < 0):
@@ -1834,46 +1972,10 @@ def build_chunk_table(
         # --------------------------------------------------------
 
         # STRICT: no cross-store salesperson fallback. If no eligible salesperson exists, we emit -1.
-
-        # --- Sampling mode ---
-        if not skip_cols and order_ids_int is not None:
-            # Order-level salesperson: sample per unique order, then broadcast back to lines.
-            # order_ids_int from the standard path is sequential/ascending & grouped, so the
-            # grouping the chunk builder already computed (order_starts/order_idx) equals
-            # np.unique's (return_index/return_inverse) in O(n) — no O(n log n) sort.
-            # Guard on monotonicity: the day-based OrderNumber path can reorder ids,
-            # which would change np.unique's ordering AND the per-order RNG draw sequence
-            # below, so fall back to np.unique there to keep output byte-identical.
-            _ids_ascending = (
-                order_starts is not None and order_idx is not None
-                and (order_ids_int.size < 2
-                     or bool((order_ids_int[1:] >= order_ids_int[:-1]).all()))
-            )
-            if _ids_ascending:
-                first_idx = np.flatnonzero(order_starts)
-                uniq_orders = order_ids_int[first_idx]
-                inv_idx = order_idx
-            else:
-                uniq_orders, first_idx, inv_idx = np.unique(
-                    order_ids_int, return_index=True, return_inverse=True)
-            order_store_sp = store_key_arr[first_idx]
-            order_date_sp = order_dates[first_idx].astype("datetime64[D]", copy=False)
-
-            if isinstance(eff, dict) and eff:
-                salesperson_order = _sample_salesperson_vectorized(
-                    order_store_sp, order_date_sp, eff, rng)
-            else:
-                salesperson_order = np.full(uniq_orders.size, -1, dtype=np.int32)
-
-            salesperson_key_arr = salesperson_order[inv_idx]
-        else:
-            # Line-level sampling (when order ids do not exist)
-            s_ids = np.asarray(store_key_arr, dtype=np.int32)
-            d_ids = np.asarray(order_dates, dtype="datetime64[D]")
-            if isinstance(eff, dict) and eff:
-                salesperson_key_arr = _sample_salesperson_vectorized(s_ids, d_ids, eff, rng)
-            else:
-                salesperson_key_arr = np.full(s_ids.size, -1, dtype=np.int32)
+        salesperson_key_arr = _assign_salespersons(
+            skip_cols, order_ids_int, order_starts, order_idx,
+            store_key_arr, order_dates, eff, rng,
+        )
 
         # Discovery is a static closed-form schedule (State.customer_discovery_month),
         # so there is no per-chunk "seen" state to persist here anymore.
@@ -1923,29 +2025,7 @@ def build_chunk_table(
             cols["OrderLineNumber"] = line_num
 
         # SCD2: remap IsCurrent CustomerKey → version-specific CustomerKey using actual OrderDate
-        _cscd2_starts = getattr(State, "customer_scd2_starts", None)
-        _cscd2_keys = getattr(State, "customer_scd2_keys", None)
-        _ckey_to_pidx = getattr(State, "cust_key_to_pool_idx", None)
-        if (getattr(State, "customer_scd2_active", False)
-                and _cscd2_starts is not None and _cscd2_keys is not None
-                and _ckey_to_pidx is not None):
-            _ckeys_i32 = np.asarray(customer_keys_out, dtype=np.int32)
-            # Bounds check: keys outside the lookup array cannot be remapped
-            _in_bounds = (_ckeys_i32 >= 0) & (_ckeys_i32 < len(_ckey_to_pidx))
-            _pool_idx = np.full(len(_ckeys_i32), -1, dtype=np.int32)
-            _pool_idx[_in_bounds] = _ckey_to_pidx[_ckeys_i32[_in_bounds]]
-            _valid = _pool_idx >= 0
-            if _valid.any():
-                _v_pool = _pool_idx[_valid]
-                _v_days = _order_epoch_days[_valid]
-                _c_starts = _cscd2_starts[_v_pool]           # (N_valid, max_ver)
-                _ver_idx = np.sum(_c_starts <= _v_days[:, np.newaxis], axis=1) - 1
-                _ver_idx = np.clip(_ver_idx, 0, _c_starts.shape[1] - 1)
-                _c_keys = _cscd2_keys[_v_pool]               # (N_valid, max_ver)
-                _row_range = np.arange(len(_v_pool))
-                _remapped = np.array(customer_keys_out, dtype=np.int32, copy=True)
-                _remapped[_valid] = _c_keys[_row_range, _ver_idx]
-                customer_keys_out = _remapped
+        customer_keys_out = _remap_customer_scd2(customer_keys_out, _order_epoch_days)
 
         cols["CustomerKey"] = customer_keys_out
         cols["ProductKey"] = product_keys

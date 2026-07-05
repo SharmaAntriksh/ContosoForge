@@ -25,6 +25,36 @@ import numpy as np
 
 
 @dataclass(frozen=True)
+class ReturnsResolved:
+    """Resolved returns scalars for one sales run.
+
+    Bundles the config-derived returns knobs (rate, lag window, multi-event
+    quantity/lag shape, reason weights) plus the requested-vs-effective enabled
+    flags. ``effective`` differs from ``requested`` only when returns are
+    switched off because ``sales_output='sales'`` with ``skip_order_cols`` leaves
+    no order identifiers to link a return back to a sale. The fields feed the
+    ``tables`` list, the ReturnEventKey capacity, and ``build_returns_policy``.
+    """
+
+    returns_enabled_requested: bool
+    returns_enabled_effective: bool
+    returns_rate: float
+    returns_min_lag_days: int
+    returns_max_lag_days: int
+    returns_full_line_prob: float
+    returns_split_rate: float
+    returns_max_splits: int
+    returns_reconcile_cents: bool
+    returns_split_min_gap: int
+    returns_split_max_gap: int
+    returns_lag_distribution: str
+    returns_lag_mode: int
+    returns_reason_keys: List[int]
+    returns_reason_probs: List[float]
+    returns_logistics_keys: List[int]
+
+
+@dataclass(frozen=True)
 class SalesRunConfig:
     """Run-level scalars resolved once in the coordinator for a sales run."""
 
@@ -45,6 +75,24 @@ class SalesRunConfig:
     per_chunk_alloc: int = 0
     order_id_int64: bool = False
     total_chunks: int = 1
+
+
+@dataclass(frozen=True)
+class SalesPools:
+    """The loaded sales dimension pools + correlation lookups for one run.
+
+    A holder for the five typed dimension pools the workers sample from
+    (customers, products, stores, promotions, employee bridge) plus the derived
+    correlation lookups. Bundled so the coordinator's dimension-loading step is
+    one named call instead of six loose locals.
+    """
+
+    customers: "CustomerPool"
+    products: "ProductPool"
+    stores: "StorePool"
+    promos: "PromoPool"
+    employees: "EmployeeBridge"
+    correlations: object
 
 
 @dataclass(frozen=True)

@@ -27,7 +27,7 @@ _setup_cache: dict = {}
 
 
 def reset_basket_cache() -> None:
-    """Clear the per-worker basket setup cache (call from reset_worker_cdf_cache)."""
+    """Clear the per-worker basket setup cache (call from reset_worker_caches)."""
     _setup_cache.clear()
 
 
