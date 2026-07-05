@@ -531,14 +531,13 @@ class TestDeterministicPostedPrice:
         State.reset()
         _reset_caches()
 
-    def _bind(self, *, deterministic=True):
+    def _bind(self):
         State.models_cfg = {
             "pricing": {
                 "inflation": {"annual_rate": 0.10, "month_volatility_sigma": 0.0,
                               "apply_with_scd2": True},
                 "appearance": {
                     "enabled": True,
-                    "deterministic": deterministic,
                     "unit_price": {
                         "rounding": "floor",
                         "endings": [{"value": 0.99, "weight": 1.0}],
@@ -557,8 +556,8 @@ class TestDeterministicPostedPrice:
         State.product_scd2_active = False
         State.date_pool = np.array(["2022-01-01"], dtype="datetime64[D]")
 
-    def _run(self, product_ids, base_prices, dates, *, deterministic=True, pass_ids=True):
-        self._bind(deterministic=deterministic)
+    def _run(self, product_ids, base_prices, dates):
+        self._bind()
         base = np.asarray(base_prices, dtype=np.float64)
         n = base.size
         price = {
@@ -571,7 +570,7 @@ class TestDeterministicPostedPrice:
             np.random.default_rng(1),
             np.asarray(dates, dtype="datetime64[D]"),
             np.ones(n, dtype=np.int64), price,
-            product_ids=(np.asarray(product_ids, dtype=np.int32) if pass_ids else None),
+            product_ids=np.asarray(product_ids, dtype=np.int32),
         )
         return out["final_unit_price"]
 
@@ -580,25 +579,28 @@ class TestDeterministicPostedPrice:
         pid = np.full(n, 7, dtype=np.int32)
         base = np.full(n, 53.0)             # a product's list price is fixed
         dates = np.array(["2022-06-15"] * n, dtype="datetime64[D]")
-        up = self._run(pid, base, dates, deterministic=True)
+        up = self._run(pid, base, dates)
         assert np.unique(np.round(up, 2)).size == 1, "posted price varies within (product, month)"
 
-    def test_legacy_snap_varies_per_row(self):
-        n = 500
-        pid = np.full(n, 7, dtype=np.int32)
+    def test_product_ids_required(self):
+        # The non-SCD2 snap is hash-seeded on (product_id, month); omitting
+        # product_ids is a hard error now that the legacy per-row path is gone.
+        self._bind()
+        n = 8
         base = np.full(n, 53.0)
-        dates = np.array(["2022-06-15"] * n, dtype="datetime64[D]")
-        up = self._run(pid, base, dates, deterministic=False)
-        # stochastic per-row rounding straddles the step boundary -> >1 value
-        assert np.unique(np.round(up, 2)).size > 1
-
-    def test_product_ids_none_uses_legacy(self):
-        n = 500
-        pid = np.full(n, 7, dtype=np.int32)
-        base = np.full(n, 53.0)
-        dates = np.array(["2022-06-15"] * n, dtype="datetime64[D]")
-        up = self._run(pid, base, dates, deterministic=True, pass_ids=False)
-        assert np.unique(np.round(up, 2)).size > 1
+        price = {
+            "final_unit_price": base.copy(),
+            "final_unit_cost": base * 0.4,
+            "discount_amt": np.zeros(n),
+            "final_net_price": base.copy(),
+        }
+        with pytest.raises(SalesError, match="product_ids"):
+            build_prices(
+                np.random.default_rng(1),
+                np.array(["2022-06-15"] * n, dtype="datetime64[D]"),
+                np.ones(n, dtype=np.int64), price,
+                product_ids=None,
+            )
 
     def test_distinct_products_can_differ(self):
         # Two products at the same base price / month can snap to different posted
@@ -607,7 +609,7 @@ class TestDeterministicPostedPrice:
         pid = (np.arange(n) % 40).astype(np.int32)
         base = np.full(n, 53.0)
         dates = np.array(["2022-06-15"] * n, dtype="datetime64[D]")
-        up = self._run(pid, base, dates, deterministic=True)
+        up = self._run(pid, base, dates)
         # each product-month is internally single-valued...
         import pandas as pd
         g = pd.DataFrame({"pid": pid, "up": np.round(up, 2)}).groupby("pid")["up"].nunique()
