@@ -4,7 +4,7 @@ import re
 import shutil
 from pathlib import Path
 
-from src.exceptions import ConfigError
+from src.exceptions import ConfigError, PackagingError
 from src.tools.sql.dialect import DEFAULT_DIALECT, REGISTRY
 from src.tools.sql.generate_bulk_insert_sql import (
     _allowed_fact_tables_from_cfg,
@@ -43,7 +43,7 @@ def _find_repo_root(start: Path) -> Path:
     for p in [start, *start.parents]:
         if (p / "src").is_dir() and (p / "scripts").is_dir():
             return p
-    raise RuntimeError(f"Could not find repo root (with 'src' and 'scripts' dirs) starting from {start}")
+    raise PackagingError(f"Could not find repo root (with 'src' and 'scripts' dirs) starting from {start}")
 
 
 def _read_text(path: Path) -> str:

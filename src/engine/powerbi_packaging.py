@@ -9,6 +9,8 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from src.exceptions import PackagingError
+
 
 PBIP_TEMPLATES_ROOT = Path("samples/powerbi/templates")
 
@@ -117,7 +119,7 @@ def attach_pbip_project(
     # ------------------------------------------------------------
     semantic_models = list(pbip_dst.glob("*.SemanticModel"))
     if len(semantic_models) != 1:
-        raise RuntimeError(
+        raise PackagingError(
             f"Expected exactly one *.SemanticModel folder in PBIP, found {len(semantic_models)}"
         )
 
@@ -125,7 +127,7 @@ def attach_pbip_project(
     expressions_file = semantic_model / "definition" / "expressions.tmdl"
 
     if not expressions_file.exists():
-        raise RuntimeError(
+        raise PackagingError(
             "expressions.tmdl not found. Ensure the PBIP template defines "
             f"an expression named '{expression_name}'.\n"
             f"Expected path: {expressions_file}"
@@ -171,7 +173,7 @@ def _rewrite_expression(
     )
 
     if count != 1:
-        raise RuntimeError(
+        raise PackagingError(
             f"Expected exactly one expression named '{expression_name}', found {count}"
         )
 

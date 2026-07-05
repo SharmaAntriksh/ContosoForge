@@ -17,6 +17,8 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
+from src.exceptions import PipelineError
+
 
 def _worker_init_wrapper(user_init, user_args):
     """Wrapper that ignores SIGINT in worker processes (Unix only; Windows
@@ -161,7 +163,7 @@ def iter_imap_unordered(
                 for fut, submit_t in pending.items():
                     if (now - submit_t) > timeout_s:
                         tag = f" label={spec.label!r}" if spec.label else ""
-                        raise RuntimeError(
+                        raise PipelineError(
                             f"Task timed out after {timeout_s} seconds{tag}"
                         )
     except BaseException:  # intentionally broad — executor must shut down on any failure

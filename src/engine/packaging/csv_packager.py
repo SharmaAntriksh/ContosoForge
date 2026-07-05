@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
+from src.exceptions import PackagingError
 from src.utils.logging_utils import info, done
 from src.facts.sales.output_paths import TABLE_SALES
 
@@ -73,7 +74,7 @@ def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str]) -> Non
         plan.append((t, src_dir, csv_files, dst_dir))
 
     if missing_dirs:
-        raise RuntimeError(
+        raise PackagingError(
             "No CSV fact outputs found for table(s): "
             + ", ".join(missing_dirs)
             + f". Expected under: {fact_out / 'csv'}"
@@ -104,7 +105,7 @@ def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str]) -> Non
             target = dst_dir / f.name
             key = str(target)
             if key in seen_targets or target.exists():
-                raise RuntimeError(f"Duplicate CSV filename during packaging: {target}")
+                raise PackagingError(f"Duplicate CSV filename during packaging: {target}")
             seen_targets.add(key)
             copy_pairs.append((f, target))
 

@@ -28,6 +28,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.exceptions import PackagingError
+
 _PARTITION_PRESETS = {
     "none": [],
     "year": ["Year"],
@@ -78,7 +80,7 @@ def _ensure_partition_cols(table, target_cols: list[str], current_cols: list[str
 
     date_col = _find_date_col(table.schema)
     if date_col is None:
-        raise RuntimeError(
+        raise PackagingError(
             f"Cannot derive {missing}: no date column found. "
             f"Available: {table.column_names}"
         )

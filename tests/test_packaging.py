@@ -8,6 +8,7 @@ from typing import Mapping
 
 import pytest
 
+from src.exceptions import PackagingError
 from src.engine.config.config_schema import AppConfig, SalesConfig
 from src.utils.static_schemas import (
     STATIC_SCHEMAS,
@@ -601,13 +602,13 @@ class TestCSVPackager:
         assert (facts_out / "sales" / "sales_chunk0002.csv").exists()
 
     def test_copy_csv_facts_missing_raises(self, tmp_path):
-        """Missing CSV dirs should raise RuntimeError."""
+        """Missing CSV dirs should raise PackagingError."""
         fact_out = tmp_path / "scratch"
         fact_out.mkdir()
         facts_out = tmp_path / "packaged"
         facts_out.mkdir()
 
-        with pytest.raises(RuntimeError, match="No CSV fact outputs found"):
+        with pytest.raises(PackagingError, match="No CSV fact outputs found"):
             copy_csv_facts(fact_out=fact_out, facts_out=facts_out, tables=["Sales"])
 
     def test_copy_csv_facts_duplicate_raises(self, tmp_path):
@@ -622,7 +623,7 @@ class TestCSVPackager:
         sales_dst.mkdir(parents=True)
         (sales_dst / "chunk.csv").write_text("existing\n")
 
-        with pytest.raises(RuntimeError, match="Duplicate CSV filename"):
+        with pytest.raises(PackagingError, match="Duplicate CSV filename"):
             copy_csv_facts(fact_out=fact_out, facts_out=facts_out, tables=["Sales"])
 
 
@@ -679,7 +680,7 @@ class TestParquetPackager:
         facts_out = tmp_path / "packaged"
         facts_out.mkdir()
 
-        with pytest.raises(RuntimeError, match="No merged parquet found"):
+        with pytest.raises(PackagingError, match="No merged parquet found"):
             copy_parquet_facts(
                 fact_out=fact_out, facts_out=facts_out,
                 sales_cfg={}, tables=["Sales"],
@@ -965,12 +966,12 @@ class TestPowerBIPackaging:
         assert '\\"' in text or 'my"dataset' not in text
 
     def test_rewrite_expression_missing_raises(self, tmp_path):
-        """If expression name not found, should raise RuntimeError."""
+        """If expression name not found, should raise PackagingError."""
         expr_file = self._make_expressions_file(
             tmp_path,
             'expression OtherExpr = "something"\n',
         )
-        with pytest.raises(RuntimeError, match="Expected exactly one expression"):
+        with pytest.raises(PackagingError, match="Expected exactly one expression"):
             _rewrite_expression(
                 expressions_file=expr_file,
                 expression_name="ContosoFolder",
@@ -978,13 +979,13 @@ class TestPowerBIPackaging:
             )
 
     def test_rewrite_expression_duplicate_raises(self, tmp_path):
-        """Duplicate expression names should raise RuntimeError."""
+        """Duplicate expression names should raise PackagingError."""
         expr_file = self._make_expressions_file(
             tmp_path,
             'expression ContosoFolder = "path1"\n'
             'expression ContosoFolder = "path2"\n',
         )
-        with pytest.raises(RuntimeError, match="Expected exactly one expression"):
+        with pytest.raises(PackagingError, match="Expected exactly one expression"):
             _rewrite_expression(
                 expressions_file=expr_file,
                 expression_name="ContosoFolder",

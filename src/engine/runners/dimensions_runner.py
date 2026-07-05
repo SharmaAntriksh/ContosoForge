@@ -324,7 +324,7 @@ def _stable_toposort(specs: Sequence[DimensionSpec]) -> List[DimensionSpec]:
 
     if len(result) != len(specs):
         remaining = [k for k, v in indeg.items() if v > 0]
-        raise RuntimeError(f"Cycle detected in dimension dependency graph. Remaining: {remaining}")
+        raise DimensionError(f"Cycle detected in dimension dependency graph. Remaining: {remaining}")
 
     return [by_name[n] for n in result]
 

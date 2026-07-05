@@ -2,6 +2,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from src.exceptions import PackagingError
 from src.utils.logging_utils import info, done
 from src.facts.sales.output_paths import TABLE_SALES
 
@@ -121,7 +122,7 @@ def copy_delta_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict, tables
         copied += 1
 
     if missing:
-        raise RuntimeError(
+        raise PackagingError(
             "No delta fact outputs found for table(s): "
             + ", ".join(missing)
             + ". Checked delta_output_folder plus these scratch roots: "

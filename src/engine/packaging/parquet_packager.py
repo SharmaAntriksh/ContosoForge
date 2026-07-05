@@ -2,6 +2,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from src.exceptions import PackagingError
 from src.utils.logging_utils import info, done
 from src.facts.sales.output_paths import TABLE_SALES
 
@@ -98,7 +99,7 @@ def copy_parquet_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict, tabl
         info(f"No parquet found for {t}. Checked: {fact_out / 'parquet'} and {fact_out}.")
 
     if missing:
-        raise RuntimeError(
+        raise PackagingError(
             "No merged parquet found for table(s): "
             + ", ".join(missing)
             + f". Scratch roots checked: {fact_out} and {fact_out / 'parquet'}."
