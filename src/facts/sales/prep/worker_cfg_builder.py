@@ -284,6 +284,15 @@ def _build_worker_cfg(
 
 def _setup_accumulators(cfg, worker_cfg, parquet_folder_p):
     """Set up streaming accumulators for budget, inventory, wishlists, complaints."""
+    # The dimensions parquet folder must reach every worker regardless of which
+    # optional facts are enabled: the sales channel / time-of-day producer reads
+    # channels.parquet through State.parquet_folder. Binding it only in the
+    # budget-enabled branch (as this used to) silently coupled ChannelKey/TimeKey
+    # fidelity to the unrelated budget toggle — with budget off the workers saw
+    # no folder and fell back to the uniform core channel keys + digital hour
+    # profile instead of the real channel mix.
+    worker_cfg["parquet_folder"] = str(parquet_folder_p)
+
     budget_acc = None
     inventory_acc = None
     wishlists_acc = None
@@ -300,7 +309,6 @@ def _setup_accumulators(cfg, worker_cfg, parquet_folder_p):
             worker_cfg["budget_enabled"] = True
             worker_cfg["budget_store_to_country"] = budget_lookups["budget_store_to_country"]
             worker_cfg["budget_product_to_cat"] = budget_lookups["budget_product_to_cat"]
-            worker_cfg["parquet_folder"] = str(parquet_folder_p)
 
             budget_acc = BudgetAccumulator(
                 country_labels=budget_lookups["budget_country_labels"],
