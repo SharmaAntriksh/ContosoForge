@@ -40,7 +40,6 @@ from src.facts.sales.sales_writer.encoding import (
 )
 from src.facts.sales.sales_writer.projection import (
     project_table_to_schema,
-    _project_table_to_schema,
 )
 from src.facts.sales.sales_writer.parquet_merge import (
     merge_parquet_files,
@@ -55,6 +54,7 @@ from src.facts.sales.sales_writer.utils import (
     arrow,
     _ensure_dir_for_file,
     ensure_dir_for_file,
+    atomic_output,
 )
 
 
@@ -95,6 +95,40 @@ class TestEnsureDirForFile:
         nested = tmp_path / "x" / "y" / "out.parquet"
         ensure_dir_for_file(str(nested))
         assert nested.parent.is_dir()
+
+
+class TestAtomicOutput:
+    """tmp + os.replace lifecycle used by the writer finalizers."""
+
+    def test_success_renames_temp_onto_final(self, tmp_path):
+        final = tmp_path / "out.bin"
+        with atomic_output(final) as tmp:
+            assert tmp == str(final.resolve()) + ".tmp" or tmp == str(final) + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(b"payload")
+        assert final.read_bytes() == b"payload"
+        assert not (tmp_path / "out.bin.tmp").exists(), "temp left behind after success"
+
+    def test_failure_removes_temp_and_leaves_final_untouched(self, tmp_path):
+        final = tmp_path / "out.bin"
+        final.write_bytes(b"previous-good")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            with atomic_output(final) as tmp:
+                with open(tmp, "wb") as f:
+                    f.write(b"partial")
+                raise RuntimeError("boom")
+
+        assert final.read_bytes() == b"previous-good", "final was clobbered on failure"
+        assert not (tmp_path / "out.bin.tmp").exists(), "temp not cleaned up on failure"
+
+    def test_custom_suffix(self, tmp_path):
+        final = tmp_path / "out.parquet"
+        with atomic_output(final, suffix=".optimize_tmp") as tmp:
+            assert tmp.endswith(".optimize_tmp")
+            with open(tmp, "wb") as f:
+                f.write(b"x")
+        assert final.read_bytes() == b"x"
 
 
 # ===================================================================
@@ -350,13 +384,6 @@ class TestProjectTableToSchema:
         ])
         result = project_table_to_schema(table, target)
         assert result.num_rows == 0
-        assert result.schema.names == ["a", "b"]
-
-    def test_underscore_alias(self):
-        """_project_table_to_schema is a back-compat alias."""
-        table = pa.table({"b": [1], "a": [2]})
-        target = pa.schema([pa.field("a", pa.int64()), pa.field("b", pa.int64())])
-        result = _project_table_to_schema(table, target)
         assert result.schema.names == ["a", "b"]
 
     def test_pa_and_pc_passthrough(self):

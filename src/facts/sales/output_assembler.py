@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import glob
 import os
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,6 +23,8 @@ from src.exceptions import PackagingError, SalesError
 from src.utils.config_helpers import bool_or as _bool_or
 from src.utils.logging_utils import info, work
 
+from .chunk_result import ChunkResult
+from .format_writer import SalesOutputFormat, manifest_fields_for
 from .output_paths import (
     TABLE_SALES,
     TABLE_SALES_ORDER_DETAIL,
@@ -67,10 +68,51 @@ class SalesFactResult:
     complaints_acc: Any = None
 
 
-class ChunkResultCollector:
-    """Collects per-chunk results from the multiprocessing pool.
+def build_sales_manifest(
+    *,
+    tables: list[str],
+    output_paths: Any,
+    fmt: SalesOutputFormat,
+    sales_output: str,
+    out_folder: Any,
+    created_by_table: Optional[Dict[str, List[Any]]] = None,
+    order_id_int64: bool = False,
+) -> "SalesRunManifest":
+    """Assemble a :class:`SalesRunManifest` from the run's tables.
 
-    Replaces the _record_chunk_result closure with explicit state.
+    Single builder for both the populated manifest (post-assembly, with the
+    collector's per-table chunk lists) and the empty early-exit manifest
+    (``created_by_table=None`` -> empty chunk lists). Centralizing it keeps the
+    per-format manifest-field policy (``manifest_fields_for``) in one place
+    instead of duplicated ternaries at each call site.
+    """
+    per_table: Dict[str, TableOutputs] = {}
+    for t in tables:
+        mf = manifest_fields_for(fmt, output_paths, t)
+        per_table[t] = TableOutputs(
+            table=t,
+            file_format=fmt.value,
+            chunks=list(created_by_table.get(t, [])) if created_by_table is not None else [],
+            merged_path=mf.merged_path,
+            delta_table_dir=mf.delta_table_dir,
+            delta_parts_dir=mf.delta_parts_dir,
+        )
+    return SalesRunManifest(
+        sales_output=sales_output,
+        file_format=fmt.value,
+        out_folder=str(out_folder),
+        tables=per_table,
+        order_id_int64=bool(order_id_int64),
+    )
+
+
+class ChunkResultCollector:
+    """Collects per-chunk :class:`ChunkResult` results from the worker pool.
+
+    Feeds the streamed micro-aggregates into their registered accumulators and
+    records the artifact written for each table (for the run manifest + progress
+    logging). Output assembly itself re-globs the scratch dir, so this recording
+    does not decide which files ship.
     """
 
     _TABLE_SHORT = {
@@ -95,68 +137,35 @@ class ChunkResultCollector:
         self.complaints_acc = complaints_acc
         self.created_by_table: Dict[str, List[Any]] = {t: [] for t in tables}
         self.created_files: List[str] = []
+        # (agg key emitted by the worker, accumulator, its add-method name).
+        # Budget uses add_sales(); the streamed facts use add(). Each add() is a
+        # no-op on a None/empty payload, so feeding an absent agg is harmless.
+        self._accumulators = [
+            ("_budget_agg", budget_acc, "add_sales"),
+            ("_inventory_agg", inventory_acc, "add"),
+            ("_wishlists_agg", wishlists_acc, "add"),
+            ("_complaints_agg", complaints_acc, "add"),
+        ]
 
-    @staticmethod
-    def _chunk_tag(path_like: str) -> str:
-        b = os.path.basename(path_like)
-        i = b.find("chunk")
-        if i < 0:
-            return b
-        j = i + 5
-        while j < len(b) and b[j].isdigit():
-            j += 1
-        return b[i:j]
+    def record(self, r: ChunkResult, completed_units: int, total_units: int) -> None:
+        for agg_key, acc, add_name in self._accumulators:
+            if acc is not None:
+                getattr(acc, add_name)(r.aggs.get(agg_key))
 
-    def record(self, r: Any, completed_units: int, total_units: int) -> None:
-        # Extract streaming micro-aggregates (if present)
-        if self.budget_acc is not None and isinstance(r, Mapping):
-            self.budget_acc.add_sales(r.pop("_budget_agg", None))
+        produced: list[str] = []
+        # Tables first (stable, human-ordered), then any stray output keys.
+        ordered = [t for t in self.tables if t in r.outputs]
+        ordered += [t for t in r.outputs if t not in self.tables]
+        for table_name in ordered:
+            val = r.outputs[table_name]
+            self.created_by_table.setdefault(table_name, []).append(val)
+            if isinstance(val, str):
+                self.created_files.append(val)
+            produced.append(self._TABLE_SHORT.get(table_name, table_name))
 
-        if self.inventory_acc is not None and isinstance(r, Mapping):
-            self.inventory_acc.add(r.pop("_inventory_agg", None))
-
-        if self.wishlists_acc is not None and isinstance(r, Mapping):
-            self.wishlists_acc.add(r.pop("_wishlists_agg", None))
-
-        if self.complaints_acc is not None and isinstance(r, Mapping):
-            self.complaints_acc.add(r.pop("_complaints_agg", None))
-
-        if isinstance(r, str):
-            self.created_by_table.setdefault(TABLE_SALES, []).append(r)
-            self.created_files.append(r)
-            work(f"[{completed_units}/{total_units}] {self._chunk_tag(r)} -> sales")
-            return
-
-        if isinstance(r, Mapping):
-            ordered_keys = (
-                [t for t in self.tables if t in r]
-                + [k for k in r.keys() if k not in set(self.tables)]
-            )
-
-            tag = None
-            for k in ordered_keys:
-                v = r.get(k)
-                if isinstance(v, str):
-                    tag = self._chunk_tag(v)
-                    break
-
-            produced: list[str] = []
-            for table_name in ordered_keys:
-                val = r.get(table_name)
-                self.created_by_table.setdefault(table_name, []).append(val)
-                if isinstance(val, str):
-                    self.created_files.append(val)
-                    produced.append(self._TABLE_SHORT.get(table_name, table_name))
-                elif isinstance(val, Mapping) and "part" in val:
-                    produced.append(self._TABLE_SHORT.get(table_name, table_name))
-
-            if produced:
-                if tag is None:
-                    tag = "chunk"
-                work(f"[{completed_units}/{total_units}] {tag} -> " + ", ".join(produced))
-            return
-
-        info(f"[{completed_units}/{total_units}] Worker returned unsupported result type: {type(r).__name__}")
+        if produced:
+            tag = f"chunk{int(r.chunk_idx):04d}"
+            work(f"[{completed_units}/{total_units}] {tag} -> " + ", ".join(produced))
 
 
 def _merge_parquet_job(job: tuple) -> None:
@@ -294,36 +303,27 @@ def _assemble_output(
     authoritative Arrow schema; when present it becomes the Delta write
     contract instead of the schema read from the first part file.
     """
-    def _build_sales_manifest():
-        per_table = {}
-        for t in tables:
-            per_table[t] = TableOutputs(
-                table=t,
-                file_format=file_format,
-                chunks=list(collector.created_by_table.get(t, [])),
-                merged_path=(output_paths.merged_path(t) if file_format == "parquet" else None),
-                delta_table_dir=(output_paths.delta_table_dir(t) if file_format == "deltaparquet" else None),
-                delta_parts_dir=(output_paths.delta_parts_dir(t) if file_format == "deltaparquet" else None),
-            )
-        return SalesRunManifest(
-            sales_output=sales_output,
-            file_format=file_format,
-            out_folder=str(out_folder_p),
-            tables=per_table,
-            order_id_int64=bool(order_id_int64),
-        )
+    fmt = SalesOutputFormat.parse(file_format)
 
     def _make_result():
         return SalesFactResult(
             chunk_files=collector.created_files,
-            manifest=_build_sales_manifest(),
+            manifest=build_sales_manifest(
+                tables=tables,
+                output_paths=output_paths,
+                fmt=fmt,
+                sales_output=sales_output,
+                out_folder=out_folder_p,
+                created_by_table=collector.created_by_table,
+                order_id_int64=order_id_int64,
+            ),
             budget_acc=collector.budget_acc,
             inventory_acc=collector.inventory_acc,
             wishlists_acc=collector.wishlists_acc,
             complaints_acc=collector.complaints_acc,
         )
 
-    if file_format == "deltaparquet":
+    if fmt.is_delta:
         from .sales_writer import write_delta_partitioned
 
         missing_parts = []
@@ -354,7 +354,7 @@ def _assemble_output(
 
         return _make_result()
 
-    if file_format == "csv":
+    if fmt.is_csv:
         for t in tables:
             csv_dir = Path(output_paths.table_out_dir(t))
             spec = output_paths.spec(t)
@@ -365,7 +365,7 @@ def _assemble_output(
 
         return _make_result()
 
-    if file_format == "parquet":
+    if fmt.is_parquet:
         if merge_parquet:
             merge_jobs = []
             skipped = []

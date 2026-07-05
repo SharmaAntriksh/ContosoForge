@@ -718,22 +718,12 @@ def generate_sales_fact(
 
     def _empty_manifest() -> SalesRunManifest:
         """Build an empty manifest for early-exit paths."""
-        per_table: dict[str, TableOutputs] = {}
-        for t in tables:
-            per_table[t] = TableOutputs(
-                table=t,
-                file_format=file_format,
-                chunks=[],
-                merged_path=(output_paths.merged_path(t) if file_format == "parquet" else None),
-                delta_table_dir=(output_paths.delta_table_dir(t) if file_format == "deltaparquet" else None),
-                delta_parts_dir=(output_paths.delta_parts_dir(t) if file_format == "deltaparquet" else None),
-            )
-
-        return SalesRunManifest(
+        return build_sales_manifest(
+            tables=tables,
+            output_paths=output_paths,
+            fmt=SalesOutputFormat.parse(file_format),
             sales_output=sales_output,
-            file_format=file_format,
-            out_folder=str(out_folder_p),
-            tables=per_table,
+            out_folder=out_folder_p,
         )
 
     # ------------------------------------------------------------
@@ -943,10 +933,11 @@ def generate_sales_fact(
         order_id_int64=_order_id_int64,
         schema_by_table=sales_schema_by_table,
     )
+from .format_writer import SalesOutputFormat
 from .output_assembler import (
     ChunkResultCollector,
     SalesFactResult,
     SalesRunManifest,
-    TableOutputs,
     _assemble_output,
+    build_sales_manifest,
 )

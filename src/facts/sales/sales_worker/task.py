@@ -15,6 +15,7 @@ from ..sales_logic.columns import (
     _load_sales_channels,
     _sample_timekey_by_channel,
 )
+from ..chunk_result import ChunkResult
 from ..output_paths import TABLE_SALES, TABLE_SALES_ORDER_DETAIL, TABLE_SALES_ORDER_HEADER
 
 try:
@@ -554,30 +555,6 @@ def _maybe_budget_agg(detail_table: pa.Table) -> Optional[Dict[str, Any]]:
     )
 
 
-def _attach_aggs(
-    result: Any,
-    aggs: Dict[str, Any],
-    table_name_fallback: str = TABLE_SALES,
-) -> Any:
-    """Attach micro-aggregate dicts to a worker result.
-
-    *aggs* maps result keys (e.g. ``"_budget_agg"``) to their payloads.
-    Normalizes bare str results into a dict so the main process can
-    pop agg keys without breaking existing result handling.
-    """
-    if not aggs:
-        return result
-
-    if isinstance(result, str):
-        result = {table_name_fallback: result}
-
-    if not isinstance(result, dict):
-        return result
-
-    result.update(aggs)
-    return result
-
-
 def _worker_task(args):
     tasks, single = normalize_tasks(args)
     results = []
@@ -689,15 +666,11 @@ def _worker_task(args):
                 detail_table, chunk_seed=chunk_seed, mode=mode, returns_cfg=returns_cfg)
             sales_out = _project_for_table(TABLE_SALES, sales_table)
 
-            if returns_table is None:
-                result = _write_table(TABLE_SALES, idx_i, sales_out)
-                results.append(_attach_aggs(result, chunk_aggs, TABLE_SALES))
-                continue
-
             out: Dict[str, Any] = {TABLE_SALES: _write_table(TABLE_SALES, idx_i, sales_out)}
-            returns_out = _project_for_table(TABLE_SALES_RETURN, returns_table)  # type: ignore[arg-type]
-            out[TABLE_SALES_RETURN] = _write_table(TABLE_SALES_RETURN, idx_i, returns_out)  # type: ignore[arg-type]
-            results.append(_attach_aggs(out, chunk_aggs))
+            if returns_table is not None:
+                returns_out = _project_for_table(TABLE_SALES_RETURN, returns_table)  # type: ignore[arg-type]
+                out[TABLE_SALES_RETURN] = _write_table(TABLE_SALES_RETURN, idx_i, returns_out)  # type: ignore[arg-type]
+            results.append(ChunkResult(chunk_idx=idx_i, outputs=out, aggs=chunk_aggs))
             continue
 
         out: Dict[str, Any] = {}
@@ -725,6 +698,6 @@ def _worker_task(args):
                 TABLE_SALES_RETURN, idx_i, _project_for_table(TABLE_SALES_RETURN, returns_table)  # type: ignore[arg-type]
             )
 
-        results.append(_attach_aggs(out, chunk_aggs))
+        results.append(ChunkResult(chunk_idx=idx_i, outputs=out, aggs=chunk_aggs))
 
     return results[0] if single else results

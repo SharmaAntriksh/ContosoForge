@@ -4,8 +4,8 @@ import os
 from typing import Any, Callable, Iterable, Optional, Sequence, Set, Union
 
 from src.exceptions import SalesError
-from .utils import _arrow, _ensure_dir_for_file, done, info, skip, warn
-from .projection import _project_table_to_schema, project_table_to_schema
+from .utils import _arrow, _ensure_dir_for_file, atomic_output, done, info, skip, warn
+from .projection import project_table_to_schema
 from .encoding import _schema_dict_cols, _validate_required, required_pricing_cols_for_table
 
 PathLike = Union[str, os.PathLike]
@@ -331,66 +331,56 @@ def _merge_parquet_files_common(
     if log:
         info(f"{log_prefix}Merging {len(files)} chunks: {os.path.basename(merged_file_abs)}".strip())
 
-    # Write to a temp sibling and atomically rename on success, so a mid-merge
-    # crash never leaves a truncated-but-plausible file at the final path (which
-    # the path-probing packager would happily ship). Mirrors the tmp + os.replace
-    # pattern optimize_parquet already uses.
-    tmp_path = merged_file_abs + ".tmp"
-    schema, writer = _prepare_schema_and_writer(
-        files, tmp_path,
-        schema_strategy=schema_strategy,
-        canonical_schema=canonical_schema,
-        expected_cols=expected_cols,
-        validate_schema_fn=validate_schema_fn,
-        use_dictionary=use_dictionary,
-        dict_exclude=dict_exclude,
-        compression=compression,
-        compression_level=compression_level,
-        write_statistics=write_statistics,
-        pa=pa, pq=pq,
-    )
+    # Write to a temp sibling and atomically rename on success (via
+    # atomic_output), so a mid-merge crash never leaves a truncated-but-plausible
+    # file at the final path (which the path-probing packager would happily ship).
+    with atomic_output(merged_file_abs, suffix=".tmp") as tmp_path:
+        schema, writer = _prepare_schema_and_writer(
+            files, tmp_path,
+            schema_strategy=schema_strategy,
+            canonical_schema=canonical_schema,
+            expected_cols=expected_cols,
+            validate_schema_fn=validate_schema_fn,
+            use_dictionary=use_dictionary,
+            dict_exclude=dict_exclude,
+            compression=compression,
+            compression_level=compression_level,
+            write_statistics=write_statistics,
+            pa=pa, pq=pq,
+        )
 
-    expected_set = frozenset(expected_cols) if expected_cols else None
+        expected_set = frozenset(expected_cols) if expected_cols else None
 
-    ok = False
-    try:
-        for path in files:
-            src, reader = _pm_open_parquet(path, pa, pq)
-            try:
-                chunk_cols = set(reader.schema_arrow.names)
-
-                _validate_chunk_columns(
-                    chunk_cols, expected_set,
-                    strict_expected=strict_expected,
-                    reject_extra_cols=reject_extra_cols,
-                    path=path,
-                )
-
-                _write_chunk_row_groups(
-                    writer, reader, schema,
-                    chunk_cols=chunk_cols,
-                    expected_cols=expected_cols,
-                    required_cols=required_cols,
-                    cast_safe=cast_safe,
-                    pa=pa, pc=pc,
-                )
-            finally:
+        try:
+            for path in files:
+                src, reader = _pm_open_parquet(path, pa, pq)
                 try:
-                    src.close()
-                except OSError:
-                    pass
-        ok = True
-    finally:
-        writer.close()
-        # A failed merge must not leave a partial temp behind, and must never
-        # touch the final path (the previous good file, if any, survives).
-        if not ok and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+                    chunk_cols = set(reader.schema_arrow.names)
 
-    os.replace(tmp_path, merged_file_abs)
+                    _validate_chunk_columns(
+                        chunk_cols, expected_set,
+                        strict_expected=strict_expected,
+                        reject_extra_cols=reject_extra_cols,
+                        path=path,
+                    )
+
+                    _write_chunk_row_groups(
+                        writer, reader, schema,
+                        chunk_cols=chunk_cols,
+                        expected_cols=expected_cols,
+                        required_cols=required_cols,
+                        cast_safe=cast_safe,
+                        pa=pa, pc=pc,
+                    )
+                finally:
+                    try:
+                        src.close()
+                    except OSError:
+                        pass
+        finally:
+            # Close the writer before the block exits: on Windows an open file
+            # can be neither renamed (success) nor removed (failure cleanup).
+            writer.close()
 
     if delete_after:
         for path in files:
@@ -428,26 +418,6 @@ def _expected_cols_for_table(table_name: str | None) -> tuple[str, ...] | None:
 
     norm = table_name.replace("_", "").replace(" ", "").casefold()
     return _EXPECTED_COLS_CACHE.get(norm)
-
-
-def _read_row_group_projected(reader, rg_index: int, schema, *, table_name: str | None):
-    """Back-compat symbol: sales code may import this.
-
-    Sales-specific required pricing columns enforcement + projection to canonical schema.
-    """
-    required = required_pricing_cols_for_table(table_name)
-
-    available = set(reader.schema_arrow.names)
-    missing_required = required - available
-    if missing_required:
-        raise SalesError(
-            f"Parquet chunk is missing required columns {sorted(missing_required)}; "
-            f"file={getattr(reader, 'path', '')}"
-        )
-
-    cols_to_read = [c for c in schema.names if c in available]
-    table = reader.read_row_group(rg_index, columns=cols_to_read)
-    return _project_table_to_schema(table, schema)
 
 
 def merge_parquet_files(
@@ -625,39 +595,35 @@ def optimize_parquet(
         and f.name not in DICT_EXCLUDE
     ]
 
-    tmp_path = file_path + ".optimize_tmp"
-    writer = pq.ParquetWriter(
-        tmp_path,
-        schema,
-        compression=compression,
-        use_dictionary=dict_cols if dict_cols else False,
-        write_statistics=True,
-    )
+    with atomic_output(file_path, suffix=".optimize_tmp") as tmp_path:
+        writer = pq.ParquetWriter(
+            tmp_path,
+            schema,
+            compression=compression,
+            use_dictionary=dict_cols if dict_cols else False,
+            write_statistics=True,
+        )
 
-    ok = False
-    try:
-        for start in range(0, n_rg, batch_row_groups):
-            end = min(start + batch_row_groups, n_rg)
-            tables = [pf.read_row_group(i) for i in range(start, end)]
-            batch = pa.concat_tables(tables)
-            del tables
-
-            indices = pc.sort_indices(batch, sort_keys=sort_keys)
-            batch = batch.take(indices)
-            del indices
-
-            writer.write_table(batch, row_group_size=row_group_size)
-            del batch
-        ok = True
-    finally:
-        writer.close()
         try:
-            pf.close() if hasattr(pf, "close") else None
-        except OSError:
-            pass
-        if not ok and os.path.exists(tmp_path):
-            os.remove(tmp_path)
+            for start in range(0, n_rg, batch_row_groups):
+                end = min(start + batch_row_groups, n_rg)
+                tables = [pf.read_row_group(i) for i in range(start, end)]
+                batch = pa.concat_tables(tables)
+                del tables
 
-    # Replace original with optimized file
-    os.replace(tmp_path, file_path)
+                indices = pc.sort_indices(batch, sort_keys=sort_keys)
+                batch = batch.take(indices)
+                del indices
+
+                writer.write_table(batch, row_group_size=row_group_size)
+                del batch
+        finally:
+            # Close both handles before the block exits so the atomic rename /
+            # cleanup can touch the temp file (Windows-safe ordering).
+            writer.close()
+            try:
+                pf.close() if hasattr(pf, "close") else None
+            except OSError:
+                pass
+
     return file_path

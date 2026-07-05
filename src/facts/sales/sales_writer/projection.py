@@ -68,12 +68,3 @@ def project_table_to_schema(
         arrays.append(col)
 
     return pa.Table.from_arrays(arrays, schema=schema)
-
-
-def _project_table_to_schema(table: Any, schema: Any) -> Any:
-    """Backward-compatible alias (some callers expect the underscore name).
-
-    Uses cast_safe=True so a narrowing cast that overflows raises instead of
-    silently truncating (WRITER-1) — matching the live merge path.
-    """
-    return project_table_to_schema(table, schema, cast_safe=True, on_cast_error="raise")

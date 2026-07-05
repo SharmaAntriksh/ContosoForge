@@ -383,20 +383,3 @@ def write_delta_partitioned(
         sort_row_limit=sort_row_limit,
         cleanup_parts_folder=(parts is None),
     )
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat aliases for symbols that were refactored away.
-# ---------------------------------------------------------------------------
-
-def _delta_import_pyarrow():
-    """Deprecated: use ``from .utils import _arrow`` instead."""
-    pa, _, pq = _arrow()
-    return pa, pq
-
-
-def _delta_project_table_to_schema_best_effort(table, canonical_schema):
-    """Deprecated: use ``project_table_to_schema(..., on_cast_error='warn')``."""
-    return project_table_to_schema(
-        table, canonical_schema, cast_safe=False, on_cast_error="warn"
-    )
