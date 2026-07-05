@@ -34,20 +34,18 @@ from .weights import cdf_from_probs, normalize_prob, weighted_pick_indices
 
 
 def _drop_orphan_employee_key_rows(cols: dict, n_rows: int, m_offset: int) -> int:
-    """Handle whole-order ``EmployeeKey == -1`` lines; return the new row count.
+    """Drop whole-order ``EmployeeKey == -1`` lines; return the new row count.
 
     A -1 means the sampled (store, month) had no salesperson — only possible on a
-    dimension coverage gap. The coverage policy decides what a gap here means:
-
-    - ``abort`` / ``repair`` guarantee full coverage upstream, so a -1 reaching
-      row assembly is a **precondition violation** — raise ``SalesError`` loudly
-      rather than silently shorten the month below its plan target
-      (``sum n_lines == R[m]``).
-    - ``skip`` accepts uncovered store-months, so -1 lines are expected: drop the
-      whole orders (salesperson is per-order, broadcast to lines) to keep FK /
-      order-line integrity, warning that the month is now short of plan.
-
-    Normal (fully covered) configs never hit a -1 and this is a no-op.
+    dimension coverage gap that the coordinator's coverage pre-flight has already
+    adjudicated: it aborts before generation on avoidable (fully-open) gaps under
+    ``sales.coverage_policy: abort``, repairs what it can under ``repair``, and
+    otherwise proceeds, documenting that residual boundary-month / unrepairable
+    gaps are dropped here. So a -1 that reaches row assembly is always an accepted
+    residual, not a precondition violation — drop the whole orders (salesperson is
+    per-order, broadcast to lines) to keep FK / order-line integrity, and warn
+    loudly that the month is now short of its plan target (``sum n_lines == R[m]``).
+    Normal, fully-covered configs never hit a -1 and this is a no-op.
     """
     ek = cols.get("EmployeeKey")
     if ek is None or np.isscalar(ek):
@@ -60,20 +58,11 @@ def _drop_orphan_employee_key_rows(cols: dict, n_rows: int, m_offset: int) -> in
     new_n = int(keep.sum())
     dropped = int(ek_arr.size - new_n)
 
-    policy = str(getattr(State, "coverage_policy", "abort") or "abort").lower()
-    if policy != "skip":
-        raise SalesError(
-            f"chunk_builder hit {dropped} EmployeeKey=-1 line(s) at month offset "
-            f"{m_offset} (of {n_rows} rows): a salesperson-coverage gap reached row "
-            f"assembly under coverage_policy={policy!r}, which must guarantee full "
-            "coverage. Fix the employee_store_assignments bridge (or set "
-            "sales.coverage_policy: skip to accept the missing sales)."
-        )
-
     warn(
         f"chunk_builder dropped {dropped} EmployeeKey=-1 line(s) at month offset "
-        f"{m_offset} (of {n_rows} rows) under coverage_policy=skip: this month is "
-        "now short of its plan target because the store-month had no salesperson."
+        f"{m_offset} (of {n_rows} rows): the store-month had no salesperson, so this "
+        "month is now short of its plan target. The coverage pre-flight gates "
+        "avoidable gaps before generation (sales.coverage_policy)."
     )
     for cname, cval in list(cols.items()):
         if isinstance(cval, np.ndarray) and cval.shape[:1] == (n_rows,):

@@ -218,7 +218,6 @@ def _build_worker_cfg(
         validate_header_invariants=_bool_or(
             getattr(sales_cfg, "validate_header_invariants", None), False
         ),
-        coverage_policy=str(getattr(sales_cfg, "coverage_policy", "abort") or "abort").lower(),
 
         delta_output_folder=delta_output_folder,
         skip_order_cols=bool(skip_order_cols),

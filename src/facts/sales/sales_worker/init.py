@@ -1073,7 +1073,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "sales_output": sales_output,
             "skip_order_cols_requested": bool(skip_order_cols_requested),
             "skip_order_cols": bool(skip_order_cols),
-            "coverage_policy": str(worker_cfg.get("coverage_policy", "abort") or "abort").lower(),
             "delta_output_folder": os.path.normpath(delta_output_folder) if delta_output_folder else None,
             "no_discount_key": no_discount_key,
             "partition_enabled": bool(partition_enabled),

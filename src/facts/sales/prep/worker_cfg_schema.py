@@ -108,7 +108,6 @@ class SalesWorkerCfg(TypedDict, total=False):
     skip_order_cols: Required[bool]
     skip_order_cols_requested: bool
     validate_header_invariants: bool
-    coverage_policy: str   # abort|skip|repair — gates the EmployeeKey=-1 handling
 
     # -- Partitioning --------------------------------------------------------
     partition_enabled: bool
