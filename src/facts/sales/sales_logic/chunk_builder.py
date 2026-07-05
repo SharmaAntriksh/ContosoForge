@@ -28,6 +28,9 @@ from .core import (
 )
 from .core.basket import apply_basket_theme, reset_basket_cache
 from .columns import build_extra_columns, SALES_CHANNEL_CORE_KEYS
+from .eligibility import EligibilityWindow
+from .plan_math import chunk_month_band, month_offsets_int
+from .weights import cdf_from_probs, normalize_prob, weighted_pick_indices
 
 
 def _drop_orphan_employee_key_rows(cols: dict, n_rows: int, m_offset: int) -> int:
@@ -210,49 +213,11 @@ def _eligible_idx_by_month(T, is_active, start_month, end_month_norm) -> list:
     if cached is not None:
         return cached
 
-    is_active = np.asarray(is_active, dtype="int64", order="C")
-    start_month = np.asarray(start_month, dtype="int64", order="C")
-    end_month_norm = np.asarray(end_month_norm, dtype="int64", order="C")
-    active = is_active == 1
-    idx_by_month: list = []
-    for m in range(T):
-        mask = active & (start_month <= m) & ((end_month_norm < 0) | (m <= end_month_norm))
-        idx_by_month.append(np.flatnonzero(mask))
+    idx_by_month = EligibilityWindow.from_lifecycle(
+        is_active, start_month, end_month_norm
+    ).indices_by_month(T)
     _worker_eligible_cache[T] = idx_by_month
     return idx_by_month
-
-
-def _chunk_month_band(R_m: int, O_m: int, chunk_idx: int, total_chunks: int) -> tuple:
-    """This chunk's slice of month ``m`` in the global order/line index space.
-
-    Returns ``(order_start, n_orders, n_lines)`` (index-space sharding):
-
-    - Orders are floor-sliced from the global ``O_m`` so the chunks tile
-      ``[0, O_m)`` contiguously with no gaps (``sum n_orders == O_m``). This
-      guarantees every order index in ``[0, distinct_pool_size)`` is materialized
-      by exactly one chunk, so the per-month distinct-customer set is exactly the
-      pool regardless of ``chunk_size``.
-    - Lines start at one-per-order and distribute the ``E = R_m - O_m`` extra
-      lines by order-prefix, so ``n_lines >= n_orders`` (build_orders needs >= 1
-      line/order) and ``sum n_lines == R_m`` exactly (preserves total_rows).
-
-    Both allocations are pure functions of ``(chunk_idx, total_chunks)`` — no gaps,
-    no clamps, sums exact in both dimensions.
-    """
-    C = int(total_chunks)
-    c = int(chunk_idx)
-    O = int(O_m)
-    R = int(R_m)
-    if C <= 0 or O <= 0 or R <= 0:
-        return 0, 0, 0
-    lo = (c * O) // C
-    hi = ((c + 1) * O) // C
-    n_orders = hi - lo
-    if n_orders <= 0:
-        return lo, 0, 0
-    E = R - O                    # extra lines beyond one-per-order (>= 0 since O <= R)
-    extra = (E * hi) // O - (E * lo) // O
-    return lo, n_orders, n_orders + extra
 
 
 def _get_month_pool(
@@ -303,22 +268,13 @@ def _get_brand_flat_cache(brand_to_rows: list, B: int) -> tuple:
     return flat_idx, offsets
 
 
-def _normalize_prob(p: np.ndarray) -> np.ndarray | None:
-    p = np.asarray(p, dtype="float64")
-    p = np.where(np.isfinite(p) & (p > 0), p, 0.0)
-    s = float(p.sum())
-    if s <= 1e-12:
-        return None
-    return p / s
-
-
 def _get_brand_probs(m_offset: int, B: int) -> np.ndarray | None:
     """Return normalized brand probability vector for month *m_offset*, or None."""
     bp = getattr(State, "brand_prob_by_month", None)
     if bp is not None:
         bp = np.asarray(bp, dtype="float64")
         cand = bp[int(m_offset) % bp.shape[0]] if bp.ndim > 1 else bp
-        probs = _normalize_prob(cand)
+        probs = normalize_prob(cand, on_zero="none")
         if probs is not None and int(probs.size) == B:
             return probs
     return None
@@ -685,7 +641,7 @@ def _build_month_slices(date_pool: np.ndarray):
     if date_pool.size == 0:
         return []
 
-    months_int = date_pool.astype("datetime64[M]").astype("int64")
+    months_int = month_offsets_int(date_pool)
     min_m = int(months_int.min())
     max_m = int(months_int.max())
     T = int(max_m - min_m + 1)
@@ -719,59 +675,11 @@ def _eligible_counts_fast(
     """
     Compute eligible customer counts per month in O(N + T) using a delta/cumsum approach.
 
-    Eligibility rule matches _eligible_customer_mask_for_month:
-      active == 1 AND start_month <= m AND (end_month == -1 OR end_month >= m)
+    Thin view over :class:`EligibilityWindow` (the single-source predicate).
     """
-    if T <= 0:
-        return np.zeros(0, dtype="float64")
-
-    is_active_in_sales = np.asarray(is_active_in_sales, dtype=np.int32, order="C")
-    start_month = np.asarray(start_month, dtype="int64", order="C")
-    end_month_norm = np.asarray(end_month_norm, dtype="int64", order="C")
-
-    if start_month.size == 0:
-        return np.zeros(T, dtype="float64")
-
-    active = is_active_in_sales == 1
-    if not active.any():
-        return np.zeros(T, dtype="float64")
-
-    s = start_month[active]
-    e = end_month_norm[active]
-
-    # Warm-start customers (start_month < 0) joined before the window, so they are
-    # eligible from month 0 — clamp to 0 to match the chunk's eligibility predicate
-    # (_eligible_idx_by_month uses ``start_month <= m``). A no-op on the default path
-    # (starts already clamped to >= 0), it keeps the coordinator's global plan and
-    # the chunk's month pool computed against the SAME eligible base. Then drop
-    # starts at/after the window (never eligible in [0, T-1]).
-    s = np.where(s < 0, np.int64(0), s)
-    valid_start = s < T
-    s = s[valid_start]
-    e = e[valid_start]
-    if s.size == 0:
-        return np.zeros(T, dtype="float64")
-
-    # discard invalid ranges where end < start (and end != -1)
-    valid_range = (e < 0) | (e >= s)
-    s = s[valid_range]
-    e = e[valid_range]
-    if s.size == 0:
-        return np.zeros(T, dtype="float64")
-
-    delta = np.zeros(T + 1, dtype="int64")
-    np.add.at(delta, s, 1)
-
-    finite = e >= 0
-    if finite.any():
-        endp1 = e[finite] + 1
-        endp1 = endp1[(endp1 > 0) & (endp1 < T)]
-        if endp1.size:
-            np.add.at(delta, endp1, -1)
-
-    counts = np.cumsum(delta[:-1])
-    counts = np.maximum(counts, 0)
-    return counts.astype("int64", copy=False)
+    return EligibilityWindow.from_lifecycle(
+        is_active_in_sales, start_month, end_month_norm
+    ).counts(T)
 
 
 def _to_pa_array(name: str, data: object, n_rows: int, schema_types: dict) -> pa.array:
@@ -1005,13 +913,7 @@ def _weighted_pick(rng, pool, store_weight, k):
     if pool.size == 0:
         return np.empty(0, dtype=np.int32)
     w = store_weight[np.clip(pool, 0, len(store_weight) - 1)].astype(np.float64)
-    total = w.sum()
-    if not np.isfinite(total) or total <= 0:
-        idx = rng.integers(0, pool.size, size=k)
-    else:
-        cdf = np.cumsum(w) / total
-        cdf[-1] = 1.0  # guard fp drift (CLAUDE.md #16)
-        idx = np.clip(np.searchsorted(cdf, rng.random(k), side="right"), 0, pool.size - 1)
+    idx = weighted_pick_indices(rng, w, k, pool.size)
     return pool[idx].astype(np.int32)
 
 
@@ -1176,9 +1078,7 @@ def _apply_store_channel_correlation(
         if _nc < _max_n_ch:
             _ch_keys_2d[_sk_i, _nc:] = _ck[-1]
         if _cp is not None and len(_cp) == _nc:
-            _cdf = np.cumsum(_cp)
-            _cdf[-1] = 1.0
-            _ch_cdf_2d[_sk_i, :_nc] = _cdf
+            _ch_cdf_2d[_sk_i, :_nc] = cdf_from_probs(_cp)
         else:
             _ch_cdf_2d[_sk_i, :_nc] = np.arange(1, _nc + 1, dtype=np.float64) / _nc
         if _nc < _max_n_ch:
@@ -1435,7 +1335,7 @@ def build_chunk_table(
         _ckey_to_start_month = np.full(_max_ckey + 1, -1, dtype=np.int64)
         _ckey_to_start_month[customer_keys] = start_month
 
-        _nc_min_month = int(date_pool.astype("datetime64[M]").astype("int64").min())
+        _nc_min_month = int(month_offsets_int(date_pool).min())
 
         nc_idx = np.isin(promo_keys_all, list(nc_promo_set))
         _nc_keys = promo_keys_all[nc_idx]
@@ -1477,7 +1377,7 @@ def build_chunk_table(
     # GLOBAL PER-MONTH PLAN — rows/month, orders/month, and the
     # distinct-customer target are computed ONCE in the coordinator against the
     # GLOBAL month totals and broadcast read-only. This chunk slices a contiguous
-    # band of every month's order-id space (see _chunk_month_band), so the
+    # band of every month's order-id space (see chunk_month_band), so the
     # per-month row curve and distinct-customer curve are independent of
     # chunk_size / worker count (review Finding #4/#14). The per-chunk
     # build_rows_per_month + inline distinct target that made both chunk-size
@@ -1560,7 +1460,7 @@ def build_chunk_table(
         # with no gaps (so the distinct pool is always fully covered); m_lines is
         # the exact line target (sum over chunks == R_m).
         # --------------------------------------------------------
-        order_start, n_orders_band, m_lines = _chunk_month_band(
+        order_start, n_orders_band, m_lines = chunk_month_band(
             R_m, O_m, chunk_idx, total_chunks)
         if n_orders_band <= 0 or m_lines <= 0:
             continue

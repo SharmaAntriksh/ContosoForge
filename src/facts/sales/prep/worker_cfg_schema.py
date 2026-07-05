@@ -178,8 +178,6 @@ class SalesWorkerCfg(TypedDict, total=False):
     # -- Pre-built derived structures (post-construction, SHM descriptors) ---
     _brand_flat_idx: Any
     _brand_flat_offsets: Any
-    _prebuilt_brand_to_row_idx: Any
-    _prebuilt_store_to_product_rows: Any
     _prebuilt_salesperson_effective_by_store: Optional[dict]
     _prebuilt_salesperson_global_pool: Optional[np.ndarray]
     _prebuilt_brand_prob_by_month: Any

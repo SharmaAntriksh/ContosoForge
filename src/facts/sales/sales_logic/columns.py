@@ -8,6 +8,8 @@ import pyarrow.parquet as pq
 
 from src.defaults import SALES_CHANNEL_CORE_KEYS
 
+from .weights import normalize_prob
+
 
 # ------------------------------------------------------------
 # Profile codes (internal only)
@@ -71,15 +73,6 @@ ASSISTED_HOUR_W = np.array(
 )
 
 
-def _normalize_prob(w: np.ndarray) -> np.ndarray:
-    w = np.asarray(w, dtype=np.float64)
-    w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
-    s = float(w.sum())
-    if s <= 1e-12:
-        return np.full(w.shape[0], 1.0 / max(1, w.shape[0]), dtype=np.float64)
-    return w / s
-
-
 def _dims_parquet_folder(State: Any) -> Optional[Path]:
     # Common names across your codebase
     for attr in ("parquet_folder_p", "parquet_folder", "dimensions_parquet_folder", "dims_parquet_folder"):
@@ -124,7 +117,7 @@ def _build_channel_hour_weights(
         mask[:open_hour] = False
         mask[close_hour:] = False
         base *= mask
-    return _normalize_prob(base)
+    return normalize_prob(base, on_zero="uniform")
 
 
 # Worker-lifetime cache of the parsed sales-channel sampling data (keys, probs,
@@ -191,7 +184,7 @@ def _load_sales_channels(State: Any) -> Optional[Tuple[np.ndarray, np.ndarray, n
 
     # Per-channel hour weight LUT: channel_hour_lut[key] -> 24-element array
     maxk = int(keys.max())
-    digital_w = _normalize_prob(DIGITAL_HOUR_W)
+    digital_w = normalize_prob(DIGITAL_HOUR_W, on_zero="uniform")
     channel_hour_lut = np.tile(digital_w, (maxk + 1, 1))  # default: digital
 
     for i, (k, g) in enumerate(zip(keys.astype(np.int32), grp)):
@@ -209,7 +202,7 @@ def _sample_hour_weighted_minute(rng: np.random.Generator, size: int, hour_w: np
     if size <= 0:
         return np.empty(0, dtype=np.int32)
 
-    w = _normalize_prob(hour_w)
+    w = normalize_prob(hour_w, on_zero="uniform")
     hours = rng.choice(24, size=size, p=w).astype(np.int32)
     mins = rng.integers(0, 60, size=size, dtype=np.int32)
     return (hours * 60 + mins).astype(np.int32, copy=False)
@@ -233,7 +226,7 @@ def _sample_timekey_by_channel(
         if ck_int < channel_hour_lut.shape[0]:
             hour_w = channel_hour_lut[ck_int]
         else:
-            hour_w = _normalize_prob(DIGITAL_HOUR_W)
+            hour_w = normalize_prob(DIGITAL_HOUR_W, on_zero="uniform")
         out[mask] = _sample_hour_weighted_minute(rng, n, hour_w)
 
     return out

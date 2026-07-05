@@ -156,29 +156,6 @@ def _expand_store_assortment_from_matrix(
     )
 
 
-# Legacy wrapper: used by the fallback path in init_sales_worker when
-# neither the compact subcat matrix nor the pre-built jagged array is available.
-def _build_store_assortment(
-    store_keys: np.ndarray,
-    store_type_arr: np.ndarray,
-    product_np: np.ndarray,
-    product_subcat_key: np.ndarray,
-    coverage_cfg: dict,
-    seed: int = 42,
-) -> list:
-    """Build per-store product row index arrays (backward-compatible wrapper).
-
-    For small product counts, materialises directly.  For large catalogs,
-    prefer :func:`_build_store_subcat_matrix` + per-worker expansion.
-    """
-    unique_subcats, matrix = _build_store_subcat_matrix(
-        store_keys, store_type_arr, product_subcat_key, coverage_cfg, seed,
-    )
-    return _expand_store_assortment_from_matrix(
-        store_keys, unique_subcats, matrix, product_subcat_key, len(product_np),
-    )
-
-
 # ---------------------------------------------------------------------
 # Small helpers (kept close to monolith behavior for compatibility)
 # ---------------------------------------------------------------------
@@ -621,7 +598,16 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         salesperson_perf_spread = float_or(worker_cfg.get("salesperson_perf_spread"), 0.0)
         salesperson_perf_seed = int_or(worker_cfg.get("salesperson_perf_seed"), 0)
         employee_assign_role = worker_cfg.get("employee_assign_role")
-        salesperson_roles = worker_cfg.get("salesperson_roles", ["Sales Associate"])
+        # The eligible-role set is resolved once in the coordinator (single
+        # source: resolve_salesperson_roles) and broadcast. The worker enforces
+        # exactly that set rather than carrying its own default, so it can never
+        # validate a different condition than the coverage preflight.
+        salesperson_roles = worker_cfg.get("salesperson_roles")
+        if not salesperson_roles:
+            raise ConfigError(
+                "worker_cfg missing 'salesperson_roles'; the coordinator must "
+                "broadcast the resolved role set (resolve_salesperson_roles)."
+            )
 
         op = worker_cfg["output_paths"]
         if not isinstance(op, Mapping):
@@ -689,8 +675,11 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
 
     product_np = np.asarray(product_np)
 
-    # Brand buckets: reconstruct from pre-computed flat index + offsets
-    # (shared memory, no per-worker argsort).
+    # Brand buckets come from the coordinator's pre-computed flat index +
+    # offsets (shared memory, no per-worker argsort). The coordinator publishes
+    # them whenever product_brand_key is present (_prebuild_shared_structures),
+    # so the worker only resolves — it never rebuilds. Absent flat index means
+    # no brand key, hence no buckets.
     _brand_flat_idx = worker_cfg.get("_brand_flat_idx")
     _brand_flat_offsets = worker_cfg.get("_brand_flat_offsets")
     if _brand_flat_idx is not None and _brand_flat_offsets is not None:
@@ -706,17 +695,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
                 brand_to_row_idx[b] = np.empty(0, dtype=np.int32)
         if product_brand_key is not None:
             product_brand_key = as_int32(product_brand_key)
-    elif worker_cfg.get("_prebuilt_brand_to_row_idx") is not None:
-        # Legacy path: pre-built jagged shared memory
-        from src.utils.shared_arrays import resolve_jagged
-        brand_to_row_idx = resolve_jagged(worker_cfg["_prebuilt_brand_to_row_idx"])
-        if product_brand_key is not None:
-            product_brand_key = as_int32(product_brand_key)
-    elif product_brand_key is not None:
-        product_brand_key = as_int32(product_brand_key)
-        if product_brand_key.shape[0] != product_np.shape[0]:
-            raise SalesError("product_brand_key must align with product_np row count")
-        brand_to_row_idx = _build_buckets_from_brand_key(product_brand_key)
     else:
         brand_to_row_idx = None
 
@@ -805,7 +783,10 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     # ------------------------------------------------------------
     store_to_product_rows = None
 
-    # New compact path: expand subcat matrix to row indices per-worker
+    # The coordinator expands the compact subcat matrix whenever assortment is
+    # enabled with a subcategory key and store types (_prebuild_shared_structures
+    # publishes it under exactly that condition), so the worker only resolves and
+    # expands — it never rebuilds from scratch. Absent matrix means no assortment.
     _assort_matrix_desc = worker_cfg.get("_assortment_subcat_matrix")
     _assort_subcats_desc = worker_cfg.get("_assortment_unique_subcats")
     if _assort_matrix_desc is not None and _assort_subcats_desc is not None:
@@ -821,36 +802,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
                 product_subcat_key=product_subcat_key_arr,
                 n_products=len(product_np),
             )
-
-    # Legacy fallback: pre-built jagged shared memory (backward compat)
-    if store_to_product_rows is None:
-        _prebuilt_assortment = worker_cfg.get("_prebuilt_store_to_product_rows")
-        if _prebuilt_assortment is not None:
-            from src.utils.shared_arrays import resolve_jagged
-            store_to_product_rows = resolve_jagged(_prebuilt_assortment)
-
-    # Final fallback: build from scratch (no shared memory at all)
-    if store_to_product_rows is None:
-        assortment_cfg = worker_cfg.get("assortment")
-        if isinstance(assortment_cfg, Mapping) and assortment_cfg.get("enabled"):
-            product_subcat_key = worker_cfg.get("product_subcat_key")
-            store_type_map = worker_cfg.get("store_type_map")
-            if product_subcat_key is not None and store_type_map is not None:
-                product_subcat_key = np.asarray(product_subcat_key, dtype=np.int32)
-                store_type_arr = np.array(
-                    [str(store_type_map.get(int(sk), "Supermarket")) for sk in store_keys],
-                    dtype=object,
-                )
-                coverage = assortment_cfg.get("coverage", _DEFAULT_ASSORTMENT_COVERAGE)
-                assort_seed = int(assortment_cfg.get("seed", worker_cfg.get("seed_master", 42)))
-                store_to_product_rows = _build_store_assortment(
-                    store_keys=store_keys,
-                    store_type_arr=store_type_arr,
-                    product_np=product_np,
-                    product_subcat_key=product_subcat_key,
-                    coverage_cfg=coverage,
-                    seed=assort_seed,
-                )
 
     # ------------------------------------------------------------
     # Filter employee assignment rows to sales-eligible roles

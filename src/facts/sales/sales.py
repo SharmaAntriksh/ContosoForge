@@ -24,6 +24,11 @@ from .sales_logic.core import (
 )
 from .sales_logic.core.allocation import _stable_seed
 from .sales_logic.chunk_builder import _eligible_counts_fast
+from .sales_logic.plan_math import (
+    DISCOVERY_SLOTS_AVG_LINES,
+    month_offsets_int,
+    plan_avg_lines,
+)
 from .sales_worker import PoolRunSpec, iter_imap_unordered, _worker_task, init_sales_worker
 from .sales_worker.schemas import build_worker_schemas_from_cfg
 from .output_paths import (
@@ -578,8 +583,7 @@ def generate_sales_fact(
             # Customer sampling operates at order granularity (avg ~2
             # lines per order), so the effective number of customer
             # slots is roughly total_rows / avg_lines_per_order.
-            avg_lines_per_order = 2.0
-            effective_slots = total_rows / avg_lines_per_order
+            effective_slots = total_rows / DISCOVERY_SLOTS_AVG_LINES
             needed_share = (undiscovered * headroom) / effective_slots
             needed_share = float(np.clip(needed_share, 0.0, 0.50))
 
@@ -587,7 +591,7 @@ def generate_sales_fact(
             # With T months and avg_eligible customers, each month must discover
             # undiscovered / T customers, i.e. (undiscovered / T) / avg_eligible
             # of the eligible pool.
-            months_int = date_pool.astype("datetime64[M]").astype("int64")
+            months_int = month_offsets_int(date_pool)
             T_est = max(1, int(months_int.max() - months_int.min() + 1))
             avg_eligible = max(1, total_active // 2)
             needed_frac = (undiscovered * headroom) / (avg_eligible * T_est)
@@ -618,7 +622,7 @@ def generate_sales_fact(
     # ONCE here and broadcast read-only, so the sales fact is independent of
     # worker count / chunk order (replaces the old mutable seen_customers set).
     # ------------------------------------------------------------
-    _dp_months = np.asarray(date_pool).astype("datetime64[M]").astype("int64")
+    _dp_months = month_offsets_int(date_pool)
     _T_months = int(_dp_months.max() - _dp_months.min() + 1) if _dp_months.size else 0
     _cust_mdl_final = getattr(State.models_cfg, "customers", None)
     _discovery_lag_scale = float(getattr(_cust_mdl_final, "discovery_lag_scale", 1.0)) \
@@ -665,7 +669,7 @@ def generate_sales_fact(
     # order-vs-line accounting. avg=1 collapses orders==lines (skip_order_cols or
     # max_lines==1). O[m] <= R[m] and O[m] >= 1 wherever R[m] > 0.
     _eff_skip = False if sales_output in {"sales_order", "both"} else bool(skip_order_cols)
-    _avg_lines = 1.8 if (not _eff_skip and _max_lines_per_order > 1) else 1.0
+    _avg_lines = plan_avg_lines(_eff_skip, _max_lines_per_order)
     _orders_per_month_g = np.minimum(
         np.rint(_rows_per_month_g / _avg_lines).astype(np.int64), _rows_per_month_g)
     _orders_per_month_g = np.where(

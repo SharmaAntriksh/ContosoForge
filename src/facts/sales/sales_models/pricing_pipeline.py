@@ -15,6 +15,7 @@ import numpy as np
 
 from src.exceptions import SalesError
 from src.facts.sales.sales_logic import State
+from src.facts.sales.sales_logic.weights import normalize_cdf
 from src.utils.logging_utils import warn
 from src.utils.hashing import GOLDEN, splitmix64, u01_from_u64
 
@@ -385,12 +386,9 @@ def _pick_ending(rng, end_vals: np.ndarray, end_w: np.ndarray, n: int, hash_u):
     """Choose a per-row price ending. ``hash_u`` (uniform [0,1), when supplied)
     drives a deterministic inverse-CDF pick; otherwise draw from ``rng``."""
     if hash_u is not None:
-        cdf = np.cumsum(np.asarray(end_w, dtype=np.float64))
-        total = float(cdf[-1]) if cdf.size else 0.0
-        if total <= 0.0:
+        cdf = normalize_cdf(np.asarray(end_w, dtype=np.float64))
+        if cdf.size == 0 or cdf[-1] <= 0.0:
             return end_vals[np.zeros(n, dtype=np.int64)]
-        cdf = cdf / total
-        cdf[-1] = 1.0  # guard fp drift so searchsorted stays in-bounds
         idx = np.minimum(np.searchsorted(cdf, hash_u, side="right"), end_vals.size - 1)
     else:
         idx = rng.choice(end_vals.size, size=n, p=end_w)

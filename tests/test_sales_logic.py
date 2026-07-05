@@ -57,9 +57,11 @@ from src.facts.sales.sales_logic.core.customer_sampling import (
     compute_month_distinct_targets,
 )
 from src.facts.sales.sales_logic.chunk_builder import (
-    _chunk_month_band,
     _eligible_counts_fast,
     _eligible_idx_by_month,
+)
+from src.facts.sales.sales_logic.plan_math import (
+    chunk_month_band as _chunk_month_band,
 )
 from src.facts.sales.sales_logic.globals import State
 from src.facts.budget.accumulator import BudgetAccumulator

@@ -50,21 +50,10 @@ from .allocation import (
     build_rows_per_month,
 )
 
-# Shared CDF utility (CLAUDE.md gotcha #16: clamp cdf[-1] = 1.0)
-import numpy as np
-
-def _normalize_cdf(weights: np.ndarray) -> np.ndarray:
-    """Build a normalized CDF from *weights*, clamping the last element to 1.0.
-
-    Returns a float64 array suitable for ``np.searchsorted(..., side='right')``.
-    If all weights are zero or the array is empty, returns the raw cumsum
-    (caller should check ``cdf[-1] > 0`` before using).
-    """
-    cdf = np.cumsum(weights, dtype=np.float64)
-    if cdf.size > 0 and cdf[-1] > 0:
-        cdf /= cdf[-1]
-        cdf[-1] = 1.0
-    return cdf
+# Shared CDF utility (CLAUDE.md gotcha #16: clamp cdf[-1] = 1.0). The
+# implementation lives in ``sales_logic.weights``; re-exported here under its
+# historical name so existing imports (chunk_builder, tests) keep working.
+from ..weights import normalize_cdf as _normalize_cdf
 
 
 # Backward compatibility: PA_AVAILABLE was defined in the original core.py

@@ -8,6 +8,8 @@ from typing import Optional
 import numpy as np
 
 from .allocation import _stable_seed
+from ..eligibility import EligibilityWindow
+from ..weights import cdf_from_probs
 from src.utils.hashing import GOLDEN, splitmix64, u01_from_u64
 
 
@@ -104,17 +106,12 @@ def _eligible_customer_mask_for_month(
       active == 1
       start_month <= m_offset
       end_month == -1 OR m_offset <= end_month
-    """
-    m = int(m_offset)
-    is_active_in_sales = np.asarray(is_active_in_sales, dtype="int64", order="C")
-    start_month = np.asarray(start_month, dtype="int64", order="C")
-    end_month_norm = np.asarray(end_month_norm, dtype="int64", order="C")
 
-    return (
-        (is_active_in_sales == 1)
-        & (start_month <= m)
-        & ((end_month_norm < 0) | (m <= end_month_norm))
-    )
+    Thin view over :class:`EligibilityWindow` (the single-source predicate).
+    """
+    return EligibilityWindow.from_lifecycle(
+        is_active_in_sales, start_month, end_month_norm
+    ).mask(m_offset)
 
 
 # ------------------------------------------------------------
@@ -493,9 +490,7 @@ def build_month_customer_pool(
     p_pool = _weights_for_keys(pool, base_weight)
     if p_pool is None:
         p_pool = np.full(pool.size, 1.0 / pool.size, dtype=np.float64)
-    cdf = np.cumsum(p_pool, dtype=np.float64)
-    cdf[-1] = 1.0  # CLAUDE.md gotcha #16: clamp so searchsorted stays in bounds
-    return pool, cdf
+    return pool, cdf_from_probs(p_pool)
 
 
 def _hash_uniform_positions(m_offset: int, positions: np.ndarray, seed: int) -> np.ndarray:

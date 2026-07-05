@@ -13,6 +13,7 @@ import numpy as np
 from src.defaults import PHYSICAL_CHANNELS, DIGITAL_CHANNELS
 from src.exceptions import SalesError
 from src.utils.logging_utils import warn
+from ..weights import weighted_pick_indices
 
 # Warn at most once per process when channel filtering is silently disabled.
 _warned_ch_len_mismatch = False
@@ -45,14 +46,7 @@ def _weighted_pick(rng, candidates, salience_all, size):
         return candidates[rng.integers(0, k, size=size)]
     w = np.asarray(salience_all, dtype=np.float64)[candidates]
     w = np.where(np.isfinite(w) & (w > 0.0), w, 0.0)
-    total = float(w.sum())
-    if total <= 0.0:
-        return candidates[rng.integers(0, k, size=size)]
-    cdf = np.cumsum(w) / total
-    cdf[-1] = 1.0  # guard fp drift so searchsorted stays in-bounds
-    picks = np.searchsorted(cdf, rng.random(size), side="right")
-    picks = np.minimum(picks, k - 1)
-    return candidates[picks]
+    return candidates[weighted_pick_indices(rng, w, size, k)]
 
 
 def apply_promotions(
