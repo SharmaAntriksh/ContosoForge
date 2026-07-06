@@ -307,6 +307,16 @@ def generate_dims_and_facts_bulk_insert_scripts(
         fact_csv_tables.add("BudgetMonthly")
     if _complaints_enabled_from_cfg(cfg):
         fact_csv_tables.add("Complaints")
+    # InventorySnapshot / CustomerWishlists have no free-text columns today, so
+    # they'd load fine on the plain field-terminated (non-CSV) path — but that
+    # path silently misparses the moment a value contains a comma/quote/newline
+    # (pandas QUOTE_MINIMAL would quote it, and a non-CSV BULK INSERT splits
+    # inside the quotes). FORMAT='CSV' is harmless for comma-free files and
+    # closes that gap against a future free-text column being added.
+    if _inventory_enabled_from_cfg(cfg):
+        fact_csv_tables.add("InventorySnapshot")
+    if _wishlists_enabled_from_cfg(cfg):
+        fact_csv_tables.add("CustomerWishlists")
 
     generate_bulk_insert_script(
         facts_folder,

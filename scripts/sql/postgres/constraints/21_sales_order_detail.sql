@@ -12,7 +12,7 @@ BEGIN
     IF to_regclass('"public"."OrderDetail"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='OrderNumber')
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='OrderLineNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'UQ_OrderDetail_OrderLine')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'UQ_OrderDetail_OrderLine' AND conrelid = to_regclass('"public"."OrderDetail"'))
     THEN
         ALTER TABLE "public"."OrderDetail"
         ADD CONSTRAINT "UQ_OrderDetail_OrderLine"
@@ -30,7 +30,7 @@ BEGIN
     IF to_regclass('"public"."OrderDetail"') IS NOT NULL
        AND to_regclass('"public"."Products"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='ProductKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Products' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Products' AND conrelid = to_regclass('"public"."OrderDetail"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."OrderDetail"
         ADD CONSTRAINT "FK_OrderDetail_Products"
@@ -45,7 +45,7 @@ BEGIN
     IF to_regclass('"public"."OrderDetail"') IS NOT NULL
        AND to_regclass('"public"."Promotions"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='PromotionKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Promotions' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Promotions' AND conrelid = to_regclass('"public"."OrderDetail"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."OrderDetail"
         ADD CONSTRAINT "FK_OrderDetail_Promotions"
@@ -60,7 +60,7 @@ BEGIN
     IF to_regclass('"public"."OrderDetail"') IS NOT NULL
        AND to_regclass('"public"."Currency"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='CurrencyKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Currency' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Currency' AND conrelid = to_regclass('"public"."OrderDetail"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."OrderDetail"
         ADD CONSTRAINT "FK_OrderDetail_Currency"
@@ -75,7 +75,7 @@ BEGIN
     IF to_regclass('"public"."OrderDetail"') IS NOT NULL
        AND to_regclass('"public"."Dates"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='DueDate')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Dates_DueDate' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Dates_DueDate' AND conrelid = to_regclass('"public"."OrderDetail"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."OrderDetail"
         ADD CONSTRAINT "FK_OrderDetail_Dates_DueDate"
@@ -90,7 +90,7 @@ BEGIN
     IF to_regclass('"public"."OrderDetail"') IS NOT NULL
        AND to_regclass('"public"."Dates"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='DeliveryDate')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Dates_DeliveryDate' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_Dates_DeliveryDate' AND conrelid = to_regclass('"public"."OrderDetail"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."OrderDetail"
         ADD CONSTRAINT "FK_OrderDetail_Dates_DeliveryDate"

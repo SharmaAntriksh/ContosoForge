@@ -40,7 +40,7 @@
 DO $$
 BEGIN
     IF to_regclass('"public"."Customers"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Customers')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Customers' AND conrelid = to_regclass('"public"."Customers"'))
     THEN
         ALTER TABLE "public"."Customers"
         ADD CONSTRAINT "PK_Customers" PRIMARY KEY ("CustomerKey");
@@ -52,7 +52,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Customers"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Customers' AND column_name='VersionNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Customers_VersionNumber' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Customers_VersionNumber' AND conrelid = to_regclass('"public"."Customers"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Customers"
         ADD CONSTRAINT "CK_Customers_VersionNumber" CHECK ("VersionNumber" >= 1);
@@ -63,7 +63,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."CustomerProfile"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_CustomerProfile')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_CustomerProfile' AND conrelid = to_regclass('"public"."CustomerProfile"'))
     THEN
         ALTER TABLE "public"."CustomerProfile"
         ADD CONSTRAINT "PK_CustomerProfile" PRIMARY KEY ("CustomerKey");
@@ -74,7 +74,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."OrganizationProfile"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_OrganizationProfile')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_OrganizationProfile' AND conrelid = to_regclass('"public"."OrganizationProfile"'))
     THEN
         ALTER TABLE "public"."OrganizationProfile"
         ADD CONSTRAINT "PK_OrganizationProfile" PRIMARY KEY ("CustomerKey");
@@ -85,7 +85,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."Products"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Products')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Products' AND conrelid = to_regclass('"public"."Products"'))
     THEN
         ALTER TABLE "public"."Products"
         ADD CONSTRAINT "PK_Products" PRIMARY KEY ("ProductKey");
@@ -97,7 +97,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Products"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Products' AND column_name='VersionNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Products_VersionNumber' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Products_VersionNumber' AND conrelid = to_regclass('"public"."Products"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Products"
         ADD CONSTRAINT "CK_Products_VersionNumber" CHECK ("VersionNumber" >= 1);
@@ -108,7 +108,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."ProductProfile"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ProductProfile')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ProductProfile' AND conrelid = to_regclass('"public"."ProductProfile"'))
     THEN
         ALTER TABLE "public"."ProductProfile"
         ADD CONSTRAINT "PK_ProductProfile" PRIMARY KEY ("ProductKey");
@@ -119,7 +119,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."ProductSubcategory"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ProductSubcategory')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ProductSubcategory' AND conrelid = to_regclass('"public"."ProductSubcategory"'))
     THEN
         ALTER TABLE "public"."ProductSubcategory"
         ADD CONSTRAINT "PK_ProductSubcategory" PRIMARY KEY ("SubcategoryKey");
@@ -130,7 +130,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."ProductCategory"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ProductCategory')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ProductCategory' AND conrelid = to_regclass('"public"."ProductCategory"'))
     THEN
         ALTER TABLE "public"."ProductCategory"
         ADD CONSTRAINT "PK_ProductCategory" PRIMARY KEY ("CategoryKey");
@@ -141,7 +141,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."Geography"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Geography')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Geography' AND conrelid = to_regclass('"public"."Geography"'))
     THEN
         ALTER TABLE "public"."Geography"
         ADD CONSTRAINT "PK_Geography" PRIMARY KEY ("GeographyKey");
@@ -152,7 +152,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."Currency"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Currency')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Currency' AND conrelid = to_regclass('"public"."Currency"'))
     THEN
         ALTER TABLE "public"."Currency"
         ADD CONSTRAINT "PK_Currency" PRIMARY KEY ("CurrencyKey");
@@ -163,7 +163,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."Dates"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Dates')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Dates' AND conrelid = to_regclass('"public"."Dates"'))
     THEN
         ALTER TABLE "public"."Dates"
         ADD CONSTRAINT "PK_Dates" PRIMARY KEY ("Date");
@@ -174,7 +174,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."ExchangeRates"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ExchangeRates')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ExchangeRates' AND conrelid = to_regclass('"public"."ExchangeRates"'))
     THEN
         ALTER TABLE "public"."ExchangeRates"
         ADD CONSTRAINT "PK_ExchangeRates" PRIMARY KEY ("Date", "FromCurrency", "ToCurrency");
@@ -186,7 +186,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Stores"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Stores' AND column_name='StoreKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Stores')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Stores' AND conrelid = to_regclass('"public"."Stores"'))
     THEN
         ALTER TABLE "public"."Stores"
         ADD CONSTRAINT "PK_Stores" PRIMARY KEY ("StoreKey");
@@ -197,7 +197,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."Warehouses"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Warehouses')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Warehouses' AND conrelid = to_regclass('"public"."Warehouses"'))
     THEN
         ALTER TABLE "public"."Warehouses"
         ADD CONSTRAINT "PK_Warehouses" PRIMARY KEY ("WarehouseKey");
@@ -210,7 +210,7 @@ BEGIN
     IF to_regclass('"public"."Warehouses"') IS NOT NULL
        AND to_regclass('"public"."Geography"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Warehouses' AND column_name='GeographyKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Warehouses_Geography' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Warehouses_Geography' AND conrelid = to_regclass('"public"."Warehouses"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Warehouses"
         ADD CONSTRAINT "FK_Warehouses_Geography"
@@ -224,7 +224,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Promotions"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Promotions' AND column_name='PromotionKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Promotions')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Promotions' AND conrelid = to_regclass('"public"."Promotions"'))
     THEN
         ALTER TABLE "public"."Promotions"
         ADD CONSTRAINT "PK_Promotions" PRIMARY KEY ("PromotionKey");
@@ -236,7 +236,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Employees"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Employees' AND column_name='EmployeeKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Employees')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Employees' AND conrelid = to_regclass('"public"."Employees"'))
     THEN
         ALTER TABLE "public"."Employees"
         ADD CONSTRAINT "PK_Employees" PRIMARY KEY ("EmployeeKey");
@@ -248,7 +248,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."EmployeeStoreAssignments"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='EmployeeStoreAssignments' AND column_name='AssignmentKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_EmployeeStoreAssignments')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_EmployeeStoreAssignments' AND conrelid = to_regclass('"public"."EmployeeStoreAssignments"'))
     THEN
         ALTER TABLE "public"."EmployeeStoreAssignments"
         ADD CONSTRAINT "PK_EmployeeStoreAssignments" PRIMARY KEY ("AssignmentKey");
@@ -261,7 +261,7 @@ BEGIN
     IF to_regclass('"public"."EmployeeStoreAssignments"') IS NOT NULL
        AND to_regclass('"public"."Employees"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='EmployeeStoreAssignments' AND column_name='EmployeeKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_EmployeeStoreAssignments_Employees' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_EmployeeStoreAssignments_Employees' AND conrelid = to_regclass('"public"."EmployeeStoreAssignments"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."EmployeeStoreAssignments"
         ADD CONSTRAINT "FK_EmployeeStoreAssignments_Employees"
@@ -276,7 +276,7 @@ BEGIN
     IF to_regclass('"public"."EmployeeStoreAssignments"') IS NOT NULL
        AND to_regclass('"public"."Stores"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='EmployeeStoreAssignments' AND column_name='StoreKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_EmployeeStoreAssignments_Stores' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_EmployeeStoreAssignments_Stores' AND conrelid = to_regclass('"public"."EmployeeStoreAssignments"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."EmployeeStoreAssignments"
         ADD CONSTRAINT "FK_EmployeeStoreAssignments_Stores"
@@ -290,7 +290,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Suppliers"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Suppliers' AND column_name='SupplierKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Suppliers')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Suppliers' AND conrelid = to_regclass('"public"."Suppliers"'))
     THEN
         ALTER TABLE "public"."Suppliers"
         ADD CONSTRAINT "PK_Suppliers" PRIMARY KEY ("SupplierKey");
@@ -302,7 +302,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Channels"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Channels' AND column_name='ChannelKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Channels')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Channels' AND conrelid = to_regclass('"public"."Channels"'))
     THEN
         ALTER TABLE "public"."Channels"
         ADD CONSTRAINT "PK_Channels" PRIMARY KEY ("ChannelKey");
@@ -314,7 +314,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Time"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Time' AND column_name='TimeKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Time')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Time' AND conrelid = to_regclass('"public"."Time"'))
     THEN
         ALTER TABLE "public"."Time"
         ADD CONSTRAINT "PK_Time" PRIMARY KEY ("TimeKey");
@@ -326,7 +326,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."ReturnReason"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='ReturnReason' AND column_name='ReturnReasonKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ReturnReason')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ReturnReason' AND conrelid = to_regclass('"public"."ReturnReason"'))
     THEN
         ALTER TABLE "public"."ReturnReason"
         ADD CONSTRAINT "PK_ReturnReason" PRIMARY KEY ("ReturnReasonKey");
@@ -363,7 +363,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Products"') IS NOT NULL
        AND to_regclass('"public"."ProductSubcategory"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Products_ProductSubcategory' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Products_ProductSubcategory' AND conrelid = to_regclass('"public"."Products"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Products"
         ADD CONSTRAINT "FK_Products_ProductSubcategory"
@@ -377,7 +377,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."ProductSubcategory"') IS NOT NULL
        AND to_regclass('"public"."ProductCategory"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ProductSubcategory_ProductCategory' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ProductSubcategory_ProductCategory' AND conrelid = to_regclass('"public"."ProductSubcategory"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."ProductSubcategory"
         ADD CONSTRAINT "FK_ProductSubcategory_ProductCategory"
@@ -391,7 +391,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."ProductProfile"') IS NOT NULL
        AND to_regclass('"public"."Products"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ProductProfile_Products' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ProductProfile_Products' AND conrelid = to_regclass('"public"."ProductProfile"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."ProductProfile"
         ADD CONSTRAINT "FK_ProductProfile_Products"
@@ -406,7 +406,7 @@ BEGIN
     IF to_regclass('"public"."ProductProfile"') IS NOT NULL
        AND to_regclass('"public"."Suppliers"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='ProductProfile' AND column_name='SupplierKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ProductProfile_Suppliers' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ProductProfile_Suppliers' AND conrelid = to_regclass('"public"."ProductProfile"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."ProductProfile"
         ADD CONSTRAINT "FK_ProductProfile_Suppliers"
@@ -420,7 +420,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Customers"') IS NOT NULL
        AND to_regclass('"public"."Geography"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Customers_Geography' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Customers_Geography' AND conrelid = to_regclass('"public"."Customers"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Customers"
         ADD CONSTRAINT "FK_Customers_Geography"
@@ -434,7 +434,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."CustomerProfile"') IS NOT NULL
        AND to_regclass('"public"."Customers"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerProfile_Customers' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerProfile_Customers' AND conrelid = to_regclass('"public"."CustomerProfile"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."CustomerProfile"
         ADD CONSTRAINT "FK_CustomerProfile_Customers"
@@ -448,7 +448,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."OrganizationProfile"') IS NOT NULL
        AND to_regclass('"public"."Customers"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrganizationProfile_Customers' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrganizationProfile_Customers' AND conrelid = to_regclass('"public"."OrganizationProfile"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."OrganizationProfile"
         ADD CONSTRAINT "FK_OrganizationProfile_Customers"
@@ -463,7 +463,7 @@ BEGIN
     IF to_regclass('"public"."Stores"') IS NOT NULL
        AND to_regclass('"public"."Geography"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Stores' AND column_name='GeographyKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Stores_Geography' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Stores_Geography' AND conrelid = to_regclass('"public"."Stores"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Stores"
         ADD CONSTRAINT "FK_Stores_Geography"
@@ -478,7 +478,7 @@ BEGIN
     IF to_regclass('"public"."Stores"') IS NOT NULL
        AND to_regclass('"public"."Warehouses"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Stores' AND column_name='WarehouseKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Stores_Warehouses' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Stores_Warehouses' AND conrelid = to_regclass('"public"."Stores"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Stores"
         ADD CONSTRAINT "FK_Stores_Warehouses"
@@ -492,7 +492,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."ExchangeRates"') IS NOT NULL
        AND to_regclass('"public"."Currency"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRates_FromCurrency' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRates_FromCurrency' AND conrelid = to_regclass('"public"."ExchangeRates"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."ExchangeRates"
         ADD CONSTRAINT "FK_ExchangeRates_FromCurrency"
@@ -506,7 +506,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."ExchangeRates"') IS NOT NULL
        AND to_regclass('"public"."Currency"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRates_ToCurrency' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRates_ToCurrency' AND conrelid = to_regclass('"public"."ExchangeRates"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."ExchangeRates"
         ADD CONSTRAINT "FK_ExchangeRates_ToCurrency"
@@ -520,7 +520,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."ExchangeRates"') IS NOT NULL
        AND to_regclass('"public"."Dates"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRates_Dates' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRates_Dates' AND conrelid = to_regclass('"public"."ExchangeRates"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."ExchangeRates"
         ADD CONSTRAINT "FK_ExchangeRates_Dates"
@@ -537,7 +537,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."ExchangeRatesMonthly"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ExchangeRatesMonthly')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_ExchangeRatesMonthly' AND conrelid = to_regclass('"public"."ExchangeRatesMonthly"'))
     THEN
         ALTER TABLE "public"."ExchangeRatesMonthly"
         ADD CONSTRAINT "PK_ExchangeRatesMonthly"
@@ -550,7 +550,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."ExchangeRatesMonthly"') IS NOT NULL
        AND to_regclass('"public"."Currency"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRatesMonthly_FromCurrency' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRatesMonthly_FromCurrency' AND conrelid = to_regclass('"public"."ExchangeRatesMonthly"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."ExchangeRatesMonthly"
         ADD CONSTRAINT "FK_ExchangeRatesMonthly_FromCurrency"
@@ -564,7 +564,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."ExchangeRatesMonthly"') IS NOT NULL
        AND to_regclass('"public"."Currency"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRatesMonthly_ToCurrency' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_ExchangeRatesMonthly_ToCurrency' AND conrelid = to_regclass('"public"."ExchangeRatesMonthly"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."ExchangeRatesMonthly"
         ADD CONSTRAINT "FK_ExchangeRatesMonthly_ToCurrency"
@@ -582,7 +582,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."LoyaltyTiers"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='LoyaltyTiers' AND column_name='LoyaltyTierKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_LoyaltyTiers')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_LoyaltyTiers' AND conrelid = to_regclass('"public"."LoyaltyTiers"'))
     THEN
         ALTER TABLE "public"."LoyaltyTiers"
         ADD CONSTRAINT "PK_LoyaltyTiers" PRIMARY KEY ("LoyaltyTierKey");
@@ -595,7 +595,7 @@ BEGIN
     IF to_regclass('"public"."Customers"') IS NOT NULL
        AND to_regclass('"public"."LoyaltyTiers"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Customers' AND column_name='LoyaltyTierKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Customers_LoyaltyTiers' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Customers_LoyaltyTiers' AND conrelid = to_regclass('"public"."Customers"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Customers"
         ADD CONSTRAINT "FK_Customers_LoyaltyTiers"
@@ -613,7 +613,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."CustomerAcquisitionChannels"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerAcquisitionChannels' AND column_name='CustomerAcquisitionChannelKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_CustomerAcquisitionChannels')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_CustomerAcquisitionChannels' AND conrelid = to_regclass('"public"."CustomerAcquisitionChannels"'))
     THEN
         ALTER TABLE "public"."CustomerAcquisitionChannels"
         ADD CONSTRAINT "PK_CustomerAcquisitionChannels"
@@ -627,7 +627,7 @@ BEGIN
     IF to_regclass('"public"."Customers"') IS NOT NULL
        AND to_regclass('"public"."CustomerAcquisitionChannels"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Customers' AND column_name='CustomerAcquisitionChannelKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Customers_AcquisitionChannels' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Customers_AcquisitionChannels' AND conrelid = to_regclass('"public"."Customers"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Customers"
         ADD CONSTRAINT "FK_Customers_AcquisitionChannels"
@@ -645,7 +645,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Plans"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Plans' AND column_name='PlanKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Plans')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Plans' AND conrelid = to_regclass('"public"."Plans"'))
     THEN
         ALTER TABLE "public"."Plans"
         ADD CONSTRAINT "PK_Plans" PRIMARY KEY ("PlanKey");
@@ -658,7 +658,7 @@ BEGIN
     IF to_regclass('"public"."CustomerSubscriptions"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerSubscriptions' AND column_name='SubscriptionKey')
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerSubscriptions' AND column_name='BillingCycleNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_CustomerSubscriptions')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_CustomerSubscriptions' AND conrelid = to_regclass('"public"."CustomerSubscriptions"'))
     THEN
         ALTER TABLE "public"."CustomerSubscriptions"
         ADD CONSTRAINT "PK_CustomerSubscriptions"
@@ -672,7 +672,7 @@ BEGIN
     IF to_regclass('"public"."CustomerSubscriptions"') IS NOT NULL
        AND to_regclass('"public"."Customers"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerSubscriptions' AND column_name='CustomerKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerSubscriptions_Customers' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerSubscriptions_Customers' AND conrelid = to_regclass('"public"."CustomerSubscriptions"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."CustomerSubscriptions"
         ADD CONSTRAINT "FK_CustomerSubscriptions_Customers"
@@ -687,7 +687,7 @@ BEGIN
     IF to_regclass('"public"."CustomerSubscriptions"') IS NOT NULL
        AND to_regclass('"public"."Plans"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerSubscriptions' AND column_name='PlanKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerSubscriptions_Plans' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerSubscriptions_Plans' AND conrelid = to_regclass('"public"."CustomerSubscriptions"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."CustomerSubscriptions"
         ADD CONSTRAINT "FK_CustomerSubscriptions_Plans"
@@ -701,7 +701,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Plans"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Plans' AND column_name='BillingCycle')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Plans_BillingCycle' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Plans_BillingCycle' AND conrelid = to_regclass('"public"."Plans"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Plans"
         ADD CONSTRAINT "CK_Plans_BillingCycle"
@@ -714,7 +714,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Plans"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Plans' AND column_name='Discount')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Plans_Discount' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Plans_Discount' AND conrelid = to_regclass('"public"."Plans"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Plans"
         ADD CONSTRAINT "CK_Plans_Discount"
@@ -727,7 +727,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Plans"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Plans' AND column_name='BaseMonthlyPrice')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Plans_BaseMonthlyPrice' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Plans_BaseMonthlyPrice' AND conrelid = to_regclass('"public"."Plans"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Plans"
         ADD CONSTRAINT "CK_Plans_BaseMonthlyPrice"
@@ -740,7 +740,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Plans"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Plans' AND column_name='CycleMonths')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Plans_CycleMonths' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Plans_CycleMonths' AND conrelid = to_regclass('"public"."Plans"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Plans"
         ADD CONSTRAINT "CK_Plans_CycleMonths"
@@ -753,7 +753,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."CustomerSubscriptions"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerSubscriptions' AND column_name='PeriodPrice')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerSubscriptions_PeriodPrice' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerSubscriptions_PeriodPrice' AND conrelid = to_regclass('"public"."CustomerSubscriptions"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."CustomerSubscriptions"
         ADD CONSTRAINT "CK_CustomerSubscriptions_PeriodPrice"
@@ -766,7 +766,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."CustomerSubscriptions"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerSubscriptions' AND column_name='BillingCycleNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerSubscriptions_BillingCycleNumber' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerSubscriptions_BillingCycleNumber' AND conrelid = to_regclass('"public"."CustomerSubscriptions"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."CustomerSubscriptions"
         ADD CONSTRAINT "CK_CustomerSubscriptions_BillingCycleNumber"
@@ -786,7 +786,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."CustomerWishlists"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerWishlists' AND column_name='WishlistKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_CustomerWishlists')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_CustomerWishlists' AND conrelid = to_regclass('"public"."CustomerWishlists"'))
     THEN
         ALTER TABLE "public"."CustomerWishlists"
         ADD CONSTRAINT "PK_CustomerWishlists" PRIMARY KEY ("WishlistKey");
@@ -799,7 +799,7 @@ BEGIN
     IF to_regclass('"public"."CustomerWishlists"') IS NOT NULL
        AND to_regclass('"public"."Customers"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerWishlists' AND column_name='CustomerKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerWishlists_Customers' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerWishlists_Customers' AND conrelid = to_regclass('"public"."CustomerWishlists"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."CustomerWishlists"
         ADD CONSTRAINT "FK_CustomerWishlists_Customers"
@@ -814,7 +814,7 @@ BEGIN
     IF to_regclass('"public"."CustomerWishlists"') IS NOT NULL
        AND to_regclass('"public"."Products"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerWishlists' AND column_name='ProductKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerWishlists_Products' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_CustomerWishlists_Products' AND conrelid = to_regclass('"public"."CustomerWishlists"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."CustomerWishlists"
         ADD CONSTRAINT "FK_CustomerWishlists_Products"
@@ -828,7 +828,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."CustomerWishlists"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerWishlists' AND column_name='Quantity')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerWishlists_Quantity' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerWishlists_Quantity' AND conrelid = to_regclass('"public"."CustomerWishlists"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."CustomerWishlists"
         ADD CONSTRAINT "CK_CustomerWishlists_Quantity"
@@ -841,7 +841,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."CustomerWishlists"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerWishlists' AND column_name='Priority')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerWishlists_Priority' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerWishlists_Priority' AND conrelid = to_regclass('"public"."CustomerWishlists"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."CustomerWishlists"
         ADD CONSTRAINT "CK_CustomerWishlists_Priority"
@@ -854,7 +854,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."CustomerWishlists"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='CustomerWishlists' AND column_name='NetPrice')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerWishlists_NetPrice' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_CustomerWishlists_NetPrice' AND conrelid = to_regclass('"public"."CustomerWishlists"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."CustomerWishlists"
         ADD CONSTRAINT "CK_CustomerWishlists_NetPrice"
@@ -871,7 +871,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Complaints"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Complaints' AND column_name='ComplaintKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Complaints')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Complaints' AND conrelid = to_regclass('"public"."Complaints"'))
     THEN
         ALTER TABLE "public"."Complaints"
         ADD CONSTRAINT "PK_Complaints" PRIMARY KEY ("ComplaintKey");
@@ -884,7 +884,7 @@ BEGIN
     IF to_regclass('"public"."Complaints"') IS NOT NULL
        AND to_regclass('"public"."Customers"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Complaints' AND column_name='CustomerKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Complaints_Customers' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Complaints_Customers' AND conrelid = to_regclass('"public"."Complaints"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Complaints"
         ADD CONSTRAINT "FK_Complaints_Customers"
@@ -898,7 +898,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Complaints"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Complaints' AND column_name='Severity')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Complaints_Severity' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Complaints_Severity' AND conrelid = to_regclass('"public"."Complaints"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Complaints"
         ADD CONSTRAINT "CK_Complaints_Severity"
@@ -911,7 +911,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Complaints"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Complaints' AND column_name='Status')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Complaints_Status' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Complaints_Status' AND conrelid = to_regclass('"public"."Complaints"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Complaints"
         ADD CONSTRAINT "CK_Complaints_Status"
@@ -924,7 +924,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Complaints"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Complaints' AND column_name='Channel')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Complaints_Channel' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Complaints_Channel' AND conrelid = to_regclass('"public"."Complaints"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Complaints"
         ADD CONSTRAINT "CK_Complaints_Channel"
@@ -937,7 +937,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Complaints"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Complaints' AND column_name='ResponseDays')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Complaints_ResponseDays' AND contype = 'c')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'CK_Complaints_ResponseDays' AND conrelid = to_regclass('"public"."Complaints"') AND contype = 'c')
     THEN
         ALTER TABLE "public"."Complaints"
         ADD CONSTRAINT "CK_Complaints_ResponseDays"

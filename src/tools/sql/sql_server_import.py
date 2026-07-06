@@ -17,7 +17,7 @@ from src.tools.sql._import_common import (
     list_sql_files,
     ordered_load_files,
 )
-from src.tools.sql.sql_helpers import sql_escape_literal
+from src.tools.sql.sql_helpers import odbc_brace, sql_escape_literal
 
 try:
     import pyodbc
@@ -41,6 +41,21 @@ _GO_SPLIT_RE = re.compile(r"^\s*GO\s*$", flags=re.MULTILINE | re.IGNORECASE)
 _CT_PK = "PK"
 _CT_UQ = "UQ"
 _CT_FK = "FK"
+
+
+def _orphan_db_hint(database: str) -> str:
+    """Guidance appended to any failure that occurs after CREATE DATABASE.
+
+    The importer aborts if the target DB already exists, so a database left
+    half-populated by a mid-import failure blocks every retry until it is
+    dropped. Say so explicitly — the bare 'already exists' guard message the
+    next run prints doesn't explain that this run is what created it.
+    """
+    return (
+        f" NOTE: database '{database}' was created by this run and is now "
+        f"partially populated; drop it (DROP DATABASE) before retrying, or the "
+        f"'already exists' guard will block the next attempt."
+    )
 
 
 
@@ -138,26 +153,36 @@ def _print_cci_summary(cursor: "pyodbc.Cursor", *, tables: list[str]) -> None:
 def _read_sql_text(sql_file: Path) -> str:
     raw = sql_file.read_bytes()
 
-    # BOM detection
+    # A byte-order mark unambiguously identifies the encoding — trust it.
     if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
-        text = raw.decode("utf-16")
+        text = raw.decode("utf-16")          # BOM carries endianness
     elif raw.startswith(b"\xef\xbb\xbf"):
         text = raw.decode("utf-8-sig")
     else:
-        # Heuristic: NULs early usually mean UTF-16
-        if b"\x00" in raw[:4096]:
-            try:
-                text = raw.decode("utf-16")
-            except UnicodeDecodeError:
+        # No BOM. The generator always writes UTF-8, and a NUL byte (U+0000)
+        # is itself valid UTF-8 — so decode as UTF-8 first rather than guessing
+        # UTF-16 off the mere presence of NULs (which silently mis-decoded a
+        # UTF-8 file that legitimately contained a NUL). Only if UTF-8 truly
+        # fails do we fall back, and we do NOT trust a BOM-less UTF-16
+        # endianness guess beyond best-effort (a BOM-less UTF-16BE would
+        # otherwise decode as LE garbage).
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if b"\x00" in raw[:4096]:
+                try:
+                    text = raw.decode("utf-16")
+                except UnicodeDecodeError:
+                    text = raw.decode("utf-8", errors="replace")
+            else:
                 text = raw.decode("utf-8", errors="replace")
-        else:
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                text = raw.decode("utf-16")
 
-    # Strip NULs that break identifiers (dbo -> d\0b\0o\0)
+    # NULs break identifiers (dbo -> d\0b\0o\0). Strip them, but say so: a NUL
+    # in a script we decoded as UTF-8 means the source was mis-encoded upstream,
+    # and silently altering the content would hide that.
     if "\x00" in text:
+        _log("WARN", f"    Stripped NUL byte(s) while reading {sql_file.name} "
+                     "(source encoding may be wrong)")
         text = text.replace("\x00", "")
 
     return text
@@ -168,13 +193,17 @@ def _drain_results(cursor) -> None:
     Consume all pending result sets on *cursor* so that deferred errors
     (e.g. a THROW after an earlier SELECT in the same batch) are surfaced
     as pyodbc.Error instead of being silently swallowed.
+
+    ``cursor.description`` is ``None`` for a statement that produced no row
+    set (DDL / DML-only batches), so we only ``fetchall()`` when a result
+    set is actually open. Catching ``pyodbc.ProgrammingError`` around the
+    fetch instead would also swallow a real server error surfacing at the
+    fetch of the current rowset (SQL Server maps ``RAISERROR``/``THROW`` to
+    ``ProgrammingError``), which is exactly what this drain exists to expose.
     """
     while True:
-        try:
+        if cursor.description is not None:
             cursor.fetchall()
-        except pyodbc.ProgrammingError:
-            # No result set open — expected for DDL / DML-only batches.
-            pass
         if not cursor.nextset():
             break
 
@@ -325,6 +354,13 @@ _BULK_INSERT_SPLIT_RE = re.compile(
     flags=re.MULTILINE | re.IGNORECASE,
 )
 
+# A batch that couldn't be attributed to a table is normally harmless preamble
+# (SET NOCOUNT ON, comments) and is run best-effort. But a real BULK INSERT /
+# INSERT whose table name defeated extraction (e.g. a hyphenated bracketed name)
+# also lands in that path — if it fails there it must NOT be downgraded to a
+# WARN, or an empty table ships with a 0 exit code. This tells the two apart.
+_LOAD_KEYWORD_RE = re.compile(r"\b(?:BULK\s+INSERT|INSERT)\b", flags=re.IGNORECASE)
+
 
 def _run_parallel_chunks(
     db_conn_str: str,
@@ -426,12 +462,21 @@ def _split_load_statements(sql_text: str) -> list[tuple[str, str]]:
             continue
         table = _extract_table_from_batch(stripped)
         if not table:
-            # Preamble (SET NOCOUNT ON, comments, etc.)
-            preamble = stripped + "\n"
+            # Preamble (SET NOCOUNT ON, comments, etc.). Accumulate rather than
+            # overwrite so two consecutive non-table parts don't drop the first.
+            preamble += stripped + "\n"
             continue
         sql = preamble + stripped
-        preamble = ""  # preamble only prepended to the first statement
+        preamble = ""  # preamble only prepended to the first following statement
         result.append((table, sql))
+
+    # A trailing part with no extractable table (e.g. a final BULK INSERT whose
+    # bracketed name defeats the extraction regex) would otherwise be silently
+    # discarded. Emit it as an unattributed batch so it still executes and any
+    # error surfaces (the executor raises for batches that contain a load
+    # keyword — see _execute_load_with_progress).
+    if preamble.strip():
+        result.append(("batch", preamble.strip()))
 
     return result
 
@@ -470,12 +515,19 @@ def _execute_load_with_progress(
     for table_name, sql_stmt in statements:
         if not table_name or table_name == "batch":
             # Preamble / non-BULK-INSERT batch (e.g. SET NOCOUNT ON).
+            looks_like_load = _LOAD_KEYWORD_RE.search(sql_stmt) is not None
             try:
                 cursor.execute(sql_stmt)
                 _drain_results(cursor)
             except pyodbc.Error as exc:
-                # Should never fail; surface it rather than masking a real load
-                # statement that was misclassified as preamble.
+                if looks_like_load:
+                    # A load statement we failed to attribute to a table — do
+                    # not mask it, or the table ships empty with exit code 0.
+                    raise SqlServerImportError(
+                        f"Load statement in '{sql_file.name}' failed and could "
+                        f"not be attributed to a table. Details: {exc.args}"
+                    ) from exc
+                # Genuine preamble (SET NOCOUNT ON, comments) — best-effort.
                 _log("WARN", f"    Preamble batch failed (continuing): {exc.args}")
             continue
         if grouped and grouped[-1][0] == table_name:
@@ -598,6 +650,18 @@ def database_exists(cursor, database: str) -> bool:
 def _quote_db_name(database: str) -> str:
     # Safe bracket quoting for SQL Server identifiers
     return f"[{database.replace(']', ']]')}]"
+
+
+def _with_database(connection_string: str, database: str) -> str:
+    """Append the target ``DATABASE`` to an ODBC connection string.
+
+    The value is brace-quoted like the other ODBC fields (server/user/password
+    are braced in ``build_connection_string``). Without this, a ``database``
+    containing ``;`` would end the ``DATABASE`` keyword and append
+    attacker-chosen connection attributes (e.g. ``;Encrypt=no``), silently
+    changing the TLS posture the operator configured (finding A1a).
+    """
+    return f"{connection_string};DATABASE={odbc_brace(database)}"
 
 
 def create_database_if_not_exists(cursor, database: str) -> None:
@@ -781,9 +845,11 @@ def _provision_tabular_user(
         else:
             # CREATE LOGIN does not accept its password as a parameter,
             # so embed it as a literal. The login name is regex-validated.
+            # Use the N'...' (Unicode) prefix so a non-ASCII password isn't
+            # codepage-mangled and stored differently than typed.
             pw_lit = sql_escape_literal(password)
             cursor.execute(
-                f"CREATE LOGIN [{login}] WITH PASSWORD = '{pw_lit}', "
+                f"CREATE LOGIN [{login}] WITH PASSWORD = N'{pw_lit}', "
                 "CHECK_POLICY = ON, CHECK_EXPIRATION = OFF;"
             )
             _drain_results(cursor)
@@ -969,7 +1035,7 @@ def import_sql_server(
     else:
         _log("INFO", "  Auth: SQL Authentication")
 
-    db_conn_str = f"{connection_string};DATABASE={database}"
+    db_conn_str = _with_database(connection_string, database)
 
     # Step 2: core import (schema + load)
     try:
@@ -1025,7 +1091,8 @@ def import_sql_server(
                             _log("INFO", "    Definitions saved to [admin].[_PK_Backup]")
                 except pyodbc.Error as exc:
                     raise SqlServerImportError(
-                        f"Failed pre-load PK/FK drop in '{database}'. Details: {exc.args}"
+                        f"Failed pre-load PK/FK drop in '{database}'. Details: {exc.args}."
+                        + _orphan_db_hint(database)
                     ) from exc
 
             # --- 2.2 Data loading (with smart recovery-model management) ---
@@ -1121,7 +1188,7 @@ def import_sql_server(
                         schema = _find_table_schema(cursor, t)
                         n = _fast_rowcount(cursor, schema, t)
                         dim_total += n
-                    except (ValueError, KeyError, OSError):
+                    except (ValueError, KeyError, OSError, SqlServerImportError, pyodbc.Error):
                         pass
                 fact_total = 0
                 for t in fact_tables:
@@ -1129,11 +1196,14 @@ def import_sql_server(
                         schema = _find_table_schema(cursor, t)
                         n = _fast_rowcount(cursor, schema, t)
                         fact_total += n
-                    except (ValueError, KeyError, OSError):
+                    except (ValueError, KeyError, OSError, SqlServerImportError, pyodbc.Error):
                         pass
                 _log("INFO", f"    Dimensions: {len(dim_tables)} tables, {dim_total:,} rows")
                 _log("INFO", f"    Facts: {len(fact_tables)} tables, {fact_total:,} rows")
-            except (ValueError, KeyError, OSError) as _exc:
+            # This is a best-effort post-load summary — a missing table
+            # (_find_table_schema -> SqlServerImportError) or a query error
+            # (pyodbc.Error) must never abort an import whose data already loaded.
+            except (ValueError, KeyError, OSError, SqlServerImportError, pyodbc.Error) as _exc:
                 _log("WARN", f"  Row count verification skipped: {_exc}")
 
             conn.commit()
@@ -1142,7 +1212,8 @@ def import_sql_server(
 
     except pyodbc.Error as exc:
         raise SqlServerImportError(
-            f"Failed importing SQL into database '{database}'. Details: {exc.args}"
+            f"Failed importing SQL into database '{database}'. Details: {exc.args}."
+            + _orphan_db_hint(database)
         ) from exc
 
     # Step 3: CCI + optional PK/FK drop (share one connection)
@@ -1276,7 +1347,8 @@ def import_sql_server(
 
     except pyodbc.Error as exc:
         raise SqlServerImportError(
-            f"Failed running post-import steps in database '{database}'. Details: {exc.args}"
+            f"Failed running post-import steps in database '{database}'. Details: {exc.args}."
+            + _orphan_db_hint(database)
         ) from exc
 
     # Step 4: optional tabular user provisioning

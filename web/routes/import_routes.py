@@ -12,6 +12,7 @@ import json as _json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -35,9 +36,61 @@ _SPINNER_RE = re.compile(r"^\s*\[[-\\|/]\]\s")
 router = APIRouter(prefix="/api", tags=["import"])
 
 _IMPORT_TIMEOUT = int_or(os.environ.get("IMPORT_TIMEOUT_SECONDS"), 4 * 3600)
+# Grace window between asking the child to stop and hard-killing it, so its
+# cleanup (the FULL<->BULK_LOGGED recovery-model revert in a `finally`) can run.
+_KILL_GRACE = int_or(os.environ.get("IMPORT_KILL_GRACE_SECONDS"), 30)
 _DATASETS_DIR = REPO_ROOT / "generated_datasets"
 _DATASETS_DIR_RESOLVED = _DATASETS_DIR.resolve()
 _IMPORT_SCRIPT = REPO_ROOT / "scripts" / "sql" / "run_sql_server_import.py"
+
+# Appended to the job log whenever an import is interrupted (timeout/cancel),
+# because a hard stop can leave the target DB half-populated and (on SQL Server)
+# in BULK_LOGGED recovery with a broken log-backup chain.
+_INTERRUPT_HINT = (
+    "NOTE: an interrupted import can leave the target database partially "
+    "populated — drop it before retrying (the importer refuses to reuse an "
+    "existing database). On SQL Server it may also be left in BULK_LOGGED "
+    "recovery; re-run sql/load/99_*_finish_load.sql against it to restore the "
+    "recovery model and then BACKUP LOG to restart the log-backup chain."
+)
+
+
+def _signal_graceful(proc: subprocess.Popen) -> None:
+    """Ask the child to stop cleanly so its `finally` blocks run.
+
+    On Windows the child is launched in its own process group (see
+    ``_run_import_thread``) and installs a SIGBREAK handler, so CTRL_BREAK
+    reaches it as a KeyboardInterrupt rather than an OS-default terminate.
+    Elsewhere SIGTERM does the same. Best-effort — never raises.
+    """
+    try:
+        if sys.platform == "win32":
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.terminate()
+    except (OSError, ValueError):
+        pass
+
+
+def _stop_child(job: dict, proc: subprocess.Popen, *, grace: int = _KILL_GRACE) -> None:
+    """Graceful stop, then hard-kill if the child overstays the grace window.
+
+    Arms a background timer that force-kills only if the child is still alive
+    after ``grace`` seconds; the reader thread cancels it once the child exits
+    on its own. Safe to call from both the timeout timer and the cancel handler.
+    """
+    if proc.poll() is not None:
+        return
+    _signal_graceful(proc)
+
+    def _force_kill():
+        if proc.poll() is None:
+            proc.kill()
+
+    kt = threading.Timer(max(1, grace), _force_kill)
+    kt.daemon = True
+    kt.start()
+    job.setdefault("_kill_timers", []).append(kt)
 
 
 def _safe_dataset_path(name: str) -> Path:
@@ -226,22 +279,30 @@ def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
             env["SYNDATA_DB_PASSWORD"] = req.password
         if req.provision_tabular_user and req.tabular_password:
             env["SYNDATA_TABULAR_PASSWORD"] = req.tabular_password
+        # New process group on Windows so we can deliver CTRL_BREAK to just the
+        # child (and its descendants) for a graceful stop; no-op elsewhere.
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, env=env, cwd=str(REPO_ROOT),
+            creationflags=creationflags,
         )
         job["process"] = proc
 
         # Timer fires while the stdout loop is still blocking — the
-        # only way to enforce a wall-clock limit on the subprocess.
+        # only way to enforce a wall-clock limit on the subprocess. Try a
+        # graceful stop first (so the child's recovery-model revert runs),
+        # then hard-kill after a grace window.
         timed_out = threading.Event()
 
-        def _kill_on_timeout():
+        def _on_timeout():
             if proc.poll() is None:
-                proc.kill()
                 timed_out.set()
+                _stop_child(job, proc)
 
-        timer = threading.Timer(_IMPORT_TIMEOUT, _kill_on_timeout)
+        timer = threading.Timer(_IMPORT_TIMEOUT, _on_timeout)
         timer.start()
         try:
             for line in proc.stdout:
@@ -252,9 +313,15 @@ def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
             proc.wait()
         finally:
             timer.cancel()
+            for kt in job.get("_kill_timers", []):
+                kt.cancel()
 
         if timed_out.is_set():
             job["logs"].append(f"ERROR: Import killed after {_IMPORT_TIMEOUT}s timeout")
+        # Any interruption (timeout or user cancel) can orphan the DB / leave
+        # BULK_LOGGED recovery — spell out the recovery steps once the run ends.
+        if timed_out.is_set() or job.get("status") == "cancelled":
+            job["logs"].append(_INTERRUPT_HINT)
         job["exit_code"] = proc.returncode
         # Preserve a user-initiated cancel: terminate() makes the process exit
         # non-zero, which would otherwise be reported as "failed".
@@ -361,9 +428,11 @@ def cancel_import():
             raise HTTPException(400, "No running import to cancel.")
         proc = _current_import.get("process")
         if proc and proc.poll() is None:
-            proc.terminate()
             _current_import["status"] = "cancelled"
             _current_import["logs"].append("Import cancelled by user.")
+            # Graceful stop first (lets the child revert the recovery model),
+            # then hard-kill after the grace window if it doesn't exit.
+            _stop_child(_current_import, proc)
             return {"ok": True}
     raise HTTPException(400, "Could not cancel.")
 

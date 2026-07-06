@@ -70,6 +70,21 @@ except ImportError:
     psycopg = None  # type: ignore[assignment]
 
 
+def _orphan_db_hint(database: str) -> str:
+    """Guidance appended to any failure that occurs after CREATE DATABASE.
+
+    The importer aborts if the target DB already exists, so a database left
+    half-populated by a mid-import failure blocks every retry until dropped.
+    PG13+ supports ``DROP DATABASE ... WITH (FORCE)`` to evict stragglers.
+    """
+    return (
+        f" NOTE: database '{database}' was created by this run and is now "
+        f"partially populated; drop it (DROP DATABASE ... WITH (FORCE) on "
+        f"PG13+) before retrying, or the 'already exists' guard will block "
+        f"the next attempt."
+    )
+
+
 def _require_psycopg():
     if psycopg is None:
         raise PostgresImportError(
@@ -655,6 +670,7 @@ def import_postgres(
     # opens in autocommit mode — psycopg won't let us flip it after the
     # SELECT in _database_exists implicitly opens a transaction.
     admin_dsn = dict(host=host, port=port, dbname="postgres", user=user, password=password)
+    db_created = False
     try:
         with pg.connect(**admin_dsn, autocommit=True) as admin_conn:
             if _database_exists(admin_conn, database):
@@ -664,9 +680,19 @@ def import_postgres(
                     "Use a new database name or drop the database first."
                 )
             _create_database(admin_conn, database, _DIALECT)
+            db_created = True
             _tune_database_for_speed(admin_conn, database, _DIALECT)
             _log("INFO", f"  Database: {database} (created)")
     except pg.Error as exc:
+        # Once CREATE DATABASE has run, a later failure (e.g. ALTER DATABASE
+        # tuning) orphans the new DB rather than being a connection problem —
+        # don't mislabel it "Failed connecting", and tell the user it now
+        # blocks retries.
+        if db_created:
+            raise PostgresImportError(
+                f"Failed tuning database '{database}' after creation: {exc}."
+                + _orphan_db_hint(database)
+            ) from exc
         raise PostgresImportError(
             f"Failed connecting to Postgres at {host}:{port}: {exc}"
         ) from exc
@@ -723,7 +749,8 @@ def import_postgres(
                                  run_dir=run_dir, execute=_execute_script)
     except pg.Error as exc:
         raise PostgresImportError(
-            f"Postgres import failed for database '{database}': {exc}"
+            f"Postgres import failed for database '{database}': {exc}."
+            + _orphan_db_hint(database)
         ) from exc
 
     # VACUUM (FREEZE, ANALYZE) needs autocommit — VACUUM can't run inside a
@@ -756,7 +783,8 @@ def import_postgres(
                 _verify_row_counts(final_conn, dim_tables=dim_tables, fact_tables=fact_tables)
     except pg.Error as exc:
         raise PostgresImportError(
-            f"Post-load step failed for database '{database}': {exc}"
+            f"Post-load step failed for database '{database}': {exc}."
+            + _orphan_db_hint(database)
         ) from exc
 
     _log("DONE", f"Postgres import complete in {_time.time() - _t_total:.1f}s")

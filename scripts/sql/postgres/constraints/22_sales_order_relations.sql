@@ -15,7 +15,7 @@ BEGIN
     IF to_regclass('"public"."OrderDetail"') IS NOT NULL
        AND to_regclass('"public"."OrderHeader"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='OrderDetail' AND column_name='OrderNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_OrderHeader' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_OrderDetail_OrderHeader' AND conrelid = to_regclass('"public"."OrderDetail"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."OrderDetail"
         ADD CONSTRAINT "FK_OrderDetail_OrderHeader"
@@ -34,7 +34,7 @@ BEGIN
        AND to_regclass('"public"."OrderDetail"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderNumber')
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderLineNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_OrderDetail' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_OrderDetail' AND conrelid = to_regclass('"public"."Returns"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Returns"
         ADD CONSTRAINT "FK_Returns_OrderDetail"

@@ -394,15 +394,36 @@ BEGIN
                           ELSE N' | Tables=ALL'
                      END);
 
-        -- Clear stale backup rows for in-scope objects (parent OR referenced).
+        -- Clear stale backup rows for in-scope objects (parent OR referenced),
+        -- but ONLY for constraints that still exist in the catalog — i.e. the
+        -- rows we are about to re-capture below. Backups of constraints already
+        -- dropped by an earlier DROP run are left untouched, so running
+        -- @Action='DROP' twice can't wipe a live backup and strand a later
+        -- RESTORE with an empty table.
         DELETE b FROM [admin].[_PK_Backup] b
-        WHERE EXISTS (
-            SELECT 1 FROM @Targets tt
-            WHERE tt.schema_name = b.schema_name AND tt.table_name = b.table_name
+        WHERE (
+            EXISTS (
+                SELECT 1 FROM @Targets tt
+                WHERE tt.schema_name = b.schema_name AND tt.table_name = b.table_name
+            )
+            OR EXISTS (
+                SELECT 1 FROM @Targets tt
+                WHERE tt.schema_name = b.referenced_schema AND tt.table_name = b.referenced_table
+            )
         )
-        OR EXISTS (
-            SELECT 1 FROM @Targets tt
-            WHERE tt.schema_name = b.referenced_schema AND tt.table_name = b.referenced_table
+        AND (
+            EXISTS (
+                SELECT 1 FROM sys.key_constraints kc
+                JOIN sys.tables t  ON t.object_id = kc.parent_object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE kc.name = b.constraint_name AND s.name = b.schema_name
+            )
+            OR EXISTS (
+                SELECT 1 FROM sys.foreign_keys fk
+                JOIN sys.tables t  ON t.object_id = fk.parent_object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE fk.name = b.constraint_name AND s.name = b.schema_name
+            )
         );
 
         -- ============ FK PHASE ============

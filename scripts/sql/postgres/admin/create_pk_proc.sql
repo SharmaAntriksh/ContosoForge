@@ -92,13 +92,23 @@ BEGIN
             FROM admin._pk_backup
             ORDER BY (constraint_type = 'p') DESC  -- PKs first
         LOOP
-            EXECUTE format('ALTER TABLE %I.%I ADD CONSTRAINT %I %s',
-                           r.table_schema, r.table_name, r.constraint_name, r.constraint_def);
-            IF r.constraint_type = 'p' THEN
-                restored_pk := restored_pk + 1;
-            ELSE
-                restored_fk := restored_fk + 1;
-            END IF;
+            -- Per-item guard: one already-present constraint must not roll back
+            -- the whole restore. SQL Server's proc degrades the same way
+            -- (TRY/CATCH per constraint); match that here instead of failing the
+            -- entire CALL on the first duplicate.
+            BEGIN
+                EXECUTE format('ALTER TABLE %I.%I ADD CONSTRAINT %I %s',
+                               r.table_schema, r.table_name, r.constraint_name, r.constraint_def);
+                IF r.constraint_type = 'p' THEN
+                    restored_pk := restored_pk + 1;
+                ELSE
+                    restored_fk := restored_fk + 1;
+                END IF;
+            EXCEPTION
+                WHEN duplicate_object OR duplicate_table THEN
+                    RAISE NOTICE 'Constraint % on %.% already exists; skipped',
+                        r.constraint_name, r.table_schema, r.table_name;
+            END;
         END LOOP;
         DELETE FROM admin._pk_backup;
         RAISE NOTICE 'Restored % primary key(s) and % foreign key(s); backup cleared',

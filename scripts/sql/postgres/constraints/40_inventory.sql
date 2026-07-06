@@ -13,7 +13,7 @@
 DO $$
 BEGIN
     IF to_regclass('"public"."InventorySnapshot"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_InventorySnapshot')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_InventorySnapshot' AND conrelid = to_regclass('"public"."InventorySnapshot"'))
     THEN
         ALTER TABLE "public"."InventorySnapshot"
         ADD CONSTRAINT "PK_InventorySnapshot"
@@ -30,7 +30,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."InventorySnapshot"') IS NOT NULL
        AND to_regclass('"public"."Products"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_InventorySnapshot_Products' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_InventorySnapshot_Products' AND conrelid = to_regclass('"public"."InventorySnapshot"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."InventorySnapshot"
         ADD CONSTRAINT "FK_InventorySnapshot_Products"
@@ -44,7 +44,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."InventorySnapshot"') IS NOT NULL
        AND to_regclass('"public"."Warehouses"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_InventorySnapshot_Warehouses' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_InventorySnapshot_Warehouses' AND conrelid = to_regclass('"public"."InventorySnapshot"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."InventorySnapshot"
         ADD CONSTRAINT "FK_InventorySnapshot_Warehouses"

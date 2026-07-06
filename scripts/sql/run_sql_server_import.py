@@ -1,5 +1,6 @@
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -7,21 +8,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]  # scripts/sql/ -> scripts -> repo root
 sys.path.insert(0, str(REPO_ROOT))
 
+from src.tools.sql.sql_helpers import odbc_brace as _odbc_brace
 from src.tools.sql.sql_server_import import (
     import_sql_server,
     SqlServerImportError,
     TABULAR_LOGIN_DEFAULT,
 )
-
-
-def _odbc_brace(value: str) -> str:
-    """Brace-quote an ODBC connection-string value.
-
-    Values may contain ``;``, ``=``, spaces, etc.; enclosing them in braces
-    makes those literal, and a literal ``}`` is escaped by doubling. Without
-    this a password containing ``;`` silently truncates the connection string.
-    """
-    return "{" + str(value).replace("}", "}}") + "}"
 
 
 def build_connection_string(args) -> str:
@@ -54,6 +46,29 @@ def build_connection_string(args) -> str:
         f"SERVER={_odbc_brace(args.server)};"
         f"UID={_odbc_brace(args.user)};PWD={_odbc_brace(password)};"
     )
+
+
+def _install_graceful_stop() -> None:
+    """Turn a stop request into a KeyboardInterrupt so cleanup runs.
+
+    The web layer stops this importer with CTRL_BREAK (Windows) or SIGTERM
+    (POSIX). Their OS defaults *terminate the process immediately*, skipping
+    ``import_sql_server``'s ``finally`` that reverses the FULL->BULK_LOGGED
+    recovery-model switch. Installing handlers that raise KeyboardInterrupt
+    instead lets that revert run before the process exits. Best-effort: if a
+    signal isn't available on this platform we simply don't install it.
+    """
+    def _raise_kbd(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    for signame in ("SIGBREAK", "SIGTERM"):
+        sig = getattr(signal, signame, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, _raise_kbd)
+            except (ValueError, OSError):
+                # e.g. not in the main thread, or unsupported here.
+                pass
 
 
 def _resolve_run_dir(run_path: str) -> Path:
@@ -218,6 +233,8 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    _install_graceful_stop()
+
     if args.load_workers < 1:
         print("VALIDATION ERROR: --load-workers must be >= 1", file=sys.stderr)
         return 2
@@ -267,6 +284,15 @@ def main() -> int:
             manage_recovery=not bool(args.no_recovery_management),
         )
 
+    except KeyboardInterrupt:
+        # Raised by _install_graceful_stop on CTRL_BREAK/SIGTERM. import_sql_server's
+        # `finally` has already run (reverting the recovery model if it was changed).
+        print(
+            "IMPORT INTERRUPTED: stop requested. The target database may be "
+            "partially populated — drop it before retrying.",
+            file=sys.stderr,
+        )
+        return 130
     except ValueError as exc:
         print(f"VALIDATION ERROR: {exc}", file=sys.stderr)
         return 2

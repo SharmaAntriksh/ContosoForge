@@ -11,7 +11,7 @@
 DO $$
 BEGIN
     IF to_regclass('"public"."BudgetYearly"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_BudgetYearly')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_BudgetYearly' AND conrelid = to_regclass('"public"."BudgetYearly"'))
     THEN
         ALTER TABLE "public"."BudgetYearly"
         ADD CONSTRAINT "PK_BudgetYearly"
@@ -23,7 +23,7 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('"public"."BudgetMonthly"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_BudgetMonthly')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_BudgetMonthly' AND conrelid = to_regclass('"public"."BudgetMonthly"'))
     THEN
         ALTER TABLE "public"."BudgetMonthly"
         ADD CONSTRAINT "PK_BudgetMonthly"

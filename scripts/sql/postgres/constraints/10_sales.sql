@@ -31,7 +31,7 @@ BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='OrderNumber')
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='OrderLineNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Sales')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Sales' AND conrelid = to_regclass('"public"."Sales"'))
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "PK_Sales"
@@ -48,7 +48,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Customers"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Customers' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Customers' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Customers"
@@ -62,7 +62,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Products"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Products' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Products' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Products"
@@ -76,7 +76,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Stores"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Stores' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Stores' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Stores"
@@ -91,7 +91,7 @@ BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Employees"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='EmployeeKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Employees' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Employees' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Employees"
@@ -105,7 +105,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Promotions"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Promotions' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Promotions' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Promotions"
@@ -119,7 +119,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Currency"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Currency' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Currency' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Currency"
@@ -134,7 +134,7 @@ BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Channels"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='ChannelKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Channels' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Channels' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Channels"
@@ -149,7 +149,7 @@ BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Time"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Sales' AND column_name='TimeKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Time' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Time' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Time"
@@ -163,7 +163,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Dates"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Dates_OrderDate' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Dates_OrderDate' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Dates_OrderDate"
@@ -177,7 +177,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Dates"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Dates_DueDate' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Dates_DueDate' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Dates_DueDate"
@@ -191,7 +191,7 @@ DO $$
 BEGIN
     IF to_regclass('"public"."Sales"') IS NOT NULL
        AND to_regclass('"public"."Dates"') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Dates_DeliveryDate' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Sales_Dates_DeliveryDate' AND conrelid = to_regclass('"public"."Sales"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Sales"
         ADD CONSTRAINT "FK_Sales_Dates_DeliveryDate"
@@ -224,7 +224,7 @@ BEGIN
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderNumber')
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderLineNumber')
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnSequence')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Returns')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Returns' AND conrelid = to_regclass('"public"."Returns"'))
     THEN
         ALTER TABLE "public"."Returns"
         ADD CONSTRAINT "PK_Returns" PRIMARY KEY ("OrderNumber", "OrderLineNumber", "ReturnSequence");
@@ -242,7 +242,7 @@ BEGIN
        AND to_regclass('"public"."Sales"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderNumber')
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderLineNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Sales' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Sales' AND conrelid = to_regclass('"public"."Returns"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Returns"
         ADD CONSTRAINT "FK_Returns_Sales"
@@ -257,7 +257,7 @@ BEGIN
     IF to_regclass('"public"."Returns"') IS NOT NULL
        AND to_regclass('"public"."Dates"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnDate')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Dates_ReturnDate' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Dates_ReturnDate' AND conrelid = to_regclass('"public"."Returns"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Returns"
         ADD CONSTRAINT "FK_Returns_Dates_ReturnDate"
@@ -272,7 +272,7 @@ BEGIN
     IF to_regclass('"public"."Returns"') IS NOT NULL
        AND to_regclass('"public"."ReturnReason"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnReasonKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_ReturnReason' AND contype = 'f')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_ReturnReason' AND conrelid = to_regclass('"public"."Returns"') AND contype = 'f')
     THEN
         ALTER TABLE "public"."Returns"
         ADD CONSTRAINT "FK_Returns_ReturnReason"

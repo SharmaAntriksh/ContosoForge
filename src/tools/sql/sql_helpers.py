@@ -18,6 +18,18 @@ def quote_ident(name: str) -> str:
     return DEFAULT_DIALECT.quote_ident(name)
 
 
+def odbc_brace(value: str) -> str:
+    """Brace-quote a value for an ODBC connection string.
+
+    ODBC values may legitimately contain ``;``, ``=``, spaces, etc.;
+    enclosing them in braces makes those characters literal, and a literal
+    ``}`` is escaped by doubling. Without this, a value containing ``;``
+    silently truncates the connection string or, worse, appends
+    attacker-chosen connection attributes (e.g. ``;Encrypt=no``).
+    """
+    return "{" + str(value).replace("}", "}}") + "}"
+
+
 # -------------------------------------------------------------------
 # Config-driven feature flags (used to decide which SQL objects to emit)
 # -------------------------------------------------------------------
