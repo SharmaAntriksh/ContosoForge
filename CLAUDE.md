@@ -22,6 +22,22 @@ Detailed, area-specific knowledge lives in on-demand skills under `.claude/skill
 - **Config:** PyYAML, pydantic
 - **Other:** yfinance (FX rates), multiprocessing (parallel sales)
 
+## Running Python (agents: read this first)
+
+This project targets **Python 3.13** and runs from a local **`.venv`** (created by
+`scripts/create_venv.ps1`, deps locked via uv). In a non-interactive/agent shell the
+venv is never "activated" (shell state doesn't persist between tool calls), and a bare
+`python` may resolve to a **different** interpreter that lacks the deps (e.g. a global
+3.14 without `pytest` → `No module named pytest`). **Invoke the venv interpreter
+directly:**
+
+```bash
+.venv/Scripts/python.exe -m pytest        # Windows (this repo's primary platform)
+.venv/bin/python -m pytest                # POSIX
+```
+
+Human contributors instead activate the venv first — see README.md for full setup.
+
 ## Commands
 
 ```bash
