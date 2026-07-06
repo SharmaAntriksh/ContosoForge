@@ -2,6 +2,18 @@
 
 Analytics-ready retail data generator (dimensional model, inspired by ContosoRetailDW). Produces deterministic, idempotent datasets for BI, analytics, and data engineering.
 
+## Skills (load the relevant one before working in that area)
+
+Detailed, area-specific knowledge lives in on-demand skills under `.claude/skills/` so this file stays a lean map. Load the skill that matches your task — its body carries the deep detail; the "danger index" below keeps only the one-line tripwire.
+
+| Skill | Load it when you're… | Holds the detail for |
+|---|---|---|
+| **generate-dataset** | running/tuning generation: rows, customers, dates, trend preset, catalog, output format | CLI flags, dual-config, presets, scaling, catalog |
+| **sales-internals** | editing anything under `src/facts/sales/` | the determinism/parallelism contract + numeric tripwires |
+| **config-schema** | adding/changing a config field, or reading `cfg`/`models_cfg` | Pydantic spine, normalizer, coercion helpers |
+| **web-layer** | editing anything under `web/` | thread safety, route versioning, CORS/security/limits |
+| **sql-and-dialects** | editing `src/tools/sql/` or generated SQL | dialect classes, escaping, import runners |
+
 ## Tech Stack
 
 - **Language:** Python 3.13+ (`requires-python = ">=3.13"` in `pyproject.toml`)
@@ -13,7 +25,7 @@ Analytics-ready retail data generator (dimensional model, inspired by ContosoRet
 ## Commands
 
 ```bash
-# Run generation (CLI)
+# Run generation (CLI) — full flag reference lives in the generate-dataset skill
 python main.py --format parquet --sales-rows 1000000
 python main.py --format csv --customers 5000 --sales-rows 100000
 python main.py --format deltaparquet --workers 8
@@ -192,169 +204,56 @@ web/
   frontend/                      # React SPA (YAML editor, presets, log viewer)
 ```
 
-## Dual Config System
+## Config & Generation (summary — full detail in the generate-dataset skill)
 
-### config.yaml -- Shape & Scale
-Controls row counts, entity counts, date ranges, output format, parallelism, feature toggles.
-- Key sections: `scale`, `defaults`, `sales`, `returns`, `products`, `customers`, `stores`, `employees`, `dates`, `exchange_rates`, `budget`, `inventory`, `subscriptions`, `wishlists`, `complaints`
-- Validated by strict normalizer registry in `src/engine/config/config.py`
+Two config files drive everything:
 
-### models.yaml -- Sales Behavior & Business Shape
-Controls demand curves, pricing dynamics, quantity distribution, markdown rules, return reasons, and the overall business shape via trend presets.
-- Key sections: `models.macro_demand`, `models.quantity`, `models.pricing`, `models.brand_popularity`, `models.returns`
-- Validated through Pydantic at pipeline startup: `ModelsConfig.from_raw_dict()` → `ModelsInnerConfig` (typed sub-models for each section)
-- `State.models_cfg` holds the validated `ModelsInnerConfig` instance (not a raw dict)
-- `resolve_trend_preset()` injects macro demand, customer lifecycle, and customer demand from the trend preset into both `cfg` and `models_cfg`. After resolution, `models_cfg.macro_demand` and `models_cfg.customers` are proper Pydantic models (not plain dicts)
-- Not overridable via CLI; edit directly or use web UI
+- **`config.yaml`** — *shape & scale*: row counts, entity counts, date ranges, output format, parallelism, feature toggles. **Overridable by CLI** (CLI flags > config.yaml, one-time, not persisted). Sections: `scale`, `defaults`, `sales`, `returns`, `products`, `customers`, `stores`, `employees`, `dates`, `exchange_rates`, `budget`, `inventory`, `subscriptions`, `wishlists`, `complaints`. Validated by the strict normalizer registry in `src/engine/config/config.py`.
+- **`models.yaml`** — *behavior & business shape*: demand curves, pricing, quantity, markdown, returns, and the **trend preset** (`models.macro_demand.trend`) — the single source of business shape. **Not CLI-overridable**; edit directly or via the web UI. Validated through Pydantic (`ModelsConfig.from_raw_dict()` → `ModelsInnerConfig`).
 
-### Trend Presets (`models.macro_demand.trend`)
-The trend preset is the **single source of business shape**. Each preset defines a coherent story across revenue curve, customer lifecycle, and demand behavior. Set via `macro_demand.trend` in `models.yaml`.
+For the full CLI flag table, the 15 trend presets, the customers↔rows scaling guidance, and product-catalog selection, **load the generate-dataset skill**.
 
-**Directional presets (extend over time):**
-| Preset | Revenue Shape | Customer Curve |
-|---|---|---|
-| `steady-growth` | Gentle 5%/yr upward line | Stable base, gradual acquisition |
-| `strong-growth` | Exponential acceleration | Continuously growing |
-| `gradual-growth` | S-curve with dips | Ramp then level off |
-| `hockey-stick` | Explosive years 4-6 | Rapid ramp |
-| `decline` | Steady erosion | Shrinking (high churn) |
-| `new-market-entry` | Near-zero then accelerating | Very slow then ramping |
-| `slow-decline` | Gentle ~10%/yr drop | Gradual erosion |
+## Critical Gotchas (danger index)
 
-**Cyclical presets (repeat every 10 years):**
-| Preset | Revenue Shape | Customer Curve |
-|---|---|---|
-| `boom-and-bust` | Rapid rise then collapse | Rise then crash |
-| `recession-recovery` | U-shape dip | Stable (dip from orders) |
-| `seasonal-dominant` | Flat trend, strong seasonal | Flat with seasonal waves |
-| `seasonal-with-growth` | Growth + retail seasonality | Growing with seasonal waves |
-| `plateau` | Growth then flatline | Growth then stable |
-| `volatile` | Wild year-to-year swings | Flat with noise |
-| `double-dip` | Two downturns | Gradual decline |
-| `stagnation` | Perfectly flat | Perfectly flat (no churn) |
+One line per tripwire. Where a skill owns the detail, it's tagged `→ skill`; load that skill before working in the area. The homeless ones (no skill) keep their full text here.
 
-Each preset controls: `year_level_factors`, `row_share_of_growth`, `noise_std`, `shock_probability`, `monthly_seasonality`, `bootstrap_months`, `early_month_cap`, and embedded `lifecycle` (acquisition curve, churn, initial customer spread) + `customers` (participation ratios, discovery, seasonal spikes) sub-dicts.
+### Sales fact — load **sales-internals** before editing `src/facts/sales/`
+- **State is per-worker, bound once, read-only by convention** — never add cross-chunk mutable state to `State`; put worker scratch in module globals reset in `init_sales_worker`. → sales-internals
+- **Worker-lifetime caches must be keyed by every variable their value depends on** (the calendar-vs-absolute-month CDF bug). → sales-internals
+- **Per-month plan is global; chunks only shard the order-id index space** — no per-chunk allocation; customer sampling uses the plan RNG, not the chunk RNG. → sales-internals
+- **Correlated-fact features change per-line measures/identity only**, never row counts or customer assignment; cross-pass latents are hash-seeded on emitted keys. → sales-internals
+- **Posted `UnitPrice`/`UnitCost` is deterministic per (product, month)**; only `DiscountAmount`/`NetPrice` vary per line. → sales-internals
+- **int32 overflow:** ID math needs `int64` intermediates before casting back. → sales-internals
+- **`np.bincount(weights=...)` requires `float64`** (int8 overflows >127 elems). → sales-internals
+- **Clamp `cdf[-1] = 1.0`** after `cumsum/total` before `searchsorted`. → sales-internals
+- **Shared arrays:** update `SharedArrayGroup` init when adding a dimension column workers need. → sales-internals
 
-Resolved by `resolve_trend_preset()` in `src/utils/trend_presets.py`, called from `pipeline_runner.py`. The old `customers.profile` config key is deprecated — it maps to trend presets via `_PROFILE_TO_TREND` for backward compatibility.
+### Config & generation — load **config-schema** / **generate-dataset**
+- **Both `cfg` and `models_cfg` are Pydantic, not dicts** — attribute access; copy with `model_copy(deep=True)`. → config-schema
+- **Coercion helpers** (`bool_or`/`int_or`/`float_or`/`str_or`) come from `src.utils.config_helpers`; don't redefine. → config-schema
+- **Dimension versioning:** a SHA-256 of each dim's config section gates regen. If an edit "did nothing," the hash didn't change — force with `--regen-dimensions`. → generate-dataset
+- **Pricing injection:** editing `models.yaml` pricing bands requires `--regen-dimensions products` to resync the product dim. → generate-dataset
+- **FX dates are coupled:** `exchange_rates` range is overridden to `defaults.dates.start/end`; can't be set independently. → generate-dataset
+- **Returns/complaints auto-disable** when `enabled=true` AND `sales_output='sales'` AND `skip_order_cols=true` (both need OrderNumber). → generate-dataset
+- **Scratch vs final:** workers write scratch (`data/`), packaging copies to `generated_datasets/`; interrupted runs may leave scratch behind. → generate-dataset
 
-### Scaling Guidelines
-Chart visual quality depends on the ratio of customers to sales rows and the date range:
-- **Target ~1.5 orders per customer per month** for spiky, interesting charts
-- **Formula:** `customers ≈ sales_rows / months / 1.5`
-- Longer date ranges need fewer customers for the same row count (rows spread over more months)
-- Too few customers relative to rows → overly smooth charts (each customer averages many orders, variance averages out)
-- Too many customers relative to rows → sparse purchase history per customer
+### Web — load **web-layer** before editing `web/`
+- **Thread safety:** guard `web/shared_state.py` globals with `_cfg_lock`; reads must `copy.deepcopy()` under the lock. → web-layer
+- **Dual mounting:** every endpoint is served at both `/api/...` and `/v1/api/...` (same handlers). → web-layer
+- **Security:** CORS is a localhost allowlist (not `*`, override via `CORS_ORIGINS`); `SecurityHeadersMiddleware` adds headers; YAML/models endpoints reject bodies > 1 MB. → web-layer
 
-| Sales Rows | 3 years (36 mo) | 6 years (72 mo) | 10 years (120 mo) | 20 years (240 mo) |
-|---|---|---|---|---|
-| 2M | 37K | 19K | 11K | 6K |
-| 10M | 185K | 93K | 56K | 28K |
-| 20M | 370K | 185K | 111K | 56K |
-| 100M | 1.85M | 925K | 555K | 278K |
+### SQL & Power BI — load **sql-and-dialects** before editing `src/tools/sql/`
+- **SQL escaping:** `N'...'` prefix for paths in `BULK INSERT FROM`; escape single quotes in `OBJECT_ID()` names. → sql-and-dialects
+- **TMDL injection:** escape `"` → `\"` in file paths embedded in Power BI M expressions (`powerbi_packaging.py`). → sql-and-dialects
 
-### Product Catalog Selection (`scale.products.catalog`)
-Controls which product source to use. Set via `scale.products` in `config.yaml`:
-
-```yaml
-scale:
-  products:
-    catalog: all          # "contoso" | "synthetic" | "all"
-    rows: 7930            # target product count (trims or expands to fit)
-```
-
-| Catalog | Source Files | Products | Brands | Description |
-|---|---|---|---|---|
-| `contoso` | `contoso_products.parquet` | 2,517 | 11 | Original ContosoRetailDW products only |
-| `synthetic` | `synthetic_products.parquet` | 5,633 | 115 | Retail + electronics + audio/media brands (Nike, Samsung, IKEA, Sennheiser, etc.) |
-| `all` | both files combined | ~7,930 | 126 | Combined with Contoso house brand trimmed to 490 |
-
-- Source files live in `data/contoso_products/` and are generated by `catalog_builder.py`
-- `rows` controls expansion (variants) when > base count, or stratified trim when < base count
-- `scale.products` also accepts a plain integer for backward compatibility (defaults to `catalog: all`)
-- The house brand trim (`_MAX_HOUSE_BRAND` in `contoso_loader.py`) only applies in `all` mode to prevent the Contoso house brand (710 products) from dominating
-- Changing `catalog` triggers product dimension regeneration (included in version key)
-
-### Override Precedence
-CLI flags > config.yaml values (one-time, not persisted).
-
-## Critical Gotchas
-
-1. **Pricing injection:** At pipeline startup, `models.yaml` pricing appearance rules are injected into config's product section. Both product dimension generation and sales-time pricing use the same price grid. If you edit pricing bands in models.yaml, run `--regen-dimensions products` to sync.
-
-2. **Dimension versioning:** Each dim has a `data/versioning/<name>.version.json` file storing a SHA-256 `config_hash` of its config section (`version_store.py`). Dims only regenerate if that hash changes, the parquet/version file is missing, or `--regen-dimensions` forces it (force deletes the version file). Stale outputs usually mean the version hash didn't change.
-
-3. **State is per-worker, bound-once then read-only (by construction + convention):** `State` in `sales_logic/globals.py` is a module-global class populated once per worker process by `bind_globals()`. After the Phase 5.1 cleanup, **all** worker-lifetime scratch (the CDF / month-pool / dir / task / sales-channels caches) lives in **module-level globals reset at worker init** (`init_sales_worker`), NOT on `State` — so within a worker, `State` is written only inside `bind_globals` (never reassigned during chunk processing). There is **no runtime immutability enforcement**: the old `_SealableMeta`/`seal()` machinery was removed (never called; couldn't be, since scratch used to live on `State`), and a replacement runtime freeze was **deliberately not added** — the determinism guarantee is enforced by the Phase-0 guardrail tests (worker- and chunk-invariance) plus the static-schedule design (discovery/plan/pools are computed once in the coordinator and broadcast read-only), and a seal would be fragile because the coordinator (`generate_sales_fact`, main process) and in-process workers share the same `State`. Immutability rests on (a) convention (bind once, never reassign), (b) process isolation (each worker has its own `State`), and (c) scratch being fully externalized. **Do not reintroduce cross-chunk mutable state on `State`** (e.g. a lazy cache) — add it as a module-global with a reset in `init_sales_worker` instead. In tests, call `State.reset()` between cases. (The `_get_state_attr` dual-name resolver and the dead `SalesContext` dataclass were also removed.)
-
-4. **Returns/complaints conditional skip:** Returns *and* complaints are auto-disabled at config load time if `enabled=true` AND `sales_output='sales'` AND `skip_order_cols=true` (both need OrderNumber to link back). `apply_cross_section_rules()` in `config.py` loops over `("returns", "complaints")` and logs a warning for each section it disables.
-
-5. **FX dates are coupled:** exchange_rates date range is overridden at runtime to match `defaults.dates.start/end`. You cannot set FX dates independently.
-
-6. **Shared arrays:** Dimensions are loaded into numpy shared memory for zero-copy worker access. If adding new dimension columns, update `SharedArrayGroup` initialization.
-
-7. **Cross-dimension file writes:** `inventory/runner.py` overwrites `product_profile.parquet` to update ABCClassification from actual sales volume (fact-to-dimension write, safe due to sequential execution). Do not add more cross-writes without updating the cascade logic in `dimensions_runner.py`. (Warehouses no longer cross-writes `stores.parquet`: the stores flow (`run_stores`) allocates warehouses on the in-memory store frame, stamps `WarehouseKey` inline, and writes both `stores.parquet` and `warehouses.parquet` once with the stores-configured writer settings. `run_warehouses` is a thin guard that re-invokes the stores flow when `warehouses.parquet` is stale, e.g. `--regen-dimensions warehouses`.)
-
-8. **Scratch vs final output:** Workers write to scratch (`data/`), then packaging copies to final timestamped folder (`generated_datasets/`). Interrupted runs may leave scratch behind.
-
-9. **Exception hierarchy & specificity:** Use exceptions from `src/exceptions.py` (`ConfigError`, `DimensionError`, `SalesError`, `PackagingError`, `ValidationError`) instead of generic `RuntimeError`/`ValueError`. All inherit from `PipelineError`. Avoid bare `except Exception`— always catch specific types (e.g., `except (KeyError, ValueError, OSError)`).
-
-10. **Type coercion helpers:** Import `bool_or`, `int_or`, `float_or`, `str_or` from `src.utils.config_helpers`. Do not define local variants. These are still required for plain dict accesses (worker configs, nested profile dicts) and function parameters that might be None. For Pydantic model attributes with typed defaults, they're redundant but harmless — new code accessing Pydantic fields can skip them.
-
-11. **Hardcoded constants:** Domain constants (store types, customer demographics, promo categories, currency maps, etc.) live in `src/defaults.py`. Dimension generators import from there — do not inline large constant dicts. Probability arrays are validated at import time to sum to 1.0.
-
-12. **API versioning:** All web API endpoints are available at both `/api/...` (backward-compatible) and `/v1/api/...` (versioned). Both routes hit the same router handlers.
-
-13. **Web layer thread safety:** Shared mutable state in `web/shared_state.py` (`_cfg`, `_models_cfg`, etc.) is guarded by `_cfg_lock`. Always acquire the lock when reading or mutating these globals from route handlers. Reads must `copy.deepcopy()` under the lock to avoid races.
-
-14. **int32 overflow in ID arithmetic:** Order ID math (add, multiply) must use `int64` intermediates before casting back to `int32`. Silent wraparound at 2^31 produces negative/duplicate IDs.
-
-15. **numpy bincount weights dtype:** `np.bincount(..., weights=...)` requires `float64` weights. Passing `int8` silently overflows at >127 elements, producing wrong counts.
-
-16. **CDF + searchsorted boundary:** After computing a CDF via `np.cumsum(w) / total`, always clamp `cdf[-1] = 1.0`. Floating-point rounding can leave the last element slightly below 1.0, causing `searchsorted` to return out-of-bounds indices.
-
-17. **SQL output escaping:** Use `N'...'` (Unicode prefix) for file paths in `BULK INSERT FROM` statements. Escape single quotes in names passed to `OBJECT_ID()`. Without this, non-ASCII paths or names with apostrophes break generated SQL.
-
-18. **TMDL expression injection:** File paths embedded in Power BI M expressions must have `"` escaped to `\"`. Unescaped quotes in paths break the generated `.tmdl` files.
-
-19. **CORS allowlist:** `web/api.py` restricts origins to `localhost`/`127.0.0.1` on ports `8502` and `3000` by default (not `*`); the allowlist is overridable via the `CORS_ORIGINS` env var. A `SecurityHeadersMiddleware` adds `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, and `Referrer-Policy` to all responses.
-
-20. **Web payload size limits:** YAML and models endpoints reject bodies > 1 MB (HTTP 413). This prevents memory exhaustion from oversized payloads.
-
-21. **Weekly fiscal column guard:** `dates/weekly_fiscal.py`'s `add_weekly_fiscal_columns()` early-returns (`if not cfg.enabled: return df`) before computing any 4-4-5 columns, including the `FWWeekOffset` / `FWMonthOffset` / `FWQuarterOffset` offsets and `FWWeekNumber` / `FWWeekIndex`. Without this guard, accessing those columns when weekly fiscal is disabled caused a `KeyError`.
-
-22. **Nested probability validation:** `defaults.py` now validates probability arrays inside nested dicts (`CUSTOMER_HOME_OWNERSHIP_PROBS_BY_INCOME`, `CUSTOMER_OCCUPATION_PROBS_BY_EDUCATION`) and lists (`CUSTOMER_MARITAL_PROBS_BY_AGE`, `CUSTOMER_EDUCATION_PROBS_BY_AGE`) at import time, not just top-level arrays.
-
-23. **Log file descriptor thread safety:** `_ensure_log_file_open()` in `logging_utils.py` is guarded by `_LOG_FD_LOCK` to prevent races when multiple threads open the log file simultaneously.
-
-24. **Both configs are Pydantic, not dicts:** `cfg` is `AppConfig` and `models_cfg` (aka `State.models_cfg`) is `ModelsInnerConfig` — both Pydantic models from `src/engine/config/config_schema.py`. Access fields via attribute syntax, not dict syntax. Key rules:
-    - **Read config:** `cfg.sales.file_format` or `models_cfg.pricing.inflation` — attribute access, not `cfg["field"]`
-    - **Write config:** `cfg.sales.file_format = "csv"` (attribute assignment) — bracket write (`cfg["key"] = val`) works via `_MutationMixin.__setitem__`
-    - **`.get()` shim:** `_MutationMixin.get(key, default)` delegates to `getattr()`, so existing `.get()` chains work on Pydantic models. This is intentional for backward compatibility with code that handles both dicts and models
-    - **`resolve_trend_preset` caveat:** After trend resolution, `models_cfg.macro_demand` and `models_cfg.customers` are replaced with freshly validated Pydantic models (`MacroDemandConfig` and `CustomersDemandConfig`). The old `resolve_customer_profile` is deprecated
-    - **`_`-prefixed keys are stripped:** Pydantic v2 treats `_`-prefixed keys as private fields. `_strip_internal_keys()` in `config_schema.py` removes normalizer metadata before validation
-    - **`extra="forbid"` on sub-models:** All config sub-models (via `_Base`) reject unknown keys. `AppConfig` and `ModelsConfig` use `extra="allow"` for runtime-injected keys. Add new fields to the schema class if needed
-    - **Worker configs are plain dicts:** `worker_cfg`, `acfg`, and sales worker internals remain plain dicts for multiprocessing pickling — these correctly use dict access
-    - **Copying configs:** Use `cfg.model_copy(deep=True)` instead of `dict(cfg)` or `copy.deepcopy(cfg)`
-    - **Hash functions:** Use `_to_dict(obj)` helper (calls `model_dump()` on Pydantic, pass-through for dicts) before `json.dumps()` for config hashing
-    - **Schema location:** All Pydantic models live in `src/engine/config/config_schema.py`. `AppConfig.from_raw_dict(d)` and `ModelsConfig.from_raw_dict(d)` are the canonical constructors
-
-25. **`Products.BaseProductID` references `ProductID`, not `ProductKey`, under SCD2:** The column is set during `expand_contoso_products()` to the post-expansion `ProductKey` of each variant's `VariantIndex=0` row. After SCD2 expansion (`scd2.generate_scd2_versions`) reassigns `ProductKey` to a fresh `1..total_rows` sequence, the values stored in `BaseProductID` no longer match any current `ProductKey` — but they DO still match `ProductID` (which `generator.py` sets to the pre-SCD2 `ProductKey` and SCD2 preserves). Practical implications:
-    - To group all SCD2 versions of a product family: use `ProductID`, not `ProductKey` or `BaseProductID`.
-    - To find variants of a base product: filter `Products` where `BaseProductID == <some ProductID>`.
-    - A self-join `Products.BaseProductID = Products.ProductKey` only works when SCD2 is disabled. With SCD2 on, use `Products.BaseProductID = Products.ProductID`.
-
-26. **Sales posted `UnitPrice`/`UnitCost` is deterministic per (product, month); only `DiscountAmount` varies per line (Phase 4.1):** The sales pricing pipeline (`sales_models/pricing_pipeline.py`) applies per-month inflation (consistent within a month) and then snaps to the retail grid. The stochastic snap (the floor/round coin and the price ending) is now **hash-seeded on `(ProductID, month)`** (`_price_hash_u01`), so every sales line for the same product-month carries the **same** posted `UnitPrice`/`UnitCost` — a `(product, month)` self-join on the *fact* recovers a single list price. Per-line realized variation lives only in `DiscountAmount`/`NetPrice`. Gated by `models.pricing.appearance.deterministic` (default **true**); when false (or when `build_prices` gets `product_ids=None`, e.g. a direct unit-test call) the legacy **per-row** stochastic snap is used, so two same-(product, month) lines can differ — that OFF path is preserved byte-for-byte for callers that opt out. With product SCD2 *on*, the pipeline preserves catalog `ListPrice` per version anyway (its own branch, snapping skipped), so both modes give a deterministic posted price. `ProductID == ProductKey` under non-SCD2, which is the only mode where the snap runs, so keying on the per-line `product_keys` is correct. Regression guard: `tests/test_pricing_pipeline.py::TestDeterministicPostedPrice` + end-to-end `test_sales_phase3_fidelity.py::TestDeterministicPostedPrice` (single `UnitPrice` per `(ProductKey, month)`).
-
-27. **Customer discovery is a static schedule; worker-lifetime cache keys must fully determine their value:** Customer discovery (which month each customer first transacts) is a static `State.customer_discovery_month` array — computed once in the coordinator from `hash(CustomerKey, seed)` + the eligibility window, broadcast read-only — so the parallel sales fact is byte-identical regardless of `--workers`. Two corollaries for the sales hot path (`sales_logic/chunk_builder.py`): (a) don't reintroduce cross-chunk mutable discovery state; (b) **any worker-lifetime cache must be keyed by every variable its value depends on.** Workers are reused across chunks and the month loop can skip months (`rows_per_month == 0`), so a cache whose key omits a dimension its value depends on becomes first-writer-wins and therefore chunk→worker-order dependent. This bit `_sample_brand_aware`'s product CDF cache: it was keyed by *calendar* month but the brand mix (`brand_prob_by_month[m_offset]`) is an *absolute*-month quantity, so Jan-2023 chunks could reuse Jan-2022's mix depending on scheduling. It is now keyed by `m_offset`. Regression guard: `tests/test_sales_determinism_workers.py` (seed 20250701 specifically exercises this).
-
-28. **The sales per-month plan is global; chunks shard the order-id index space (do not reintroduce per-chunk allocation):** `chunk_size` is a pure performance knob — it must not change the shape of the data. The coordinator computes three length-`T` arrays ONCE from the seed against the GLOBAL month totals and broadcasts them read-only (like `customer_discovery_month`): `State.sales_rows_per_month` (R[m]), `State.sales_orders_per_month` (O[m] = R[m] / avg-lines-per-order, ≤ R[m]), and `State.sales_distinct_target` (D[m], ≤ O[m]). Each chunk slices a contiguous band of every month's order-id space via `_chunk_month_band(R, O, chunk_idx, total_chunks)` → `(order_start, n_orders, n_lines)`: orders **floor-tile `[0, O[m])` with no gaps** (`sum n_orders == O[m]`) and lines start at one-per-order + a proportional share of the extra (`n_lines ≥ n_orders`, `sum n_lines == R[m]` exactly, so `total_rows` is preserved for any `chunk_size`). The month's distinct-customer **pool** `P` (size ≤ D[m]) is built once per worker (`build_month_customer_pool`, cached in `_worker_month_pool_cache` keyed by month offset — the pool depends only on `(m, State.sales_plan_seed, static customer arrays)`), and `assign_orders_to_customers` maps global order index `j` → `pool[j]` if `j < len(P)` else a hash-weighted repeat from `P`. Because a given global order index always maps to the same customer and the distinct prefix `[0, len(P))` is always materialized by exactly one chunk, the **per-month distinct-customer set is exactly `P` regardless of chunking** (repeats add nobody new). Consequences for the sales hot path: (a) customer sampling uses the plan/month RNG (`State.sales_plan_seed`), **not** the per-chunk `rng` — don't move it back onto the chunk stream; (b) the coordinator's `avg_lines` and month-offset indexing must match `chunk_builder` exactly (both index months from `min(date_pool month)`); (c) don't re-add a per-chunk `build_rows_per_month` or a per-chunk distinct target — that is precisely the `chunk_size` dependence this removed. `compute_month_distinct_targets` is the single source of truth for D[m]. Regression guard: `tests/test_sales_determinism_chunksize.py` (per-month distinct curve, hard assert).
-
-29. **Phase 3 correlated-fact features change only per-line measures/identity, and are hash-seeded on stable global keys (never the chunk RNG):** The joint-model features add correlation to the sales fact without breaking the Phase 0–2 guarantees. The rule they all obey: a feature may change a per-line *measure* (quantity, discount) or *product identity*, but **never row counts or customer assignment** — so per-month rows and the distinct-customer curve stay chunk-invariant. New randomness is either drawn off the per-chunk `rng` (fine for worker byte-identity, since chunks own fixed bands seeded by `chunk_idx`) or, when a value must be recomputed in a *different* pass, **hash-seeded on a globally-unique key** so it is identical regardless of chunk/worker. Concretely, all `models.*` toggles are default-on:
-    - **3.1 elasticity** (`models.quantity.elasticity`): `build_quantity` scales the float qty by `(unit_price/ref)^(-ε)` × propensity(`PopularityScore`), where `ref` = median catalog ListPrice from `State.product_np` (lazy, cached). **No RNG** — pure arithmetic before the round/clamp; only active when `unit_price` is passed (the pipeline path).
-    - **3.2 promo salience** (`models.promotions`): `apply_promotions` does inverse-CDF selection weighted by `promo_salience_all` (precomputed in the coordinator = `exp(β·DiscountPct)·type_weight`, broadcast). `None` ⇒ uniform.
-    - **3.3 basket theme** (`models.basket`): `sales_logic/core/basket.py` redirects a share of off-theme lines toward each order's theme (a subcategory group). Theme + redirect are **SplitMix64 hashes of (OrderNumber, OrderLineNumber)** — applied *before* channel-eligibility enforcement so eligibility keeps the final say. Needs `State.product_subcat_key` (now loaded whenever `SubcategoryKey` exists, not just under assortment).
-    - **3.4 fulfillment friction** (`models.fulfillment`): `delivery.line_friction(OrderNumber, OrderLineNumber)` is a stateless SplitMix64 hash in [0,1). The delivery pass buckets a line early/on-time/delayed via `(p_early, p_delayed)` + a named delay-magnitude distribution (replaces the mod-100 ladder, **no RNG**); the **separate returns pass recomputes the identical friction** from the detail table's OrderNumber+line to raise return probability (`base·(1+boost·f)`) and shorten lag (`·(1−shorten·f)`). Both passes read `models.fulfillment` from `State.models_cfg` (no broadcast). Distinct salts keep basket (3.3) and friction (3.4) independent.
-    - **3.5 markdown reconcile** (`models.pricing.markdown.reconcile_promotions`): discount is drawn only for promoted lines, from the *nonzero* ladder; consumes the same one `rng.choice(size=n)` as the legacy lottery so the RNG stream position is unchanged.
-    Every feature has an off/zero path that reproduces the pre-Phase-3 bytes (so unit tests that don't opt in are unchanged), plus an end-to-end acceptance in `tests/test_sales_phase3_fidelity.py`. When adding another correlated feature: hash-seed cross-pass latents on an emitted key, keep it off the row/customer plan, and give it a default-on `models.*` toggle with a zero/off reproduction path.
+### Homeless tripwires (no skill — full detail lives here)
+- **Cross-dimension file writes:** `inventory/runner.py` overwrites `product_profile.parquet` to update ABCClassification from actual sales volume (fact-to-dimension write, safe due to sequential execution). Don't add more cross-writes without updating the cascade logic in `dimensions_runner.py`. (Warehouses no longer cross-writes `stores.parquet`: `run_stores` allocates warehouses on the in-memory store frame, stamps `WarehouseKey` inline, and writes both `stores.parquet` and `warehouses.parquet` once. `run_warehouses` is a thin guard that re-invokes the stores flow when `warehouses.parquet` is stale.)
+- **Exception hierarchy & specificity:** use `ConfigError`/`DimensionError`/`SalesError`/`PackagingError`/`ValidationError` from `src/exceptions.py` (all inherit `PipelineError`), not generic `RuntimeError`/`ValueError`. Avoid bare `except Exception` — catch specific types.
+- **Hardcoded constants:** domain constants live in `src/defaults.py`; import them, don't inline large constant dicts. Probability arrays are validated at import time to sum to 1.0.
+- **Weekly fiscal column guard:** `dates/weekly_fiscal.py`'s `add_weekly_fiscal_columns()` early-returns `if not cfg.enabled` before computing any 4-4-5 columns (`FW*Offset`, `FWWeekNumber`, `FWWeekIndex`); without the guard, accessing those columns when weekly fiscal is disabled raised `KeyError`.
+- **Nested probability validation:** `defaults.py` validates probability arrays inside nested dicts (`CUSTOMER_HOME_OWNERSHIP_PROBS_BY_INCOME`, `CUSTOMER_OCCUPATION_PROBS_BY_EDUCATION`) and lists (`CUSTOMER_MARITAL_PROBS_BY_AGE`, `CUSTOMER_EDUCATION_PROBS_BY_AGE`) at import time, not just top-level arrays.
+- **Log file descriptor thread safety:** `_ensure_log_file_open()` in `logging_utils.py` is guarded by `_LOG_FD_LOCK` to prevent races when multiple threads open the log file simultaneously.
+- **`Products.BaseProductID` references `ProductID`, not `ProductKey`, under SCD2:** SCD2 reassigns `ProductKey` to a fresh `1..total_rows` sequence, so `BaseProductID` no longer matches any current `ProductKey` — but it still matches `ProductID` (which SCD2 preserves). To group all SCD2 versions of a family use `ProductID`; to find variants filter `BaseProductID == <ProductID>`. A `BaseProductID = ProductKey` self-join only works with SCD2 off; with SCD2 on use `BaseProductID = ProductID`.
 
 ## Testing
 

@@ -5,7 +5,8 @@ data/fact_out
 data/versioning/*
 data/parquet_dims/*
 cache.abf
-.claude
+.claude/*
+!.claude/skills/
 .vscode
 htmlcov/
 .coverage
