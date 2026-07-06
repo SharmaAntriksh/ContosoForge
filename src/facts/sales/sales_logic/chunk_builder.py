@@ -14,6 +14,7 @@ import pyarrow as pa
 
 from src.defaults import PHYSICAL_CHANNELS, DIGITAL_CHANNELS
 from src.exceptions import SalesError
+from src.utils.hashing import hash_u01
 from src.utils.logging_utils import warn
 from .globals import PA_AVAILABLE, State
 from .core import (
@@ -27,10 +28,10 @@ from .core import (
     compute_prices,
 )
 from .core.basket import apply_basket_theme, reset_basket_cache
-from .columns import build_extra_columns, SALES_CHANNEL_CORE_KEYS
+from .columns import build_extra_columns, SALES_CHANNEL_CORE_KEYS, _CHANNEL_SALT
 from .eligibility import EligibilityWindow
 from .plan_math import chunk_month_band, month_offsets_int
-from .weights import cdf_from_probs, normalize_prob, weighted_pick_indices
+from .weights import cdf_from_probs, normalize_prob, pick_from_cdf, weighted_pick_indices
 
 
 def _drop_orphan_employee_key_rows(cols: dict, n_rows: int, m_offset: int) -> int:
@@ -285,6 +286,46 @@ def _get_brand_probs(m_offset: int, B: int) -> np.ndarray | None:
     return None
 
 
+# Counter-based product-sampling salts. Each per-line product draw is a pure
+# hash of the line's (OrderNumber, OrderLineNumber) entity key instead of a
+# sequential chunk-RNG draw, so a line's sampled product is a function of its
+# identity alone -- independent of chunk_size, worker count, group-iteration
+# order, or any other stage's draw count. Three distinct salts give the brand
+# choice, the within-brand / within-pool product pick, and the uniform-catalog
+# fallback three independent uniforms off the same key.
+_PRODUCT_BRAND_SALT = np.uint64(0x9D0DC0DE00000001)
+_PRODUCT_PICK_SALT = np.uint64(0x9D0DC0DE00000002)
+_PRODUCT_FALLBACK_SALT = np.uint64(0x9D0DC0DE00000003)
+
+
+def _line_uniform(rng, salt, order_numbers, line_numbers, count, idx=None):
+    """Per-line uniform in ``[0, 1)`` for one product-sampling draw.
+
+    Counter-based off the line entity key ``(OrderNumber, OrderLineNumber)`` when
+    order identifiers exist, so the value is a pure function of the line's
+    identity (independent of chunk_size, worker count, and group-iteration
+    order). Under ``skip_order_cols`` there is no per-line key, so it falls back
+    to a sequential chunk-RNG draw. ``idx`` selects a subset of the line
+    positions (for group-wise sampling); ``count`` is the number of draws and
+    must equal ``len(idx)`` when ``idx`` is given.
+    """
+    if order_numbers is not None and line_numbers is not None:
+        if idx is None:
+            return hash_u01(salt, order_numbers, line_numbers)
+        return hash_u01(salt, order_numbers[idx], line_numbers[idx])
+    return rng.random(count)
+
+
+def _uniform_index(u, k):
+    """Map uniforms ``u`` in ``[0, 1)`` to integer indices in ``[0, k)``.
+
+    The counter-based counterpart of ``rng.integers(0, k)``. ``k`` may be a
+    scalar (uniform over a fixed range) or a per-element array of bucket sizes.
+    """
+    idx = (np.asarray(u, dtype=np.float64) * k).astype(np.int64)
+    return np.minimum(idx, np.asarray(k, dtype=np.int64) - 1)
+
+
 def _sample_product_row_indices(
     rng: np.random.Generator,
     n: int,
@@ -293,6 +334,8 @@ def _sample_product_row_indices(
     m_offset: int,
     enabled: bool,
     product_weight: np.ndarray | None = None,
+    order_numbers: np.ndarray | None = None,
+    line_numbers: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Return row indices into `product_np` for n orders.
@@ -305,8 +348,14 @@ def _sample_product_row_indices(
     popularity+seasonality instead of uniform.  If brand sampling is disabled,
     product_weight is used directly for weighted global sampling.
 
+    Draws are counter-based: each line's brand choice, within-brand pick, and
+    uniform fallback are hashed on its ``(OrderNumber, OrderLineNumber)`` entity
+    key (``order_numbers``/``line_numbers``), so the sampled product is a pure
+    function of the line's identity. Under ``skip_order_cols`` those keys are
+    ``None`` and the draws fall back to the chunk RNG.
+
     Safe fallback:
-      - If anything is missing/invalid -> uniform sampling over product_np (old behavior).
+      - If anything is missing/invalid -> uniform sampling over product_np.
     """
     n_int = int(n)
     n_products = len(product_np)
@@ -315,8 +364,10 @@ def _sample_product_row_indices(
         if product_weight is not None:
             ws = float(product_weight.sum())
             if ws > 1e-12:
-                return rng.choice(n_products, size=n_int, p=product_weight / ws).astype("int32", copy=False)
-        return rng.integers(0, n_products, size=n_int).astype("int32", copy=False)
+                u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, n_int)
+                return pick_from_cdf(cdf_from_probs(product_weight / ws), u).astype("int32", copy=False)
+        u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, n_int)
+        return _uniform_index(u, n_products).astype("int32", copy=False)
 
     # Prefer "active" buckets if we're using active_product_np upstream.
     if getattr(State, "active_product_np", None) is not None and product_np is State.active_product_np:
@@ -340,7 +391,8 @@ def _sample_product_row_indices(
             brand_to_rows = None  # force uniform fallback
 
     if brand_to_rows is None or len(brand_to_rows) == 0:
-        return rng.integers(0, n_products, size=n_int).astype("int32", copy=False)
+        u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, n_int)
+        return _uniform_index(u, n_products).astype("int32", copy=False)
 
     B = int(len(brand_to_rows))
     p = _get_brand_probs(m_offset, B)
@@ -349,17 +401,20 @@ def _sample_product_row_indices(
     if p is None:
         avail = np.asarray([len(x) > 0 for x in brand_to_rows], dtype="float64")
         if float(avail.sum()) <= 0:
-            return rng.integers(0, n_products, size=n_int).astype("int32", copy=False)
+            u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, n_int)
+            return _uniform_index(u, n_products).astype("int32", copy=False)
         p = avail / float(avail.sum())
 
-    brand_ids = rng.choice(B, size=n_int, p=p)
+    u_brand = _line_uniform(rng, _PRODUCT_BRAND_SALT, order_numbers, line_numbers, n_int)
+    brand_ids = pick_from_cdf(cdf_from_probs(p), u_brand)
 
     # Build flat index array + offsets once and cache at module level (deterministic
     # per worker).  Avoids rebuilding from brand_to_rows (up to 300K brands) per call.
     flat_idx, offsets = _get_brand_flat_cache(brand_to_rows, B)
 
     if offsets[-1] == 0:
-        return rng.integers(0, n_products, size=n_int).astype("int32", copy=False)
+        u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, n_int)
+        return _uniform_index(u, n_products).astype("int32", copy=False)
 
     # Vectorized sampling: for each order, pick a random offset within its brand's bucket
     bucket_sizes = offsets[1:] - offsets[:-1]
@@ -386,28 +441,31 @@ def _sample_product_row_indices(
             orig_idx = _brand_order[s:e]
             start, end = int(offsets[b]), int(offsets[b + 1])
             if start == end:
-                out[orig_idx] = rng.integers(0, n_products, size=cnt).astype("int32", copy=False)
+                u = _line_uniform(rng, _PRODUCT_FALLBACK_SALT, order_numbers, line_numbers, cnt, idx=orig_idx)
+                out[orig_idx] = _uniform_index(u, n_products).astype("int32", copy=False)
                 continue
             rows = flat_idx[start:end]
             w = product_weight[rows]
             ws = float(w.sum())
+            u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, cnt, idx=orig_idx)
             if ws > 1e-12:
-                picks = rng.choice(len(rows), size=cnt, p=w / ws)
+                picks = pick_from_cdf(cdf_from_probs(w / ws), u)
             else:
-                picks = rng.integers(0, len(rows), size=cnt)
+                picks = _uniform_index(u, len(rows))
             out[orig_idx] = rows[picks]
         return out
 
-    rand_within = rng.integers(0, np.iinfo(np.int64).max, size=n_int, dtype="int64")
-    rand_within = np.abs(rand_within) % sizes_per_order
+    u_within = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, n_int)
+    rand_within = _uniform_index(u_within, sizes_per_order)
 
     abs_idx = offsets[brand_ids] + rand_within
     out = flat_idx[abs_idx]
 
     # Fix up any rows that landed on empty buckets with uniform fallback
     if empty_mask.any():
-        n_empty = int(empty_mask.sum())
-        out[empty_mask] = rng.integers(0, n_products, size=n_empty).astype("int32", copy=False)
+        _em_idx = np.flatnonzero(empty_mask)
+        u = _line_uniform(rng, _PRODUCT_FALLBACK_SALT, order_numbers, line_numbers, _em_idx.size, idx=_em_idx)
+        out[empty_mask] = _uniform_index(u, n_products).astype("int32", copy=False)
 
     return out
 
@@ -423,6 +481,8 @@ def _sample_products_per_store(
     _cal_month: int = 0,
     m_offset: int = 0,
     use_brand_popularity: bool = False,
+    order_numbers: np.ndarray | None = None,
+    line_numbers: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Sample product row indices from each store's assortment pool.
@@ -436,6 +496,11 @@ def _sample_products_per_store(
     cached in ``_cdf_cache`` keyed by ``(store_key, brand, cal_month)`` — a
     semantic key (the store's assortment pool is worker-constant), not an
     ``id(pool)`` that a freed-then-reallocated array could collide on.
+
+    The per-line product pick is counter-based, hashed on the line entity key
+    ``(order_numbers, line_numbers)``; the store grouping only reorders which
+    lines a pick is computed for, never the value. Under ``skip_order_cols`` the
+    keys are ``None`` and the draws fall back to the chunk RNG.
     """
     n = len(store_key_arr)
     n_products = len(product_np)
@@ -496,6 +561,7 @@ def _sample_products_per_store(
                     rng, out, orig_idx, count, pool,
                     brand_probs, B, product_weight, _cdf_cache, m_offset,
                     int(_sk_list[i]),
+                    order_numbers, line_numbers,
                 )
             elif _has_weight and pool_sz > 1:
                 cache_key = (int(_sk_list[i]), -1, _cal_month)
@@ -509,20 +575,20 @@ def _sample_products_per_store(
                         _cdf_cache[cache_key] = (pool, cdf)
 
                 total = float(cdf[-1]) if cdf.size > 0 else 0.0
+                u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, count, idx=orig_idx)
                 if total > 1e-12:
-                    u = rng.random(count)
-                    picks = np.searchsorted(cdf, u, side="right")
-                    np.minimum(picks, pool_sz - 1, out=picks)
-                    out[orig_idx] = pool[picks]
+                    out[orig_idx] = pool[pick_from_cdf(cdf, u)]
                 else:
-                    out[orig_idx] = pool[rng.integers(0, pool_sz, size=count)]
+                    out[orig_idx] = pool[_uniform_index(u, pool_sz)]
             else:
-                out[orig_idx] = pool[rng.integers(0, pool_sz, size=count)]
+                u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, count, idx=orig_idx)
+                out[orig_idx] = pool[_uniform_index(u, pool_sz)]
         else:
+            u = _line_uniform(rng, _PRODUCT_FALLBACK_SALT, order_numbers, line_numbers, count, idx=orig_idx)
             if _global_p is not None:
-                out[orig_idx] = rng.choice(n_products, size=count, p=_global_p)
+                out[orig_idx] = pick_from_cdf(cdf_from_probs(_global_p), u)
             else:
-                out[orig_idx] = rng.integers(0, n_products, size=count)
+                out[orig_idx] = _uniform_index(u, n_products)
 
     return out
 
@@ -530,14 +596,19 @@ def _sample_products_per_store(
 def _sample_brand_aware(
     rng, out, orig_idx, count, pool, brand_probs, B,
     product_weight, _cdf_cache, m_offset, store_key,
+    order_numbers=None, line_numbers=None,
 ):
     """Sample products using merged brand × popularity CDF (no brand loop).
 
     Builds a single per-store CDF where each product's weight incorporates
     its brand probability: w(p) = brand_prob[brand_of_p] * product_weight[p].
-    One vectorized RNG + searchsorted call per store instead of looping over
-    ~200 brands.  Produces the same marginal distribution as the two-stage
+    One vectorized inverse-CDF pick per store instead of looping over ~200
+    brands.  Produces the same marginal distribution as the two-stage
     "pick brand, then pick within brand" approach.
+
+    The pick is counter-based, hashed on the line entity key
+    ``(order_numbers, line_numbers)`` (``None`` under skip_order_cols -> chunk
+    RNG); grouping lines by store never changes a line's value.
 
     The merged CDF depends on ``brand_probs``, which is the *absolute*-month
     brand mix (``brand_prob_by_month[m_offset]``), so the worker-lifetime cache
@@ -569,12 +640,11 @@ def _sample_brand_aware(
             _cdf_cache[merged_key] = (merged_pool, merged_cdf)
 
     if merged_cdf is not None and merged_cdf.size > 0 and float(merged_cdf[-1]) > 1e-12:
-        u = rng.random(count)
-        picks = np.searchsorted(merged_cdf, u, side="right")
-        np.minimum(picks, len(merged_pool) - 1, out=picks)
-        out[orig_idx] = merged_pool[picks]
+        u = _line_uniform(rng, _PRODUCT_PICK_SALT, order_numbers, line_numbers, count, idx=orig_idx)
+        out[orig_idx] = merged_pool[pick_from_cdf(merged_cdf, u)]
     else:
-        out[orig_idx] = pool[rng.integers(0, len(pool), size=count)]
+        u = _line_uniform(rng, _PRODUCT_FALLBACK_SALT, order_numbers, line_numbers, count, idx=orig_idx)
+        out[orig_idx] = pool[_uniform_index(u, len(pool))]
 
 
 
@@ -1061,8 +1131,14 @@ def _apply_store_channel_correlation(
     rng, store_key_arr, skip_cols,
     order_idx, order_starts, n_unique_orders, n_lines,
     store_ch_keys, ch_prob_by_store,
+    order_numbers=None,
 ):
-    """Sample ChannelKey per order/line based on store type channel affinity."""
+    """Sample ChannelKey per order/line based on store type channel affinity.
+
+    The per-order channel draw is counter-based, hashed on the order entity key
+    (``order_numbers``); under skip_order_cols there is no per-order key and the
+    per-line draw falls back to the chunk RNG.
+    """
     if store_ch_keys is None or ch_prob_by_store is None:
         return None
 
@@ -1093,8 +1169,10 @@ def _apply_store_channel_correlation(
         if _nc < _max_n_ch:
             _ch_cdf_2d[_sk_i, _nc:] = 1.0
 
-    def _sample_channels_vectorized(_store_arr, _n):
-        _r = rng.random(_n)
+    def _sample_channels_vectorized(_store_arr, _n, _keys):
+        # Counter-based per-order uniform when an entity key is available; else the
+        # chunk RNG (skip_order_cols per-line path).
+        _r = hash_u01(_CHANNEL_SALT, _keys) if _keys is not None else rng.random(_n)
         _sk_clp = np.clip(_store_arr.astype(np.int64), 0, _max_sk_ch - 1)
         _row_cdf = _ch_cdf_2d[_sk_clp]
         _ch_idx = np.argmax(_r[:, None] < _row_cdf, axis=1)
@@ -1102,9 +1180,13 @@ def _apply_store_channel_correlation(
 
     if not skip_cols and order_idx is not None:
         _order_stores_for_ch = store_key_arr[order_starts] if order_starts is not None else store_key_arr[:n_unique_orders]
-        _ch_per_order = _sample_channels_vectorized(_order_stores_for_ch, n_unique_orders)
+        _order_keys = (
+            order_numbers[order_starts] if (order_numbers is not None and order_starts is not None)
+            else None
+        )
+        _ch_per_order = _sample_channels_vectorized(_order_stores_for_ch, n_unique_orders, _order_keys)
         return _ch_per_order[order_idx]
-    return _sample_channels_vectorized(store_key_arr, n_lines)
+    return _sample_channels_vectorized(store_key_arr, n_lines, None)
 
 
 def _enforce_channel_product_eligibility(
@@ -1794,6 +1876,7 @@ def build_chunk_table(
             order_idx, order_starts, n_unique_orders, n_lines,
             getattr(State, "store_channel_keys", None),
             getattr(State, "channel_prob_by_store", None),
+            order_numbers=order_ids_int,
         )
 
         # --------------------------------------------------------
@@ -1828,6 +1911,8 @@ def build_chunk_table(
                 _cal_month=_cal_month,
                 m_offset=int(m_offset),
                 use_brand_popularity=use_brand_popularity,
+                order_numbers=order_ids_int,
+                line_numbers=line_num,
             )
         else:
             prod_idx = _sample_product_row_indices(
@@ -1837,6 +1922,8 @@ def build_chunk_table(
                 m_offset=int(m_offset),
                 enabled=use_brand_popularity,
                 product_weight=_product_weight,
+                order_numbers=order_ids_int,
+                line_numbers=line_num,
             )
 
         # CORRELATION #6: bias off-theme lines toward each order's
@@ -1975,6 +2062,8 @@ def build_chunk_table(
             rng, order_dates,
             product_row_idx=prod_idx,
             unit_price=unit_price,
+            order_numbers=order_ids_int,
+            line_numbers=line_num,
         )
 
         price = compute_prices(
@@ -1984,13 +2073,14 @@ def build_chunk_table(
         )
 
         price = build_prices(
-            rng=rng,
             order_dates=order_dates,
             qty=qty,
             price=price,
             promo_keys=promo_keys,
             no_discount_key=no_discount_key,
             product_ids=product_keys,
+            order_numbers=order_ids_int,
+            line_numbers=line_num,
         )
 
         # --------------------------------------------------------

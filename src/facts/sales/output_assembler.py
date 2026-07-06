@@ -43,6 +43,7 @@ class TableOutputs:
     merged_path: Optional[str] = None # parquet only
     delta_table_dir: Optional[str] = None  # delta only
     delta_parts_dir: Optional[str] = None  # delta only
+    out_dir: Optional[str] = None     # scratch dir holding this table's chunks
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ def build_sales_manifest(
             merged_path=mf.merged_path,
             delta_table_dir=mf.delta_table_dir,
             delta_parts_dir=mf.delta_parts_dir,
+            out_dir=mf.out_dir,
         )
     return SalesRunManifest(
         sales_output=sales_output,

@@ -41,6 +41,7 @@ from src.engine.packaging.parquet_packager import (
     resolve_merged_parquet,
     copy_parquet_facts,
 )
+from src.facts.sales.output_assembler import SalesRunManifest, TableOutputs
 from src.tools.sql.generate_create_table_scripts import (
     create_table_from_schema,
     generate_all_create_tables,
@@ -756,6 +757,186 @@ class TestDeltaPackager:
 
         assert (dst / "_delta_log").exists()
         assert not (dst / "_tmp_parts").exists()
+
+
+# ===================================================================
+# Packagers - Manifest-driven copying (authoritative locations)
+# ===================================================================
+
+class TestPackagerManifest:
+    """When a SalesRunManifest is threaded in, the copiers read each table's
+    output location straight from it — no candidate probing — so a fresh run's
+    artifact is shipped from exactly where the writer put it, even if it sits
+    somewhere the legacy probe would never look, and a stale sibling can't win.
+    """
+
+    @staticmethod
+    def _manifest(fmt: str, table: str, **fields) -> SalesRunManifest:
+        return SalesRunManifest(
+            sales_output="sales",
+            file_format=fmt,
+            out_folder="",
+            tables={table: TableOutputs(table=table, file_format=fmt, chunks=[], **fields)},
+        )
+
+    # --- parquet ---------------------------------------------------
+
+    def test_parquet_ships_declared_merged_path(self, tmp_path):
+        """Merged file at a non-probed location is shipped via the manifest."""
+        fact_out = tmp_path / "scratch"
+        declared = fact_out / "custom" / "loc" / "mysales.parquet"
+        declared.parent.mkdir(parents=True)
+        declared.write_bytes(b"PAR1-FRESH")
+
+        facts_out = tmp_path / "packaged"
+        facts_out.mkdir()
+
+        manifest = self._manifest("parquet", "Sales", merged_path=str(declared),
+                                  out_dir=str(fact_out))
+        copy_parquet_facts(fact_out=fact_out, facts_out=facts_out,
+                           sales_cfg={}, tables=["Sales"], manifest=manifest)
+        shipped = facts_out / "mysales.parquet"
+        assert shipped.is_file()
+        assert shipped.read_bytes() == b"PAR1-FRESH"
+
+    def test_parquet_manifest_ignores_stale_probe_candidate(self, tmp_path):
+        """A stale merged file at a legacy probe candidate is NOT shipped."""
+        fact_out = tmp_path / "scratch"
+        # Stale artifact sitting where resolve_merged_parquet would find it.
+        stale = fact_out / "parquet" / "sales.parquet"
+        stale.parent.mkdir(parents=True)
+        stale.write_bytes(b"PAR1-STALE")
+        # Fresh artifact at the manifest's declared (non-probed) location.
+        declared = fact_out / "run42" / "sales.parquet"
+        declared.parent.mkdir(parents=True)
+        declared.write_bytes(b"PAR1-FRESH")
+
+        facts_out = tmp_path / "packaged"
+        facts_out.mkdir()
+
+        manifest = self._manifest("parquet", "Sales", merged_path=str(declared),
+                                  out_dir=str(fact_out))
+        copy_parquet_facts(fact_out=fact_out, facts_out=facts_out,
+                           sales_cfg={"merged_file": "sales.parquet"},
+                           tables=["Sales"], manifest=manifest)
+        assert (facts_out / "sales.parquet").read_bytes() == b"PAR1-FRESH"
+
+    def test_parquet_manifest_missing_merged_falls_back_to_chunks(self, tmp_path):
+        """Merge disabled: declared merged path is absent → chunk copy."""
+        fact_out = tmp_path / "scratch"
+        chunk_dir = fact_out / "parquet"
+        chunk_dir.mkdir(parents=True)
+        (chunk_dir / "sales_chunk0001.parquet").write_bytes(b"CHUNK1")
+        (chunk_dir / "sales_chunk0002.parquet").write_bytes(b"CHUNK2")
+
+        facts_out = tmp_path / "packaged"
+        facts_out.mkdir()
+
+        # Declared merged path that was never written (merge_parquet=False).
+        manifest = self._manifest("parquet", "Sales",
+                                  merged_path=str(fact_out / "never" / "sales.parquet"),
+                                  out_dir=str(chunk_dir))
+        copy_parquet_facts(fact_out=fact_out, facts_out=facts_out,
+                           sales_cfg={}, tables=["Sales"], manifest=manifest)
+        assert (facts_out / "sales" / "sales_chunk0001.parquet").exists()
+        assert (facts_out / "sales" / "sales_chunk0002.parquet").exists()
+
+    # --- delta -----------------------------------------------------
+
+    def test_delta_ships_declared_table_dir(self, tmp_path):
+        from src.engine.packaging.delta_packager import copy_delta_facts
+
+        fact_out = tmp_path / "scratch"
+        declared = fact_out / "custom" / "sales_delta"
+        (declared / "_delta_log").mkdir(parents=True)
+        (declared / "_delta_log" / "00000.json").write_text("{}")
+        (declared / "part-0.parquet").write_bytes(b"fake")
+
+        facts_out = tmp_path / "packaged"
+        facts_out.mkdir()
+
+        manifest = self._manifest("deltaparquet", "Sales",
+                                  delta_table_dir=str(declared),
+                                  delta_parts_dir=str(declared / "_tmp_parts"),
+                                  out_dir=str(declared))
+        copy_delta_facts(fact_out=fact_out, facts_out=facts_out,
+                         sales_cfg={}, tables=["Sales"], manifest=manifest)
+        assert (facts_out / "sales" / "_delta_log" / "00000.json").exists()
+        assert (facts_out / "sales" / "part-0.parquet").exists()
+
+    # --- csv -------------------------------------------------------
+
+    def test_csv_ships_declared_out_dir(self, tmp_path):
+        fact_out = tmp_path / "scratch"
+        declared = fact_out / "custom" / "sales_csv"
+        declared.mkdir(parents=True)
+        (declared / "sales_chunk0001.csv").write_text("a,b\n1,2\n")
+        (declared / "sales_chunk0002.csv").write_text("a,b\n3,4\n")
+
+        facts_out = tmp_path / "packaged" / "facts"
+        facts_out.mkdir(parents=True)
+
+        manifest = self._manifest("csv", "Sales", out_dir=str(declared))
+        copy_csv_facts(fact_out=fact_out, facts_out=facts_out,
+                       tables=["Sales"], manifest=manifest)
+        assert (facts_out / "sales" / "sales_chunk0001.csv").exists()
+        assert (facts_out / "sales" / "sales_chunk0002.csv").exists()
+
+
+# ===================================================================
+# Uniform scratch layout (Sales in its own subdir, like every table)
+# ===================================================================
+
+class TestUniformScratchLayout:
+    """Sales no longer sits at the scratch root — every table (Sales included)
+    lives at ``<scratch>/<format>/<table>/``. Packaging reads locations from the
+    run manifest, so this layout is purely internal; these tests pin it at its
+    single source (the OutputPaths planner + the runner's format resolver).
+    """
+
+    @staticmethod
+    def _fwd(p) -> str:
+        return str(p).replace("\\", "/")
+
+    def test_resolver_is_format_prefixed_for_all(self):
+        from src.engine.runners.sales_runner import _resolve_sales_out_folder
+        fo = Path("/scratch")
+        assert _resolve_sales_out_folder(fo, "csv") == fo / "csv"
+        assert _resolve_sales_out_folder(fo, "parquet") == fo / "parquet"
+        assert _resolve_sales_out_folder(fo, "deltaparquet") == fo / "deltaparquet"
+
+    def test_parquet_sales_lives_in_its_own_subdir(self):
+        from src.facts.sales.output_paths import OutputPaths, TABLE_SALES
+        op = OutputPaths(file_format="parquet", out_folder="/scratch/parquet",
+                         merged_file="sales.parquet")
+        assert self._fwd(op.table_out_dir(TABLE_SALES)).endswith("/parquet/sales")
+        assert self._fwd(op.merged_path(TABLE_SALES)).endswith("/parquet/sales/sales.parquet")
+        assert self._fwd(op.chunk_path(TABLE_SALES, 1, "parquet")).endswith(
+            "/parquet/sales/sales_chunk0001.parquet"
+        )
+
+    def test_sales_and_order_tables_are_siblings_not_nested(self):
+        from src.facts.sales.output_paths import (
+            OutputPaths, TABLE_SALES, TABLE_SALES_ORDER_DETAIL,
+        )
+        op = OutputPaths(file_format="parquet", out_folder="/scratch/parquet")
+        sales_dir = Path(op.table_out_dir(TABLE_SALES))
+        detail_dir = Path(op.table_out_dir(TABLE_SALES_ORDER_DETAIL))
+        assert sales_dir.parent == detail_dir.parent   # siblings under the format root
+        assert sales_dir != detail_dir.parent          # OrderDetail is not nested under Sales
+
+    def test_delta_sales_and_order_tables_not_nested(self):
+        from src.facts.sales.output_paths import (
+            OutputPaths, TABLE_SALES, TABLE_SALES_ORDER_DETAIL,
+        )
+        op = OutputPaths(file_format="deltaparquet", out_folder="/scratch/deltaparquet",
+                         delta_output_folder="/scratch/deltaparquet")
+        assert self._fwd(op.delta_table_dir(TABLE_SALES)).endswith("/deltaparquet/sales")
+        detail = self._fwd(op.delta_table_dir(TABLE_SALES_ORDER_DETAIL))
+        assert detail.endswith("/deltaparquet/order_detail")
+        # The old layout rooted Sales delta at the delta folder, nesting the order
+        # tables *under* it; the uniform layout gives each its own sibling dir.
+        assert "sales/order_detail" not in detail
 
 
 # ===================================================================

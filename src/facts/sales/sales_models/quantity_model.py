@@ -15,6 +15,16 @@ import numpy as np
 
 from src.exceptions import SalesError
 from src.facts.sales.sales_logic import State
+from src.facts.sales.sales_logic.weights import cdf_from_probs, normal_ppf, pick_from_cdf
+from src.utils.hashing import hash_u01
+
+# Counter-based quantity salts. Both stochastic draws are hashed on the line
+# entity key (OrderNumber, OrderLineNumber) instead of the chunk RNG, so a
+# line's quantity is a pure function of its identity — independent of
+# chunk_size, worker count, or any other stage's draw count. Distinct salts keep
+# the Poisson basket-size draw and the lognormal noise draw independent.
+_QTY_POISSON_SALT = np.uint64(0x2B0AC0DE00000001)
+_QTY_LOGNORMAL_SALT = np.uint64(0x2B0AC0DE00000002)
 
 
 # ---------------------------------------------------------------
@@ -38,6 +48,37 @@ _CFG_VERSION: int = -1
 _CFG_CACHE: dict | None = None
 # Reference (median) list price for the elasticity term, cached per product pool.
 _REF_PRICE_CACHE: dict = {}
+# Truncated Poisson CDF table per lambda, for the counter-based basket-size draw.
+_POISSON_CDF_CACHE: dict = {}
+
+
+def _poisson_cdf(lam: float) -> np.ndarray:
+    """Clamped CDF of ``Poisson(lam)`` over ``k = 0 .. kmax``, cached per lambda.
+
+    ``kmax`` is set well beyond ``lam`` so the truncated tail mass is negligible
+    (and any residual is absorbed by renormalization + the ``cdf[-1] = 1.0``
+    clamp). ``pick_from_cdf(cdf, u)`` then draws a Poisson variate from a uniform
+    ``u`` by inverse-CDF — the same marginal as ``rng.poisson(lam)`` but keyed on
+    the line entity, not the RNG stream. The pmf is built in log space so large
+    ``k!`` never overflows.
+    """
+    cached = _POISSON_CDF_CACHE.get(lam)
+    if cached is not None:
+        return cached
+    if lam <= 0.0:
+        cdf = np.array([1.0], dtype=np.float64)
+        _POISSON_CDF_CACHE[lam] = cdf
+        return cdf
+    kmax = int(lam + 10.0 * np.sqrt(lam) + 20.0)
+    k = np.arange(kmax + 1, dtype=np.float64)
+    log_factorial = np.concatenate(
+        ([0.0], np.cumsum(np.log(np.arange(1, kmax + 1, dtype=np.float64))))
+    )
+    log_pmf = k * np.log(lam) - lam - log_factorial
+    pmf = np.exp(log_pmf)
+    cdf = cdf_from_probs(pmf / pmf.sum())
+    _POISSON_CDF_CACHE[lam] = cdf
+    return cdf
 
 
 def _to_dict(obj):
@@ -211,13 +252,15 @@ def _reset_cache() -> None:
     _CFG_VERSION = -1
     _CFG_CACHE = None
     _REF_PRICE_CACHE.clear()
+    _POISSON_CDF_CACHE.clear()
 
 
 # ---------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------
 
-def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None):
+def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None,
+                   order_numbers=None, line_numbers=None):
     """
     Generate per-order item quantities.
 
@@ -231,6 +274,13 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None):
           (the pipeline path) *and* ``models.quantity.elasticity.enabled``.
       4. Round and clamp to [min_qty, max_qty]
 
+    Both stochastic draws are counter-based: the Poisson basket size is an
+    inverse-CDF lookup and the lognormal noise is ``exp(σ·Φ⁻¹(u))``, each keyed on
+    the line entity key ``(order_numbers, line_numbers)`` via ``hash_u01`` — so a
+    line's quantity is a pure function of its identity, independent of chunk_size
+    or worker count. Under ``skip_order_cols`` there is no per-line key and the
+    draws fall back to the chunk RNG (``rng.poisson`` / ``rng.lognormal``).
+
     Parameters
     ----------
     rng : numpy.random.Generator
@@ -240,6 +290,9 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None):
         ``State.product_popularity``); used for the propensity term.
     unit_price : array-like of float or None
         Per-line base list price; used for the price-elasticity term.
+    order_numbers, line_numbers : array-like of int or None
+        Per-line entity key for the counter-based draws; ``None`` under
+        skip_order_cols, where the chunk RNG is used instead.
 
     Returns
     -------
@@ -250,8 +303,15 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None):
     if n <= 0:
         return np.zeros(0, dtype=np.int32)
 
+    _keyed = order_numbers is not None and line_numbers is not None
+    lam = cfg["base_poisson_lambda"]
+
     # 1. Base Poisson draw (+1 ensures minimum of 1)
-    qty = rng.poisson(cfg["base_poisson_lambda"], n).astype(np.float64) + 1.0
+    if _keyed:
+        u_pois = hash_u01(_QTY_POISSON_SALT, order_numbers, line_numbers)
+        qty = pick_from_cdf(_poisson_cdf(lam), u_pois).astype(np.float64) + 1.0
+    else:
+        qty = rng.poisson(lam, n).astype(np.float64) + 1.0
 
     # 2. Monthly seasonal factors (direct lookup, no smoothing)
     order_months = np.asarray(order_dates).astype("datetime64[M]", copy=False)
@@ -263,7 +323,11 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None):
     # 3. Multiplicative noise (lognormal to avoid negative values)
     sigma = cfg["noise_sigma"]
     if sigma > 0.0:
-        qty *= rng.lognormal(mean=0.0, sigma=sigma, size=n)
+        if _keyed:
+            u_ln = hash_u01(_QTY_LOGNORMAL_SALT, order_numbers, line_numbers)
+            qty *= np.exp(sigma * normal_ppf(u_ln))
+        else:
+            qty *= rng.lognormal(mean=0.0, sigma=sigma, size=n)
 
     # 3b. Elasticity + propensity — deterministic, no RNG draws.
     el = cfg["elasticity"]

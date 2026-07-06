@@ -69,12 +69,38 @@ def _find_chunk_parquets(fact_out: Path, table: str) -> list[Path]:
     return []
 
 
-def copy_parquet_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict, tables: list[str]) -> None:
+def _manifest_merged_parquet(manifest, table: str) -> Optional[Path]:
+    """The merged-parquet path the run manifest declared for ``table``.
+
+    Authoritative: returns the declared path only if a file actually sits there.
+    A merge-disabled run declares the would-be path but writes no file, so this
+    returns None and the caller falls back to the chunk copy. Unlike
+    ``resolve_merged_parquet`` this never probes sibling candidates, so a stale
+    merged file from a previous run at a different layout can't be shipped.
+    """
+    if manifest is None:
+        return None
+    entry = getattr(manifest, "tables", {}).get(table)
+    mp = getattr(entry, "merged_path", None) if entry is not None else None
+    if mp:
+        p = Path(mp)
+        if p.is_file():
+            return p
+    return None
+
+
+def copy_parquet_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
+                       tables: list[str], manifest=None) -> None:
     copied = 0
     missing: list[str] = []
 
     for t in tables:
-        src = resolve_merged_parquet(fact_out, sales_cfg, t)
+        # Prefer the run manifest's declared merged path (no candidate probing);
+        # fall back to the legacy probe only when no manifest was threaded in.
+        if manifest is not None:
+            src = _manifest_merged_parquet(manifest, t)
+        else:
+            src = resolve_merged_parquet(fact_out, sales_cfg, t)
         if src is not None:
             # Merged file: copy directly into facts_out (no subdirectory)
             dst = facts_out / src.name

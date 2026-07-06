@@ -34,14 +34,16 @@ def _normalize_file_format(sales_cfg) -> str:
     return fmt
 
 
-def _resolve_sales_out_folder(fact_out: Path, fmt: str, *, merge_enabled: bool = False) -> Path:
-    # When merge is enabled for parquet, write directly under fact_out
-    # (no extra subfolder).  Chunks-only runs keep the parquet/ subfolder.
+def _resolve_sales_out_folder(fact_out: Path, fmt: str) -> Path:
+    # Uniform scratch layout: every format writes under <fact_out>/<format>/, and
+    # OutputPaths adds a per-table subdir beneath it (including Sales). Packaging
+    # reads each artifact's location from the run manifest, so the physical layout
+    # is free to be regular here instead of special-casing Sales-at-root.
     if fmt == "csv":
         return fact_out / "csv"
     if fmt == "parquet":
-        return fact_out if merge_enabled else fact_out / "parquet"
-    return fact_out / "sales"  # deltaparquet
+        return fact_out / "parquet"
+    return fact_out / "deltaparquet"
 
 
 def _safe_clean_folder(path: Path) -> None:
@@ -236,8 +238,7 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
     fact_out_p.mkdir(parents=True, exist_ok=True)
 
     fmt = _normalize_file_format(sales_cfg)
-    merge_enabled = bool(sales_cfg.merge_parquet)
-    sales_out_folder = _resolve_sales_out_folder(fact_out_p, fmt, merge_enabled=merge_enabled)
+    sales_out_folder = _resolve_sales_out_folder(fact_out_p, fmt)
 
     skip_order_cols = bool(sales_cfg.skip_order_cols)
 
@@ -299,6 +300,7 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
     wishlists_acc = None
     complaints_acc = None
     order_id_int64 = False
+    sales_manifest = None
 
     def _do_generate():
         nonlocal budget_acc
@@ -306,6 +308,7 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
         nonlocal wishlists_acc
         nonlocal complaints_acc
         nonlocal order_id_int64
+        nonlocal sales_manifest
         result = generate_sales_fact(
             ctx.cfg_for_run,
             parquet_folder=str(ctx.parquet_dims),
@@ -330,6 +333,7 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
         inventory_acc = result.inventory_acc
         wishlists_acc = result.wishlists_acc
         complaints_acc = result.complaints_acc
+        sales_manifest = result.manifest
         order_id_int64 = bool(getattr(result.manifest, "order_id_int64", False))
 
     _run_step("Generating Sales", _do_generate)
@@ -420,7 +424,7 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
         nonlocal final_folder_result
         final_folder_result = package_output(
             ctx.cfg_for_run, ctx.sales_cfg, ctx.parquet_dims, ctx.fact_out,
-            order_id_int64=order_id_int64)
+            order_id_int64=order_id_int64, manifest=sales_manifest)
 
         # PBIP templates now live under:
         #   samples/powerbi/templates/{csv|parquet}/{Sales|Orders|Sales and Orders}

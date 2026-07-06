@@ -7,8 +7,18 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from src.defaults import SALES_CHANNEL_CORE_KEYS
+from src.utils.hashing import hash_u01
 
-from .weights import normalize_prob
+from .weights import cdf_from_probs, normalize_prob, pick_from_cdf
+
+
+# Counter-based channel / time salts. ChannelKey and TimeKey are order-level
+# (constant within an order), so each is a pure hash of the order entity key
+# (OrderNumber) instead of a chunk-RNG draw. Under skip_order_cols there is no
+# per-order key and the draws fall back to the chunk RNG.
+_CHANNEL_SALT = np.uint64(0xC7A00CDE00000001)
+_TIME_HOUR_SALT = np.uint64(0xC7A00CDE00000002)
+_TIME_MIN_SALT = np.uint64(0xC7A00CDE00000003)
 
 
 # ------------------------------------------------------------
@@ -232,6 +242,45 @@ def _sample_timekey_by_channel(
     return out
 
 
+def _timekey_by_channel_counter(
+    order_keys: np.ndarray,
+    channel_keys: Optional[np.ndarray],
+    channel_hour_lut: Optional[np.ndarray],
+) -> np.ndarray:
+    """Counter-based minute-of-day TimeKey, hashed on the order entity key.
+
+    Per element, the hour is drawn from the channel's operating-hour weights
+    (``channel_hour_lut[channel]``, or the digital profile when the channel/LUT is
+    missing) and the minute is uniform in ``[0, 60)`` — both via ``hash_u01`` on
+    ``order_keys`` instead of the RNG, so TimeKey is a pure function of the order
+    identity. The counter-based counterpart of ``_sample_timekey_by_channel``.
+    """
+    n = len(order_keys)
+    if n == 0:
+        return np.empty(0, dtype=np.int32)
+
+    digital = normalize_prob(DIGITAL_HOUR_W, on_zero="uniform")
+    if channel_keys is None or channel_hour_lut is None:
+        hour_w = np.tile(digital, (n, 1))
+    else:
+        ck = np.asarray(channel_keys, dtype=np.int32)
+        valid = (ck >= 0) & (ck < channel_hour_lut.shape[0])
+        hour_w = np.empty((n, 24), dtype=np.float64)
+        hour_w[valid] = channel_hour_lut[ck[valid]]
+        if not valid.all():
+            hour_w[~valid] = digital
+
+    hour_cdf = np.cumsum(hour_w, axis=1)
+    hour_cdf[:, -1] = 1.0  # clamp last col (gotcha #16), row-wise
+    u_hour = hash_u01(_TIME_HOUR_SALT, order_keys)
+    hours = (u_hour[:, None] >= hour_cdf).sum(axis=1)          # inverse-CDF, side="right"
+    hours = np.minimum(hours, 23).astype(np.int32)
+
+    u_min = hash_u01(_TIME_MIN_SALT, order_keys)
+    mins = np.minimum((u_min * 60.0).astype(np.int32), 59)
+    return (hours * 60 + mins).astype(np.int32, copy=False)
+
+
 _TIME_BINS = [
     ("Bin15mKey", 15), ("Bin30mKey", 30), ("Bin1hKey", 60),
     ("Bin6hKey", 360), ("Bin12hKey", 720),
@@ -278,10 +327,12 @@ def build_extra_columns(ctx: Dict[str, Any]) -> Dict[str, Any]:
             keys, p, channel_hour_lut = cache
 
         if _oid_first_idx is not None:
-            _n_orders = len(_oid_first_idx)
-            per_order_channel = rng.choice(keys, size=_n_orders, p=p).astype(np.int32, copy=False)
+            # Order-constant, counter-based on the order entity key.
+            u_ch = hash_u01(_CHANNEL_SALT, oid[_oid_first_idx])
+            per_order_channel = keys[pick_from_cdf(cdf_from_probs(p), u_ch)].astype(np.int32, copy=False)
             sales_channel = per_order_channel[_oid_inv]
         else:
+            # skip_order_cols: no per-order key -> chunk RNG, per row.
             sales_channel = rng.choice(keys, size=n, p=p).astype(np.int32, copy=False)
 
         out["ChannelKey"] = sales_channel
@@ -296,16 +347,19 @@ def build_extra_columns(ctx: Dict[str, Any]) -> Dict[str, Any]:
             sc_base = ctx["cols"].get("ChannelKey")
             sales_channel = None if sc_base is None else np.asarray(sc_base, dtype=np.int32)
 
-        if sales_channel is None or channel_hour_lut is None:
-            # digital-like fallback so night bins aren't empty
+        if _oid_first_idx is not None:
+            # Order-constant, counter-based on the order entity key. Channel-aware
+            # hour weights (digital when the channel/LUT is unavailable).
+            per_order_sc = sales_channel[_oid_first_idx] if sales_channel is not None else None
+            per_order_time = _timekey_by_channel_counter(
+                oid[_oid_first_idx], per_order_sc, channel_hour_lut)
+            timekey = per_order_time[_oid_inv]
+        elif sales_channel is None or channel_hour_lut is None:
+            # skip_order_cols, no channel LUT: digital-like fallback (per row, RNG).
             timekey = _sample_hour_weighted_minute(rng, n, DIGITAL_HOUR_W)
         else:
-            if _oid_first_idx is not None:
-                per_order_sc = sales_channel[_oid_first_idx]
-                per_order_time = _sample_timekey_by_channel(rng, per_order_sc, channel_hour_lut)
-                timekey = per_order_time[_oid_inv]
-            else:
-                timekey = _sample_timekey_by_channel(rng, sales_channel, channel_hour_lut)
+            # skip_order_cols with channels: per-row channel-aware sampling (RNG).
+            timekey = _sample_timekey_by_channel(rng, sales_channel, channel_hour_lut)
 
         out["TimeKey"] = timekey
 

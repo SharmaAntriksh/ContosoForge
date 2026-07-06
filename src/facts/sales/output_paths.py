@@ -44,12 +44,14 @@ def _to_snake(name: str) -> str:
 
 
 DEFAULT_TABLE_SPECS: Dict[str, TableSpec] = {
-    # Backward-compatible: Sales stays exactly as-is (root folder naming)
+    # Uniform layout: Sales lives in its own "sales/" subdir like every other
+    # table (chunks, merged file, and delta table). Packaging reads locations
+    # from the run manifest, so nothing depends on Sales sitting at the root.
     TABLE_SALES: TableSpec(
-        out_subdir="",
+        out_subdir=_to_snake(TABLE_SALES),                      # "sales"
         chunk_prefix="sales_chunk",
         merged_filename="sales.parquet",  # overridden by config if provided
-        delta_subdir="",                  # keep old delta layout
+        delta_subdir=_to_snake(TABLE_SALES),                    # "sales"
     ),
 
     # Future tables (not used until you enable sales_output modes)
@@ -150,6 +152,7 @@ class OutputPaths:
         Where the final merged parquet should go.
         - Sales uses config merged_file (default: 'sales.parquet').
         - Other tables use their spec default filename.
+        - Every table's merged file sits in that table's own folder.
         """
         spec = self.spec(table)
         merged = spec.merged_filename
@@ -161,11 +164,6 @@ class OutputPaths:
         if _is_abs(merged):
             return merged
 
-        # Backward-compat: Sales merged parquet sits in root out_folder
-        if table == TABLE_SALES:
-            return os.path.join(self.out_folder, merged)
-
-        # For future tables, place merged parquet in that table’s folder
         return os.path.join(self.table_out_dir(table), merged)
 
     # -----------------------------

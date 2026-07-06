@@ -102,7 +102,6 @@ def build_returns_policy(
         split_max_gap=int(returns_split_max_gap),
         lag_distribution=str(returns_lag_distribution),
         lag_mode=int(returns_lag_mode),
-        event_key_offset=0,
         logistics_keys=frozenset(returns_logistics_keys or ()),
         friction_return_boost=float(_ff.get("return_prob_boost", 0.0)) if _ff_on else 0.0,
         friction_lag_shorten=float(_ff.get("return_lag_shorten", 0.0)) if _ff_on else 0.0,
@@ -112,7 +111,7 @@ def build_returns_policy(
 def _build_worker_cfg(
     cust, month_plan, prod, stores, emps, corr, promos,
     cfg, sales_cfg, output_paths, run_cfg,
-    returns_policy, returns_event_key_capacity, models_cfg,
+    returns_policy, models_cfg,
 ):
     """Build the worker_cfg dict from typed containers and the run config.
 
@@ -230,7 +229,6 @@ def _build_worker_cfg(
         models_cfg=models_cfg,
 
         returns_policy=returns_policy,
-        returns_event_key_capacity=int(returns_event_key_capacity),
 
         seed_master=int(seed),
         employee_salesperson_seed=int(seed) + 99173,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import replace as _dc_replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Callable
 
 import numpy as np
@@ -10,11 +9,6 @@ import pyarrow.compute as pc
 
 from src.exceptions import SalesError
 from ..sales_logic import State, build_chunk_table
-from ..sales_logic.columns import (
-    SALES_CHANNEL_CORE_KEYS,
-    _load_sales_channels,
-    _sample_timekey_by_channel,
-)
 from ..chunk_result import ChunkResult
 from ..output_paths import TABLE_SALES, TABLE_SALES_ORDER_DETAIL, TABLE_SALES_ORDER_HEADER
 
@@ -55,49 +49,6 @@ except ImportError:
 
 Task = Tuple[int, int, Any]  # (idx, batch_size, seed)
 TaskArgs = Union[Task, Sequence[Task]]
-
-
-# ---------------------------------------------------------------------------
-# Shared order encoding — computed once per chunk, reused by all _ensure_* fns
-# ---------------------------------------------------------------------------
-
-class _OrderEncoding:
-    """Pre-computed OrderNumber dictionary encoding + first-row indices.
-
-    Shared by _ensure_sales_channel_key_on_lines and _ensure_time_key_on_lines
-    to avoid redundant pc.dictionary_encode + np.minimum.at calls.
-    """
-    __slots__ = ("enc", "n_orders", "order_inv", "first_row")
-
-    def __init__(self, enc: pa.DictionaryArray, n_orders: int,
-                 order_inv: np.ndarray, first_row: np.ndarray):
-        self.enc = enc
-        self.n_orders = n_orders
-        self.order_inv = order_inv
-        self.first_row = first_row
-
-
-def _encode_orders(table: pa.Table) -> Optional[_OrderEncoding]:
-    """Encode OrderNumber once; returns None if column absent."""
-    if "OrderNumber" not in table.column_names:
-        return None
-
-    order_col = table["OrderNumber"]
-    if isinstance(order_col, pa.ChunkedArray):
-        order_col = order_col.combine_chunks()
-
-    enc = pc.dictionary_encode(order_col)
-    n_orders = len(enc.dictionary)
-    order_inv = np.asarray(enc.indices.to_numpy(zero_copy_only=False), dtype=np.int64)
-
-    # First-row index per order (vectorized, single pass)
-    pos = np.arange(order_inv.size, dtype=np.int64)
-    first_row = np.full(n_orders, order_inv.size, dtype=np.int64)
-    np.minimum.at(first_row, order_inv, pos)
-    first_row[first_row == order_inv.size] = 0
-
-    return _OrderEncoding(enc=enc, n_orders=n_orders,
-                          order_inv=order_inv, first_row=first_row)
 
 
 def normalize_tasks(args: TaskArgs) -> Tuple[List[Task], bool]:
@@ -268,11 +219,11 @@ def _as_list(v: Any, default: Sequence[Any]) -> list[Any]:
 
 
 def _build_returns_config() -> Optional[ReturnsConfig]:
-    """Return the base ReturnsConfig bound on State (None when returns disabled).
+    """Return the ReturnsConfig bound on State (None when returns disabled).
 
-    The policy is built once in the coordinator and broadcast; _worker_task sets
-    the per-chunk event_key_offset/capacity (idx * returns_event_key_capacity)
-    via dataclasses.replace so each chunk's ReturnEventKey range stays disjoint.
+    Built once in the coordinator and broadcast, then used as-is per chunk:
+    ReturnEventKey is a hash of each event's (OrderNumber, line, ReturnSequence),
+    so no per-chunk offset is needed to keep keys disjoint across chunks.
     """
     policy = getattr(State, "returns_policy", None)
     if policy is not None and TABLE_SALES_RETURN is None:
@@ -295,125 +246,6 @@ def _maybe_build_returns(
     returns_seed = chunk_seed ^ 0x5A5A_1234
     returns_table = build_sales_returns_from_detail(source_table, chunk_seed=returns_seed, cfg=returns_cfg)
     return returns_table if returns_table.num_rows > 0 else None
-
-
-# -----------------------------
-# ChannelKey + TimeKey
-# -----------------------------
-
-def _channel_keys_and_probs() -> tuple[np.ndarray, np.ndarray]:
-    """(keys, p) for sampling ChannelKey, from the shared channel loader.
-
-    Falls back to the core channel keys from defaults when the dimension
-    parquet is unavailable.
-    """
-    cache = _load_sales_channels(State)
-    if cache is None:
-        keys = SALES_CHANNEL_CORE_KEYS
-        return keys, np.full(keys.shape[0], 1.0 / keys.shape[0], dtype=np.float64)
-    keys, p, _ = cache
-    return keys, p
-
-
-def _ensure_sales_channel_key_on_lines(
-    table: pa.Table, *, seed: int,
-    order_enc: Optional[_OrderEncoding] = None,
-) -> pa.Table:
-    """Add ChannelKey to a line-level table; constant within OrderNumber if present."""
-    if "ChannelKey" in table.column_names:
-        return table
-
-    keys, p = _channel_keys_and_probs()
-    rng = np.random.default_rng(seed)
-
-    # Build the encoding here when a caller didn't pass one (e.g. direct calls).
-    # _encode_orders returns None only when OrderNumber is absent; otherwise it
-    # reproduces exactly what _worker_task passes, so RNG draws are identical.
-    if order_enc is None:
-        order_enc = _encode_orders(table)
-
-    if order_enc is not None:
-        per_order = rng.choice(keys, size=order_enc.n_orders, p=p).astype(np.int32, copy=False)
-        per_order_arr = pa.array(per_order, type=pa.int32())
-        col = pc.take(per_order_arr, order_enc.enc.indices)
-    else:
-        per_row = rng.choice(keys, size=table.num_rows, p=p).astype(np.int32, copy=False)
-        col = pa.array(per_row, type=pa.int32())
-
-    return table.append_column("ChannelKey", col)
-
-
-def _combine_if_chunked(col: pa.Array) -> pa.Array:
-    """Combine a ChunkedArray into a single array; pass-through otherwise."""
-    if isinstance(col, pa.ChunkedArray):
-        return col.combine_chunks()
-    return col
-
-
-def _ensure_time_key_on_lines(
-    table: pa.Table, *, seed: int,
-    order_enc: Optional[_OrderEncoding] = None,
-) -> pa.Table:
-    """Ensure TimeKey exists and is constant within OrderNumber (if present)."""
-    rng = np.random.default_rng(seed)
-
-    cache = _load_sales_channels(State)
-    channel_hour_lut = cache[2] if cache is not None else None
-    has_channel = "ChannelKey" in table.column_names and channel_hour_lut is not None
-
-    # Build the encoding here when a caller didn't pass one (e.g. direct calls).
-    # _encode_orders returns None only when OrderNumber is absent; otherwise it
-    # reproduces exactly what _worker_task passes, so RNG draws are identical.
-    if order_enc is None:
-        order_enc = _encode_orders(table)
-
-    if order_enc is not None:
-        enc = order_enc.enc
-        n_orders = order_enc.n_orders
-        first = order_enc.first_row
-
-        if "TimeKey" in table.column_names:
-            tc_np = np.asarray(
-                _combine_if_chunked(table["TimeKey"]).to_numpy(zero_copy_only=False),
-                dtype=np.int32,
-            )
-            per_order_arr = pa.array(tc_np[first], type=pa.int32())
-            time_col = pc.take(per_order_arr, enc.indices)
-            idx = table.schema.get_field_index("TimeKey")
-            return table.set_column(idx, "TimeKey", time_col)
-
-        if has_channel:
-            sc_np = np.asarray(
-                _combine_if_chunked(table["ChannelKey"]).to_numpy(zero_copy_only=False),
-                dtype=np.int32,
-            )
-            per_order_sc = sc_np[first]
-            per_order_time = _sample_timekey_by_channel(rng, per_order_sc, channel_hour_lut)
-            per_order_arr = pa.array(per_order_time, type=pa.int32())
-            time_col = pc.take(per_order_arr, enc.indices)
-        else:
-            per_order = rng.integers(0, 1440, size=n_orders, dtype=np.int32)
-            per_order_arr = pa.array(per_order, type=pa.int32())
-            time_col = pc.take(per_order_arr, enc.indices)
-
-        return table.append_column("TimeKey", time_col)
-
-    # No OrderNumber: leave existing TimeKey alone; otherwise sample per row
-    if "TimeKey" in table.column_names:
-        return table
-
-    if has_channel:
-        sc_np = np.asarray(
-            _combine_if_chunked(table["ChannelKey"]).to_numpy(zero_copy_only=False),
-            dtype=np.int32,
-        )
-        out = _sample_timekey_by_channel(rng, sc_np, channel_hour_lut)
-        time_col = pa.array(out, type=pa.int32())
-    else:
-        per_row = rng.integers(0, 1440, size=table.num_rows, dtype=np.int32)
-        time_col = pa.array(per_row, type=pa.int32())
-
-    return table.append_column("TimeKey", time_col)
 
 
 def build_header_from_detail(detail: pa.Table, *, validate_invariants: bool = True) -> pa.Table:
@@ -572,13 +404,7 @@ def _worker_task(args):
     skip_order_cols_flag = bool(getattr(State, "skip_order_cols_requested", False))
 
     mode = _mode()
-    returns_cfg_base = _build_returns_config()
-    # Per-chunk ReturnEventKey ranges are offset by idx * capacity; read the
-    # capacity once (loop-invariant) rather than per chunk.
-    returns_capacity = (
-        int(getattr(State, "returns_event_key_capacity", 100000))
-        if returns_cfg_base is not None else 0
-    )
+    returns_cfg = _build_returns_config()
     do_budget = _budget_enabled()
     simple_aggs = _resolve_simple_agg_flags()
 
@@ -605,18 +431,6 @@ def _worker_task(args):
 
         chunk_seed = derive_chunk_seed(seed, idx_i)
 
-        # Per-chunk returns config with unique event_key_offset. Pass the capacity
-        # too so the builder can hard-fail on an over-capacity chunk instead of
-        # silently colliding with the next chunk's ReturnEventKey range.
-        if returns_cfg_base is not None:
-            returns_cfg = _dc_replace(
-                returns_cfg_base,
-                event_key_offset=idx_i * returns_capacity,
-                event_key_capacity=returns_capacity,
-            )
-        else:
-            returns_cfg = None
-
         detail_table = build_chunk_table(
             batch_i,
             chunk_seed,
@@ -624,12 +438,6 @@ def _worker_task(args):
             chunk_idx=idx_i,
             chunk_capacity_orders=cap_orders,
         )
-        order_enc = _encode_orders(detail_table)
-
-        detail_table = _ensure_sales_channel_key_on_lines(
-            detail_table, seed=chunk_seed ^ 0xA11CE, order_enc=order_enc)
-        detail_table = _ensure_time_key_on_lines(
-            detail_table, seed=chunk_seed ^ 0xC0FFEE, order_enc=order_enc)
 
         if not isinstance(detail_table, pa.Table):
             raise TypeError("chunk_builder must return pyarrow.Table")

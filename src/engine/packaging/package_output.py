@@ -24,7 +24,7 @@ from .sql_scripts import (
 
 
 def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
-                   *, order_id_int64: bool | None = None):
+                   *, order_id_int64: bool | None = None, manifest=None):
     """
     Orchestrates packaging:
       - Creates final packaged folder (dims + config copied by output_utils)
@@ -34,6 +34,12 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
     ``order_id_int64`` is the authoritative OrderNumber-width decision from the
     sales run manifest, threaded to the CREATE TABLE generator so the DDL's
     INT/BIGINT choice matches the emitted parquet dtype.
+
+    ``manifest`` is the :class:`SalesRunManifest` from the sales run. When
+    present, the fact copiers read each table's output location straight from it
+    instead of probing candidate paths — so a stale artifact from a previous run
+    can never be shipped in place of the fresh one. When None (legacy / direct
+    callers), the copiers fall back to their historical path probing.
     """
     file_format = str(sales_cfg.file_format).lower()
     is_csv = file_format == "csv"
@@ -173,7 +179,8 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
     tables = tables_from_sales_cfg(sales_cfg, cfg)
 
     if file_format == "parquet":
-        copy_parquet_facts(fact_out=fact_out, facts_out=facts_out, sales_cfg=sales_cfg, tables=tables)
+        copy_parquet_facts(fact_out=fact_out, facts_out=facts_out, sales_cfg=sales_cfg,
+                           tables=tables, manifest=manifest)
         _copy_budget_if_exists()
         _copy_inventory_if_exists()
         _copy_complaints_if_exists()
@@ -181,7 +188,8 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
         return final_folder
 
     if file_format == "deltaparquet":
-        copy_delta_facts(fact_out=fact_out, facts_out=facts_out, sales_cfg=sales_cfg, tables=tables)
+        copy_delta_facts(fact_out=fact_out, facts_out=facts_out, sales_cfg=sales_cfg,
+                         tables=tables, manifest=manifest)
         _copy_budget_if_exists()
         _copy_inventory_if_exists()
         _copy_complaints_if_exists()
@@ -191,7 +199,7 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
     if file_format != "csv":
         raise ValueError(f"Unsupported file_format in packaging: {file_format!r}")
 
-    copy_csv_facts(fact_out=fact_out, facts_out=facts_out, tables=tables)
+    copy_csv_facts(fact_out=fact_out, facts_out=facts_out, tables=tables, manifest=manifest)
     _copy_budget_if_exists()
     _copy_inventory_if_exists()
     _copy_complaints_if_exists()

@@ -739,17 +739,7 @@ def generate_sales_fact(
 
     chunk_size = _resolve_chunk_size(chunk_size, tune_chunk, workers, total_rows)
 
-    # Structural upper bound on returns events per chunk:
-    #   chunk_size_orders * max_lines_per_order * max_splits
-    # Independent of returns_rate / split_return_rate, so ReturnEventKey
-    # ranges stay disjoint across chunks even under chunk auto-tuning.
     _max_lines_per_order = _int_or(getattr(sales_cfg, "max_lines_per_order", 5), 5)
-    returns_event_key_capacity = (
-        int(chunk_size)
-        * max(_max_lines_per_order, 1)
-        * max(_returns.returns_max_splits, 1)
-        + 1
-    )
 
     # Load dimensions + correlation lookups (one concern).
     _pools = _load_sales_pools(
@@ -864,7 +854,7 @@ def generate_sales_fact(
     worker_cfg = _build_worker_cfg(
         _cust, _month_plan, _prod, _stores, _emps, _corr, _promos,
         cfg, sales_cfg, output_paths, _run_cfg,
-        _returns_policy, returns_event_key_capacity, models_cfg,
+        _returns_policy, models_cfg,
     )
 
     # Streaming accumulators (budget, inventory, wishlists, complaints)

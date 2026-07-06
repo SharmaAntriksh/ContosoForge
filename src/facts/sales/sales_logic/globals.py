@@ -130,9 +130,8 @@ class State:
 
     models_cfg = None
 
-    # Base returns policy (a ReturnsConfig, or None when returns are disabled),
-    # built once in the coordinator; the worker task applies the per-chunk
-    # event_key_offset/capacity. Replaces the old 16 loose returns_* attrs.
+    # Returns policy (a ReturnsConfig, or None when returns are disabled), built
+    # once in the coordinator. Replaces the old 16 loose returns_* attrs.
     returns_policy = None
 
     # --------------------------------------------------------------
@@ -267,7 +266,6 @@ class State:
     sales_output = None
     output_paths = None
     parquet_folder = None
-    returns_event_key_capacity = None
     validate_header_invariants = None
     salesperson_effective_by_store = None
     salesperson_global_pool = None
@@ -278,7 +276,6 @@ class State:
     # Output-schema / dict-encoding descriptors carried from the schema bundle.
     date_cols_by_table = None
     schema_by_table = None
-    sales_schema_out = None
     parquet_dict_cols = None
     parquet_dict_cols_by_table = None
 

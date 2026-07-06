@@ -10,11 +10,12 @@ context or failure injection:
   in-process rebind of ``models_cfg``;
 * partition/merge config silently dropped for a plain-dict cfg.
 
-The other defects from the same review have their own regression tests:
-ReturnEventKey capacity overflow (``test_returns_event_key_capacity.py``), the
+The other defects from the same review have their own regression tests: the
 CSV/parquet atomic-write windows (``test_sales_writer_atomic.py``), the
 optimize_parquet dict-encode drift (``test_optimize_parquet_dict.py``), and the
-EmployeeKey=-1 row drop (``test_employee_key_drop.py``).
+EmployeeKey=-1 row drop (``test_employee_key_drop.py``). ReturnEventKey no longer
+uses the per-chunk capacity scheme — it is a hash of each event's identity, pinned
+in ``test_multi_event_returns.py::TestReturnEventKey``.
 """
 from __future__ import annotations
 

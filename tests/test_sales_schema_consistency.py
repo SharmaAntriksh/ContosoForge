@@ -74,11 +74,10 @@ def _worker_sales_schema(skip_order_cols: bool) -> pa.Schema:
     """The Arrow schema the parquet writer actually emits for the Sales fact."""
     return build_worker_schemas(
         file_format="parquet",
-        skip_order_cols=skip_order_cols,
         skip_order_cols_requested=skip_order_cols,
         returns_enabled=False,
         order_id_int64=False,   # match get_sales_schema(total_rows=0), which keeps INT
-    ).sales_schema_out
+    ).sales_schema
 
 
 def _sql_sales_columns(skip_order_cols: bool) -> list[tuple[str, object]]:

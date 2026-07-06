@@ -117,12 +117,10 @@ class SalesWorkerCfg(TypedDict, total=False):
     models_cfg: Any
 
     # -- Returns -------------------------------------------------------------
-    # The base ReturnsConfig, built once in the coordinator (None when returns
-    # are disabled). The per-chunk event_key_offset/capacity is applied in the
-    # worker task; the capacity stride is kept as its own scalar because it is
-    # chunking arithmetic, not returns policy.
+    # The ReturnsConfig, built once in the coordinator (None when returns are
+    # disabled) and used as-is per chunk. ReturnEventKey is a hash of each event's
+    # (OrderNumber, line, ReturnSequence), so no per-chunk key stride is needed.
     returns_policy: Any
-    returns_event_key_capacity: int
 
     # -- Employee / salesperson ----------------------------------------------
     seed_master: int

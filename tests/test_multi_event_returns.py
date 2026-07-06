@@ -253,28 +253,47 @@ class TestMultiEventReturns:
         assert np.any(seq > 1)
 
 
+def _offset_orders(detail: pa.Table, off: int) -> pa.Table:
+    """Return *detail* with every OrderNumber shifted by *off* (simulates a
+    different chunk's disjoint OrderNumber range)."""
+    onum = detail.column("OrderNumber").to_numpy() + off
+    idx = detail.schema.get_field_index("OrderNumber")
+    return detail.set_column(idx, "OrderNumber", pa.array(onum.astype(np.int32)))
+
+
 class TestReturnEventKey:
-    def test_sequential_keys(self):
+    """ReturnEventKey is a hash of each event's globally-unique identity
+    (OrderNumber, OrderLineNumber, ReturnSequence) — no per-chunk offset."""
+
+    def test_keys_unique_and_nonnegative(self):
         detail = _make_detail(50)
-        cfg = ReturnsConfig(enabled=True, return_rate=1.0, event_key_offset=0)
+        cfg = ReturnsConfig(enabled=True, return_rate=1.0, split_return_rate=0.5, max_splits=3)
         result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
         keys = result.column("ReturnEventKey").to_numpy()
-        assert keys[0] == 1
-        assert np.all(np.diff(keys) == 1)
+        assert keys.dtype == np.int64
+        assert (keys >= 0).all()
+        assert len(np.unique(keys)) == len(keys)   # all distinct
 
-    def test_offset_applied(self):
+    def test_key_is_hash_of_identity(self):
+        from src.facts.sales.sales_worker.returns_builder import _RETURN_EVENT_SALT
+        from src.utils.hashing import hash_i64
         detail = _make_detail(50)
-        cfg = ReturnsConfig(enabled=True, return_rate=1.0, event_key_offset=100000)
-        result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+        cfg = ReturnsConfig(enabled=True, return_rate=1.0, split_return_rate=0.5, max_splits=3)
+        result = build_sales_returns_from_detail(detail, chunk_seed=7, cfg=cfg)
+        onum = result.column("OrderNumber").to_numpy()
+        line = result.column("OrderLineNumber").to_numpy()
+        seq = result.column("ReturnSequence").to_numpy()
         keys = result.column("ReturnEventKey").to_numpy()
-        assert keys[0] == 100001
+        expected = hash_i64(_RETURN_EVENT_SALT, onum, line, seq)
+        assert np.array_equal(keys, expected)
 
-    def test_no_overlap_across_chunks(self):
-        detail = _make_detail(50)
-        cfg1 = ReturnsConfig(enabled=True, return_rate=1.0, event_key_offset=0)
-        cfg2 = ReturnsConfig(enabled=True, return_rate=1.0, event_key_offset=10000)
-        r1 = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg1)
-        r2 = build_sales_returns_from_detail(detail, chunk_seed=99, cfg=cfg2)
+    def test_distinct_orders_give_disjoint_keys(self):
+        # Different OrderNumber ranges (as separate chunks have) produce disjoint
+        # keys with no offset coordination, because the identity triple differs.
+        cfg = ReturnsConfig(enabled=True, return_rate=1.0)
+        r1 = build_sales_returns_from_detail(_make_detail(50), chunk_seed=42, cfg=cfg)
+        r2 = build_sales_returns_from_detail(
+            _offset_orders(_make_detail(50), 10_000), chunk_seed=42, cfg=cfg)
         keys1 = set(r1.column("ReturnEventKey").to_numpy().tolist())
         keys2 = set(r2.column("ReturnEventKey").to_numpy().tolist())
         assert keys1.isdisjoint(keys2)

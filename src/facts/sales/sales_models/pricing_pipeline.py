@@ -15,9 +15,9 @@ import numpy as np
 
 from src.exceptions import SalesError
 from src.facts.sales.sales_logic import State
-from src.facts.sales.sales_logic.weights import normalize_cdf
+from src.facts.sales.sales_logic.weights import cdf_from_probs, normalize_cdf, pick_from_cdf
 from src.utils.logging_utils import warn
-from src.utils.hashing import GOLDEN, splitmix64, u01_from_u64
+from src.utils.hashing import hash_u01
 
 
 # ===============================================================
@@ -371,13 +371,14 @@ _UP_ROUND_SALT = np.uint64(0x50A1C0DE00000001)
 _UP_END_SALT = np.uint64(0x50A1C0DE00000002)
 _UC_END_SALT = np.uint64(0x50A1C0DE00000003)
 
+# Markdown discount draw, keyed on the per-line entity (OrderNumber, line) — a
+# distinct salt so it is independent of the posted-price snap on the same line.
+_MARKDOWN_SALT = np.uint64(0x5A1EC0DE00000010)
+
 
 def _price_hash_u01(product_ids, months, salt) -> np.ndarray:
     """Uniform double in [0, 1) keyed by (product_id, month)."""
-    p = np.asarray(product_ids).astype(np.int64, copy=False).astype(np.uint64, copy=False)
-    m = np.asarray(months).astype(np.int64, copy=False).astype(np.uint64, copy=False)
-    x = splitmix64(p * GOLDEN ^ (m + np.uint64(salt)))
-    return u01_from_u64(x)
+    return hash_u01(salt, product_ids, months)
 
 
 def _pick_ending(end_vals: np.ndarray, end_w: np.ndarray, hash_u: np.ndarray) -> np.ndarray:
@@ -598,10 +599,17 @@ def _global_start_month_int() -> int:
 # Public API
 # ===============================================================
 
-def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_key=1,
-                 product_ids=None):
+def build_prices(order_dates, qty, price, *, promo_keys=None, no_discount_key=1,
+                 product_ids=None, order_numbers=None, line_numbers=None):
     """
     Single-pass sales pricing pipeline.
+
+    Fully deterministic — no RNG. Both stochastic draws are counter-based: the
+    posted UnitPrice/UnitCost snap is hashed on (product_id, month), and the
+    markdown discount is hashed on the per-line entity key
+    (OrderNumber, OrderLineNumber). A line's price and discount are therefore a
+    pure function of its identity, independent of chunk_size, worker count, or
+    any other stage's draws.
 
     Takes base product prices and applies:
       1. Inflation drift (compound annual rate)
@@ -613,7 +621,6 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
 
     Parameters
     ----------
-    rng : numpy.random.Generator
     order_dates : array-like of datetime64
     qty : array-like of int (reserved for future basket-size pricing)
     price : dict with keys:
@@ -623,8 +630,7 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
         ``models.pricing.markdown.reconcile_promotions`` is on, the
         markdown is reconciled with the promotion: only promoted lines
         (``PromotionKey != no_discount_key``) receive a discount, drawn from the
-        nonzero ladder. When None (e.g. unit tests), the legacy independent
-        markdown lottery is used.
+        nonzero ladder. When None, the independent markdown lottery is used.
     no_discount_key : int
         The "no promotion" sentinel PromotionKey (default 1).
     product_ids : array-like of int
@@ -632,6 +638,11 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
         Required in the non-SCD2 path: the posted price/cost snap is hash-seeded
         on (product_id, month) so every line for a product-month shares one
         UnitPrice (see gotcha #26).
+    order_numbers, line_numbers : array-like of int or None
+        Per-line entity key for the markdown draw. When present the discount is
+        hashed on (OrderNumber, OrderLineNumber) so it varies per line; when
+        absent (skip_order_cols) it falls back to (product_id, month), then to
+        month alone (direct unit-test calls).
 
     Returns
     -------
@@ -716,27 +727,37 @@ def build_prices(rng, order_dates, qty, price, *, promo_keys=None, no_discount_k
 
     disc = np.zeros(n, dtype=np.float64)
 
+    # Per-line uniform for the markdown draw — counter-based off the line entity
+    # key, so a line's discount is a pure function of its identity and
+    # independent of every other stage's draws. Per line when order ids exist;
+    # falls back to (product, month) under skip_order_cols, then to month alone
+    # when neither is available (direct unit-test calls).
+    if order_numbers is not None and line_numbers is not None:
+        u_md = hash_u01(_MARKDOWN_SALT, order_numbers, line_numbers)
+    elif product_ids is not None:
+        _md_month = order_dates.astype("datetime64[M]").astype("int64")
+        u_md = hash_u01(_MARKDOWN_SALT, np.asarray(product_ids), _md_month)
+    else:
+        _md_month = order_dates.astype("datetime64[M]").astype("int64")
+        u_md = hash_u01(_MARKDOWN_SALT, _md_month)
+
     # When reconciling, a discount is a consequence of a promotion — only
-    # promoted lines draw one, from the *nonzero* ladder, so a promoted line
-    # always carries a real markdown while a "no promotion" line never does. The
-    # draw is compacted to the promoted subset (one draw per promoted line), so
-    # a non-promoted line consumes no randomness at all.
+    # promoted lines carry one, drawn from the *nonzero* ladder, so a promoted
+    # line always carries a real markdown while a "no promotion" line never does.
     _reconcile = (
         reconcile and md_enabled and promo_keys is not None
         and nz_kind_codes is not None and nz_kind_codes.size > 0
     )
     if _reconcile:
         promo_mask = np.asarray(promo_keys, dtype=np.int64) != int(no_discount_key)
-        n_promo = int(promo_mask.sum())
-        if n_promo > 0:
-            idx = rng.choice(nz_kind_codes.size, size=n_promo, replace=True, p=nz_probs)
-            kc = nz_kind_codes[idx]
-            v = nz_values[idx]
-            promo_disc = np.where(kc == 1, up[promo_mask] * v, 0.0)  # pct of snapped price
-            promo_disc = np.where(kc == 2, v, promo_disc)            # flat amt
-            disc[promo_mask] = promo_disc
+        idx = pick_from_cdf(cdf_from_probs(nz_probs), u_md)
+        kc = nz_kind_codes[idx]
+        v = nz_values[idx]
+        disc = np.where(kc == 1, up * v, 0.0)    # pct of snapped price
+        disc = np.where(kc == 2, v,      disc)   # flat amt
+        disc = np.where(promo_mask, disc, 0.0)   # no promotion -> no discount
     elif md_enabled and kind_codes.size > 0:
-        idx = rng.choice(kind_codes.size, size=n, replace=True, p=probs)
+        idx = pick_from_cdf(cdf_from_probs(probs), u_md)
         kc = kind_codes[idx]
         v = values[idx]
 

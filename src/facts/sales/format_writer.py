@@ -55,6 +55,7 @@ class ManifestFields:
     merged_path: Optional[str] = None       # parquet only
     delta_table_dir: Optional[str] = None   # delta only
     delta_parts_dir: Optional[str] = None   # delta only
+    out_dir: Optional[str] = None           # scratch dir holding this table's chunks
 
 
 def manifest_fields_for(
@@ -62,14 +63,21 @@ def manifest_fields_for(
 ) -> ManifestFields:
     """Resolve the manifest locators for one table under the given format.
 
-    Parquet records its merged file; Delta records its table + parts dirs; CSV
-    records neither (its chunk files are enumerated directly at package time).
+    Parquet records its merged file; Delta records its table + parts dirs. Every
+    format also records ``out_dir`` — the authoritative scratch folder the writer
+    put this table's chunks in — so packaging can copy from the declared location
+    (CSV chunks, or the parquet chunk fallback when merge is disabled) instead of
+    re-probing a list of candidate paths.
     """
+    out_dir = output_paths.table_out_dir(table)
     if fmt.is_parquet:
-        return ManifestFields(merged_path=output_paths.merged_path(table))
+        return ManifestFields(
+            merged_path=output_paths.merged_path(table), out_dir=out_dir
+        )
     if fmt.is_delta:
         return ManifestFields(
             delta_table_dir=output_paths.delta_table_dir(table),
             delta_parts_dir=output_paths.delta_parts_dir(table),
+            out_dir=out_dir,
         )
-    return ManifestFields()
+    return ManifestFields(out_dir=out_dir)

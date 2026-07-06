@@ -35,7 +35,25 @@ def resolve_csv_table_dir(fact_out: Path, table: str) -> Optional[Path]:
     return None
 
 
-def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str]) -> None:
+def _manifest_csv_dir(manifest, table: str) -> Optional[Path]:
+    """The scratch dir the run manifest declared for ``table``'s CSV chunks.
+
+    Authoritative: returns the declared dir only if it exists. Never probes the
+    legacy candidate list, so packaging copies from exactly where the writer put
+    the chunks.
+    """
+    if manifest is None:
+        return None
+    entry = getattr(manifest, "tables", {}).get(table)
+    out_dir = getattr(entry, "out_dir", None) if entry is not None else None
+    if out_dir:
+        p = Path(out_dir)
+        if p.is_dir():
+            return p
+    return None
+
+
+def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str], manifest=None) -> None:
     """
     Copy CSV fact chunk files into the packaged facts folder.
 
@@ -59,7 +77,12 @@ def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str]) -> Non
     plan: list[tuple[str, Path, list[Path], Path]] = []  # (table, src_dir, files, dst_dir)
 
     for t in tables:
-        src_dir = resolve_csv_table_dir(fact_out, t)
+        # Prefer the run manifest's declared scratch dir; fall back to the legacy
+        # probe only when no manifest was threaded in.
+        if manifest is not None:
+            src_dir = _manifest_csv_dir(manifest, t)
+        else:
+            src_dir = resolve_csv_table_dir(fact_out, t)
         if src_dir is None:
             missing_dirs.append(t)
             continue

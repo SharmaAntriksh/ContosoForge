@@ -97,12 +97,36 @@ def copy_delta_table_dir(src: Path, dst: Path, skip_dirnames: set[str]) -> None:
             shutil.copy2(item, target)
 
 
-def copy_delta_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict, tables: list[str]) -> None:
+def _manifest_delta_dir(manifest, table: str) -> Optional[Path]:
+    """The delta table dir the run manifest declared for ``table``.
+
+    Authoritative: returns the declared dir only if it actually looks like a
+    delta table (carries ``_delta_log``). Never probes the legacy multi-root
+    candidate list, so a stale delta table from a prior run can't be shipped.
+    """
+    if manifest is None:
+        return None
+    entry = getattr(manifest, "tables", {}).get(table)
+    dtd = getattr(entry, "delta_table_dir", None) if entry is not None else None
+    if dtd:
+        p = Path(dtd)
+        if looks_like_delta_table_dir(p):
+            return p
+    return None
+
+
+def copy_delta_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
+                     tables: list[str], manifest=None) -> None:
     copied = 0
     missing: list[str] = []
 
     for t in tables:
-        src_dir = find_delta_table_dir(fact_out, sales_cfg, t)
+        # Prefer the run manifest's declared delta table dir; fall back to the
+        # legacy multi-root probe only when no manifest was threaded in.
+        if manifest is not None:
+            src_dir = _manifest_delta_dir(manifest, t)
+        else:
+            src_dir = find_delta_table_dir(fact_out, sales_cfg, t)
         if src_dir is None:
             missing.append(t)
             info(

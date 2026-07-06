@@ -8,7 +8,7 @@ import numpy as np
 # re-exported here so existing import paths keep working; it was previously
 # duplicated in this module.
 from ..globals import fmt  # noqa: F401  (re-export for core + tests)
-from src.utils.hashing import GOLDEN, MIX_A, splitmix64, u01_from_u64
+from src.utils.hashing import GOLDEN, MIX_A, hash_u01, splitmix64
 
 
 # ----------------------------------------------------------------
@@ -67,13 +67,7 @@ def line_friction(order_numbers: np.ndarray, line_numbers: np.ndarray) -> np.nda
     worker count, or RNG state. High friction => late delivery + more/faster
     returns.
     """
-    o = np.asarray(order_numbers).astype(np.int64, copy=False).astype(np.uint64, copy=False)
-    ln = np.asarray(line_numbers).astype(np.int64, copy=False).astype(np.uint64, copy=False)
-    x = o * GOLDEN
-    x ^= (ln + _FRICTION_C)
-    x = splitmix64(x)
-    # Top 53 bits -> uniform double in [0, 1)
-    return u01_from_u64(x)
+    return hash_u01(_FRICTION_C, order_numbers, line_numbers)
 
 
 def _delay_from_quantile(t: np.ndarray, dmin: int, dmax: int, mode: int,

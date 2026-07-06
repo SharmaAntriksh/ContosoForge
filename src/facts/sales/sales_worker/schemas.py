@@ -83,9 +83,10 @@ def schema_dict_cols(schema: pa.Schema, exclude: Optional[Set[str]] = None) -> L
 
 @dataclass(frozen=True)
 class WorkerSchemaBundle:
-    # Sales schemas
-    sales_schema_gen: pa.Schema        # used by chunk builder; MUST match arrays it produces
-    sales_schema_out: pa.Schema        # used for write/projection/merge; includes injected cols like TimeKey
+    # The single Sales schema — the chunk builder emits every column (ChannelKey /
+    # TimeKey included), so the schema it writes and the write/projection/merge
+    # contract are one and the same.
+    sales_schema: pa.Schema
 
     # Table schemas + date-col policy
     schema_by_table: dict[str, pa.Schema]
@@ -109,7 +110,6 @@ _ALL_DELTA_FIELDS = {"Year": pa.field("Year", pa.int16()), "Month": pa.field("Mo
 def build_worker_schemas(
     *,
     file_format: str,
-    skip_order_cols: bool,
     skip_order_cols_requested: bool,
     returns_enabled: bool,
     parquet_dict_exclude: Optional[Set[str]] = None,
@@ -120,72 +120,56 @@ def build_worker_schemas(
     """
     Single source of truth for Sales / Order / Returns schemas & date-col policy.
 
-    IMPORTANT:
-      - sales_schema_gen is used by build_chunk_table (chunk builder). It must match the arrays that
-        the builder currently emits. If you inject columns later in task.py (e.g., TimeKey), DO NOT
-        add them to sales_schema_gen.
-      - sales_schema_out is the "contract" for output chunks/merged files. It can include injected
-        columns because projection/writing happens after injection.
+    The chunk builder emits every Sales column (ChannelKey/TimeKey included), so
+    there is one Sales schema: what the builder writes IS the write/merge/project
+    contract. The builder picks the no-order vs with-order (and ±delta) variant by
+    its own effective ``skip_cols``; ``sales_schema`` (keyed on
+    ``skip_order_cols_requested``) is the table-level output contract.
     """
 
     ff = (file_format or "").strip().lower()
     is_delta = ff == "deltaparquet"
 
     # ---------------------------------------------------------------------
-    # Sales schemas (GEN vs OUT)
+    # Sales schema
     # ---------------------------------------------------------------------
     # Project the canonical Sales schema (declared once as (name, ColumnSpec)
     # in static_schemas.py) into Arrow, so a column added/retyped there flows to
-    # parquet/delta with no second hand-maintained list.
-    #   GEN = what the chunk builder emits — ChannelKey/TimeKey are injected
-    #         later in task.py, so they are excluded here.
-    #   OUT = the write/merge/project contract — includes the injected columns.
-    # OrderNumber promotes to int64 per the run's authoritative order_id_int64
-    # decision (the ~8x-total_rows ID ceiling computed in sales.py).
+    # parquet/delta with no second hand-maintained list. OrderNumber promotes to
+    # int64 per the run's authoritative order_id_int64 decision (the
+    # ~8x-total_rows ID ceiling computed in sales.py).
     sales_full = get_sales_schema(skip_order_cols=False)   # canonical, with order cols
     sales_noord = get_sales_schema(skip_order_cols=True)   # canonical, no order cols
-    _INJECTED = frozenset({"ChannelKey", "TimeKey"})
 
     # Arrow dtype of OrderNumber for this run (int64 when the ID space needs it);
     # used to derive the Returns OrderNumber field via _returns_schema_for.
     order_num_type = pa.int64() if order_id_int64 else pa.int32()
 
-    fields_with_order_gen = _fields_from_logical(sales_full, drop=_INJECTED, order_id_int64=order_id_int64)
-    fields_no_order_gen = _fields_from_logical(sales_noord, drop=_INJECTED, order_id_int64=order_id_int64)
-    fields_with_order_out = _fields_from_logical(sales_full, order_id_int64=order_id_int64)
-    fields_no_order_out = _fields_from_logical(sales_noord, order_id_int64=order_id_int64)
+    fields_with_order = _fields_from_logical(sales_full, order_id_int64=order_id_int64)
+    fields_no_order = _fields_from_logical(sales_noord, order_id_int64=order_id_int64)
 
     if partition_cols:
         delta_fields = [_ALL_DELTA_FIELDS[c] for c in partition_cols if c in _ALL_DELTA_FIELDS]
     else:
         delta_fields = list(_ALL_DELTA_FIELDS.values())
 
-    # GEN variants
-    schema_no_order_gen = pa.schema(fields_no_order_gen)
-    schema_with_order_gen = pa.schema(fields_with_order_gen)
-    schema_no_order_delta_gen = pa.schema(fields_no_order_gen + delta_fields)
-    schema_with_order_delta_gen = pa.schema(fields_with_order_gen + delta_fields)
+    _no_order_plain = pa.schema(fields_no_order)
+    _with_order_plain = pa.schema(fields_with_order)
+    _no_order_delta = pa.schema(fields_no_order + delta_fields)
+    _with_order_delta = pa.schema(fields_with_order + delta_fields)
 
-    # OUT variants
-    schema_no_order_out = pa.schema(fields_no_order_out)
-    schema_with_order_out = pa.schema(fields_with_order_out)
-    schema_no_order_delta_out = pa.schema(fields_no_order_out + delta_fields)
-    schema_with_order_delta_out = pa.schema(fields_with_order_out + delta_fields)
-
+    # Under delta the base (non-``_delta``) variants also carry Year/Month, since
+    # the chunk builder emits the partition columns as part of the table.
+    schema_no_order_delta = _no_order_delta
+    schema_with_order_delta = _with_order_delta
     if is_delta:
-        sales_schema_gen = schema_no_order_delta_gen if skip_order_cols else schema_with_order_delta_gen
-        sales_schema_out = schema_no_order_delta_out if skip_order_cols_requested else schema_with_order_delta_out
-        schema_no_order = schema_no_order_delta_out
-        schema_with_order = schema_with_order_delta_out
-        schema_no_order_delta = schema_no_order_delta_out
-        schema_with_order_delta = schema_with_order_delta_out
+        schema_no_order = _no_order_delta
+        schema_with_order = _with_order_delta
+        sales_schema = _no_order_delta if skip_order_cols_requested else _with_order_delta
     else:
-        sales_schema_gen = schema_no_order_gen if skip_order_cols else schema_with_order_gen
-        sales_schema_out = schema_no_order_out if skip_order_cols_requested else schema_with_order_out
-        schema_no_order = schema_no_order_out
-        schema_with_order = schema_with_order_out
-        schema_no_order_delta = schema_no_order_delta_out
-        schema_with_order_delta = schema_with_order_delta_out
+        schema_no_order = _no_order_plain
+        schema_with_order = _with_order_plain
+        sales_schema = _no_order_plain if skip_order_cols_requested else _with_order_plain
 
     # ---------------------------------------------------------------------
     # OrderHeader / OrderDetail schemas (OUTPUT only) — projections of the
@@ -214,7 +198,7 @@ def build_worker_schemas(
     detail_schema = pa.schema(detail_fields + delta_fields) if is_delta else pa.schema(detail_fields)
 
     schema_by_table: dict[str, pa.Schema] = {
-        TABLE_SALES: sales_schema_out,
+        TABLE_SALES: sales_schema,
         TABLE_SALES_ORDER_DETAIL: detail_schema,
         TABLE_SALES_ORDER_HEADER: header_schema,
     }
@@ -260,8 +244,7 @@ def build_worker_schemas(
     parquet_dict_cols = parquet_dict_cols_by_table[TABLE_SALES]
 
     return WorkerSchemaBundle(
-        sales_schema_gen=sales_schema_gen,
-        sales_schema_out=sales_schema_out,
+        sales_schema=sales_schema,
         schema_by_table=schema_by_table,
         date_cols_by_table=date_cols_by_table,
         parquet_dict_exclude=pdx,
@@ -279,8 +262,7 @@ def build_worker_schemas_from_cfg(worker_cfg: Mapping) -> WorkerSchemaBundle:
 
     This is the single source of truth for turning a ``worker_cfg`` into the
     ``WorkerSchemaBundle``: it replicates exactly the parameter extraction that
-    ``init_sales_worker`` performs (including the ``sales_output`` -> forced
-    ``skip_order_cols=False`` rule) before delegating to ``build_worker_schemas``.
+    ``init_sales_worker`` performs before delegating to ``build_worker_schemas``.
     Both the per-worker init and the coordinator's Delta assembly call this, so
     the schema the workers write parts with and the schema the Delta commit
     adopts can never drift.
@@ -290,15 +272,10 @@ def build_worker_schemas_from_cfg(worker_cfg: Mapping) -> WorkerSchemaBundle:
         op.get("file_format") if isinstance(op, Mapping) else None
     )
 
-    sales_output = str(worker_cfg.get("sales_output") or "sales").lower()
     skip_order_cols = bool(worker_cfg.get("skip_order_cols", False))
-    # skip_order_cols_requested is resolved BEFORE the sales_output override,
-    # mirroring init_sales_worker.
     skip_order_cols_requested = bool(
         worker_cfg.get("skip_order_cols_requested", skip_order_cols)
     )
-    if sales_output in {"sales_order", "both"}:
-        skip_order_cols = False
 
     returns_enabled = worker_cfg.get("returns_policy") is not None
     order_id_int64 = bool(worker_cfg.get("order_id_int64", False))
@@ -308,7 +285,6 @@ def build_worker_schemas_from_cfg(worker_cfg: Mapping) -> WorkerSchemaBundle:
 
     return build_worker_schemas(
         file_format=file_format,
-        skip_order_cols=skip_order_cols,
         skip_order_cols_requested=skip_order_cols_requested,
         returns_enabled=returns_enabled,
         parquet_dict_exclude=set(parquet_dict_exclude) if parquet_dict_exclude else None,

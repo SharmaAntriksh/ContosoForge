@@ -9,6 +9,12 @@ import pyarrow as pa
 from src.defaults import RETURN_REASON_KEYS, RETURN_REASON_DEFAULT_WEIGHTS
 from src.exceptions import SalesError
 from src.facts.sales.sales_logic.core.delivery import line_friction
+from src.utils.hashing import hash_i64
+
+# ReturnEventKey is a counter-based hash of the event's globally-unique identity
+# (OrderNumber, OrderLineNumber, ReturnSequence) — no per-chunk offset/capacity
+# coordination needed.
+_RETURN_EVENT_SALT = np.uint64(0x8E7040DE00000001)
 
 
 # Columns required from OrderDetail to produce a returns fact table.
@@ -60,13 +66,6 @@ class ReturnsConfig:
     # Integer-cent (largest-remainder) proration for multi-event returns. Default
     # off reproduces the legacy per-event rounding byte-for-byte.
     reconcile_cents: bool = False
-    event_key_offset: int = 0
-    # Per-chunk ReturnEventKey capacity (0 = unchecked, for direct/test
-    # construction). Adjacent chunks space their key ranges exactly this far apart
-    # (event_key_offset = chunk_idx * capacity), so when >0 the builder hard-fails
-    # if a single chunk would emit more events than this rather than silently
-    # spilling into the next chunk's range.
-    event_key_capacity: int = 0
     logistics_keys: frozenset = frozenset()
     # Fulfillment-friction coupling (recomputed per line from
     # OrderNumber+OrderLineNumber). Defaults 0.0 => no effect (byte-identical to
@@ -373,21 +372,6 @@ def build_sales_returns_from_detail(
 
     total_events = int(num_events.sum())
 
-    # Guard the per-chunk ReturnEventKey range: keys are offset + [1..total_events]
-    # and adjacent chunks are spaced `event_key_capacity` apart, so overflowing
-    # the capacity would silently collide with the next chunk's keys. The
-    # coordinator sizes capacity as a structural upper bound
-    # (chunk_size * max_lines_per_order * max_splits + 1), so this only fires if
-    # that bound is ever wrong — fail loudly instead of shipping colliding keys.
-    _cap = int(getattr(cfg, "event_key_capacity", 0) or 0)
-    if _cap and total_events > _cap:
-        raise SalesError(
-            f"Returns produced {total_events} events in one chunk, exceeding the "
-            f"per-chunk ReturnEventKey capacity {_cap}; adjacent chunks' key ranges "
-            "would collide. Increase returns_event_key_capacity, or reduce "
-            "chunk_size / returns.max_splits."
-        )
-
     # --- Expand parent arrays by num_events ---
     so_exp = np.repeat(so, num_events)
     line_exp = np.repeat(line, num_events)
@@ -515,8 +499,10 @@ def build_sales_returns_from_detail(
                 base[order[:leftover]] += 1
             return_net_price[p:p + k] = base.astype(np.float64) / 100.0
 
-    # --- ReturnEventKey: sequential, globally unique via offset ---
-    return_event_key = cfg.event_key_offset + np.arange(1, total_events + 1, dtype=np.int64)
+    # --- ReturnEventKey: counter-based hash of the event's globally-unique
+    # identity (OrderNumber, OrderLineNumber, ReturnSequence). Unique across
+    # chunks without any per-chunk offset because the triple itself is unique.
+    return_event_key = hash_i64(_RETURN_EVENT_SALT, so_exp, line_exp, seq)
 
     return pa.table(
         {

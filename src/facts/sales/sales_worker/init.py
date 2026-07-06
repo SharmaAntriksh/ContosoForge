@@ -653,11 +653,9 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
 
         skip_order_cols_requested = bool(worker_cfg.get("skip_order_cols_requested", skip_order_cols))
 
-        # The base returns policy is built once in the coordinator and flows as a
-        # single object (None when disabled); only the per-chunk capacity stride
-        # is still a loose scalar here.
+        # The returns policy is built once in the coordinator and flows as a
+        # single object (None when disabled).
         returns_policy = worker_cfg.get("returns_policy")
-        returns_event_key_capacity = int(worker_cfg.get("returns_event_key_capacity", 100000))
 
         if sales_output in {"sales_order", "both"}:
             skip_order_cols = False
@@ -1087,14 +1085,12 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "schema_with_order": bundle.schema_with_order,
             "schema_no_order_delta": bundle.schema_no_order_delta,
             "schema_with_order_delta": bundle.schema_with_order_delta,
-            "sales_schema": bundle.sales_schema_gen,
-            "sales_schema_out": bundle.sales_schema_out,
+            "sales_schema": bundle.sales_schema,
             "schema_by_table": bundle.schema_by_table,
             "parquet_dict_cols_by_table": bundle.parquet_dict_cols_by_table,
             "parquet_dict_exclude": bundle.parquet_dict_exclude,
             "parquet_dict_cols": bundle.parquet_dict_cols,
             "returns_policy": returns_policy,
-            "returns_event_key_capacity": returns_event_key_capacity,
             # EMPLOYEE assignment (canonical day-accurate bridge)
             "salesperson_effective_by_store": salesperson_effective_by_store,
             "salesperson_global_pool": salesperson_global_pool,

@@ -477,10 +477,13 @@ class TestPromotionReconciliation:
         self._bind_state(reconcile=reconcile, ladder=ladder)
         n = int(n if n is not None else len(promo_keys))
         order_dates = np.full(n, np.datetime64("2022-06-15"), dtype="datetime64[D]")
-        rng = np.random.default_rng(20260701)
+        # Per-line entity key so the counter-based markdown varies per line.
+        order_numbers = np.arange(1, n + 1, dtype=np.int64)
+        line_numbers = np.ones(n, dtype=np.int64)
         price = build_prices(
-            rng, order_dates, np.ones(n, dtype=np.int64), self._price_dict(n),
+            order_dates, np.ones(n, dtype=np.int64), self._price_dict(n),
             promo_keys=promo_keys, no_discount_key=self.NO_DISCOUNT_KEY,
+            order_numbers=order_numbers, line_numbers=line_numbers,
         )
         return price["discount_amt"], price["final_net_price"]
 
@@ -519,35 +522,40 @@ class TestPromotionReconciliation:
         # regardless of any (absent) promotion assignment.
         assert (disc > 0.0).any()
 
-    def test_reconcile_draws_only_for_promoted_lines(self):
-        # A discount is drawn per PROMOTED line (the draw is compacted to the
-        # promoted subset), so the k-th promoted line's discount depends on its
-        # rank k, not its absolute row index. Two layouts with the same promoted
-        # count but different positions therefore yield the same promoted-discount
-        # sequence. A multi-entry nonzero ladder makes the per-line draw vary, so
-        # this fails under a size-n over-draw (which keys discounts to absolute
-        # position) and passes under the compacted draw.
+    def test_markdown_is_per_line_counter_based(self):
+        # The markdown discount is a pure function of the line's
+        # (OrderNumber, OrderLineNumber) key — no shared RNG stream — so a line's
+        # discount is identical whether it is computed in a full batch or in any
+        # subset carrying the same keys. A multi-entry nonzero ladder makes the
+        # per-line draw actually vary (else the property holds trivially).
         ladder = [
             {"kind": "none", "value": 0.0, "weight": 0.4},
             {"kind": "pct", "value": 0.10, "weight": 0.3},
             {"kind": "pct", "value": 0.30, "weight": 0.3},
         ]
-        n = 60
-        pk_front = np.full(n, self.NO_DISCOUNT_KEY, dtype=np.int32)
-        pk_front[:20] = 5
-        pk_spread = np.full(n, self.NO_DISCOUNT_KEY, dtype=np.int32)
-        pk_spread[::3] = 5  # 20 promoted, different positions
+        self._bind_state(reconcile=True, ladder=ladder)
+        n = 400
+        dates = np.full(n, np.datetime64("2022-06-15"), dtype="datetime64[D]")
+        oids = np.arange(1000, 1000 + n, dtype=np.int64)
+        lines = np.ones(n, dtype=np.int64)
+        promo = np.full(n, 5, dtype=np.int32)  # all promoted
 
-        disc_front, _ = self._run(reconcile=True, promo_keys=pk_front, ladder=ladder)
-        disc_spread, _ = self._run(reconcile=True, promo_keys=pk_spread, ladder=ladder)
+        full = build_prices(
+            dates, np.ones(n, dtype=np.int64), self._price_dict(n),
+            promo_keys=promo, no_discount_key=self.NO_DISCOUNT_KEY,
+            order_numbers=oids, line_numbers=lines,
+        )["discount_amt"]
 
-        np.testing.assert_allclose(
-            disc_front[pk_front != self.NO_DISCOUNT_KEY],
-            disc_spread[pk_spread != self.NO_DISCOUNT_KEY],
-        )
-        # Non-promoted lines never carry a discount.
-        assert np.all(disc_front[pk_front == self.NO_DISCOUNT_KEY] == 0.0)
-        assert np.all(disc_spread[pk_spread == self.NO_DISCOUNT_KEY] == 0.0)
+        # A scattered subset carrying the SAME keys reproduces each line's
+        # discount exactly — impossible under a shared sequential RNG stream.
+        sel = np.array([0, 5, 17, 100, 399, 250, 3])
+        sub = build_prices(
+            dates[sel], np.ones(sel.size, dtype=np.int64), self._price_dict(sel.size),
+            promo_keys=promo[sel], no_discount_key=self.NO_DISCOUNT_KEY,
+            order_numbers=oids[sel], line_numbers=lines[sel],
+        )["discount_amt"]
+        np.testing.assert_allclose(sub, full[sel])
+        assert np.unique(full).size >= 2  # the per-line ladder draw actually varies
 
 
 # ===================================================================
@@ -599,7 +607,6 @@ class TestDeterministicPostedPrice:
             "final_net_price": base.copy(),
         }
         out = build_prices(
-            np.random.default_rng(1),
             np.asarray(dates, dtype="datetime64[D]"),
             np.ones(n, dtype=np.int64), price,
             product_ids=np.asarray(product_ids, dtype=np.int32),
@@ -628,7 +635,6 @@ class TestDeterministicPostedPrice:
         }
         with pytest.raises(SalesError, match="product_ids"):
             build_prices(
-                np.random.default_rng(1),
                 np.array(["2022-06-15"] * n, dtype="datetime64[D]"),
                 np.ones(n, dtype=np.int64), price,
                 product_ids=None,

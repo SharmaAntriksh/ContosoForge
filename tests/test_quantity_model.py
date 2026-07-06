@@ -313,3 +313,85 @@ class TestQuantityElasticity:
         assert _reference_price(None) == 100.0
         # explicit config value overrides the auto median
         assert _reference_price(250.0) == 250.0
+
+
+# ===================================================================
+# Counter-based quantity (hashed on the line entity key)
+# ===================================================================
+
+class TestQuantityCounterBased:
+    def setup_method(self):
+        State.reset()
+        _reset_cache()
+
+    def teardown_method(self):
+        State.reset()
+        _reset_cache()
+
+    def _setup_state(self, **over):
+        q = {
+            "base_poisson_lambda": 1.7,
+            "monthly_factors": _DEFAULTS["monthly_factors"],
+            "noise_sigma": 0.12,
+            "min_qty": 1,
+            "max_qty": 8,
+        }
+        q.update(over)
+        State.models_cfg = {"quantity": q}
+
+    @staticmethod
+    def _keys(n):
+        orders = (5000 + np.arange(n)).astype(np.int64)
+        lines = (np.arange(n) % 3 + 1).astype(np.int64)
+        return orders, lines
+
+    def test_keyed_quantity_is_pure_function_of_key(self):
+        self._setup_state()
+        n = 600
+        dates = np.repeat(np.array(["2023-03-10"], dtype="datetime64[D]"), n)
+        orders, lines = self._keys(n)
+        rng = np.random.default_rng(0)
+
+        before = dict(rng.bit_generator.state)
+        q1 = build_quantity(rng, dates, order_numbers=orders, line_numbers=lines)
+        # Counter-based: the RNG stream is untouched when keys are present.
+        assert rng.bit_generator.state == before
+
+        # Permuting the keys reproduces each line's quantity exactly — a pure
+        # function of (order, line), impossible under a shared RNG stream.
+        perm = np.random.default_rng(1).permutation(n)
+        q2 = build_quantity(rng, dates[perm], order_numbers=orders[perm], line_numbers=lines[perm])
+        np.testing.assert_array_equal(q1[perm], q2)
+
+        assert q1.min() >= 1 and q1.max() <= 8
+        assert len(np.unique(q1)) > 1   # real variety, not a constant
+
+    def test_skip_cols_falls_back_to_rng(self):
+        self._setup_state()
+        n = 500
+        dates = np.repeat(np.array(["2023-03-10"], dtype="datetime64[D]"), n)
+        rng = np.random.default_rng(0)
+
+        before = dict(rng.bit_generator.state)
+        q = build_quantity(rng, dates)   # no entity key
+        assert rng.bit_generator.state != before   # RNG advanced
+        # Still deterministic for a fixed seed.
+        q_again = build_quantity(np.random.default_rng(0), dates)
+        np.testing.assert_array_equal(q, q_again)
+
+    def test_keyed_marginal_matches_rng(self):
+        # Wide clamp + larger lambda so the Poisson+lognormal marginal is
+        # visible (not compressed by the [1, 8] clamp). The counter-based draw
+        # and the RNG draw are the same distribution, so their moments agree.
+        self._setup_state(base_poisson_lambda=5.0, max_qty=200, noise_sigma=0.3)
+        n = 100_000
+        dates = np.repeat(np.array(["2023-05-01"], dtype="datetime64[D]"), n)
+        orders = np.arange(1, n + 1, dtype=np.int64)
+        lines = np.ones(n, dtype=np.int64)
+
+        q_keyed = build_quantity(np.random.default_rng(0), dates,
+                                 order_numbers=orders, line_numbers=lines)
+        q_rng = build_quantity(np.random.default_rng(0), dates)
+
+        assert abs(q_keyed.mean() - q_rng.mean()) / q_rng.mean() < 0.02
+        assert abs(q_keyed.std() - q_rng.std()) / q_rng.std() < 0.06

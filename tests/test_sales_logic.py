@@ -1583,36 +1583,32 @@ class TestBuildWorkerSchemas:
     def test_parquet_with_order_cols(self):
         bundle = build_worker_schemas(
             file_format="parquet",
-            skip_order_cols=False,
             skip_order_cols_requested=False,
             returns_enabled=False,
         )
-        assert "OrderNumber" in bundle.sales_schema_gen.names
-        assert "OrderLineNumber" in bundle.sales_schema_gen.names
+        assert "OrderNumber" in bundle.sales_schema.names
+        assert "OrderLineNumber" in bundle.sales_schema.names
 
     def test_parquet_skip_order_cols(self):
         bundle = build_worker_schemas(
             file_format="parquet",
-            skip_order_cols=True,
             skip_order_cols_requested=True,
             returns_enabled=False,
         )
-        assert "OrderNumber" not in bundle.sales_schema_gen.names
+        assert "OrderNumber" not in bundle.sales_schema.names
 
     def test_delta_format_has_year_month(self):
         bundle = build_worker_schemas(
             file_format="deltaparquet",
-            skip_order_cols=False,
             skip_order_cols_requested=False,
             returns_enabled=False,
         )
-        assert "Year" in bundle.sales_schema_gen.names
-        assert "Month" in bundle.sales_schema_gen.names
+        assert "Year" in bundle.sales_schema.names
+        assert "Month" in bundle.sales_schema.names
 
     def test_returns_schema_present_when_enabled(self):
         bundle = build_worker_schemas(
             file_format="parquet",
-            skip_order_cols=False,
             skip_order_cols_requested=False,
             returns_enabled=True,
         )
@@ -1621,56 +1617,44 @@ class TestBuildWorkerSchemas:
     def test_date_cols_present(self):
         bundle = build_worker_schemas(
             file_format="parquet",
-            skip_order_cols=False,
             skip_order_cols_requested=False,
             returns_enabled=False,
         )
         assert len(bundle.date_cols_by_table) > 0
 
-    def test_gen_schema_no_time_key(self):
-        """GEN schema should NOT include TimeKey (injected later in task.py)."""
+    def test_sales_schema_has_channel_and_time_key(self):
+        """The chunk builder emits every column, so the single Sales schema
+        includes ChannelKey/TimeKey (no GEN/OUT split, no task.py injection)."""
         bundle = build_worker_schemas(
             file_format="parquet",
-            skip_order_cols=False,
             skip_order_cols_requested=False,
             returns_enabled=False,
         )
-        assert "TimeKey" not in bundle.sales_schema_gen.names
-
-    def test_out_schema_has_time_key(self):
-        """OUT schema SHOULD include TimeKey."""
-        bundle = build_worker_schemas(
-            file_format="parquet",
-            skip_order_cols=False,
-            skip_order_cols_requested=False,
-            returns_enabled=False,
-        )
-        assert "TimeKey" in bundle.sales_schema_out.names
+        assert "ChannelKey" in bundle.sales_schema.names
+        assert "TimeKey" in bundle.sales_schema.names
 
     def test_order_number_int32_by_default(self):
         """SCHEMA-1: small runs keep OrderNumber as int32."""
         bundle = build_worker_schemas(
             file_format="parquet",
-            skip_order_cols=False,
             skip_order_cols_requested=False,
             returns_enabled=True,
         )
         for tbl in ("OrderDetail", "OrderHeader", "Returns"):
             assert bundle.schema_by_table[tbl].field("OrderNumber").type == pa.int32()
-        assert bundle.sales_schema_gen.field("OrderNumber").type == pa.int32()
+        assert bundle.sales_schema.field("OrderNumber").type == pa.int32()
 
     def test_order_id_int64_promotes_all_tables(self):
         """SCHEMA-1: order_id_int64=True promotes OrderNumber everywhere."""
         bundle = build_worker_schemas(
             file_format="parquet",
-            skip_order_cols=False,
             skip_order_cols_requested=False,
             returns_enabled=True,
             order_id_int64=True,
         )
         for tbl in ("OrderDetail", "OrderHeader", "Returns"):
             assert bundle.schema_by_table[tbl].field("OrderNumber").type == pa.int64()
-        assert bundle.sales_schema_gen.field("OrderNumber").type == pa.int64()
+        assert bundle.sales_schema.field("OrderNumber").type == pa.int64()
 
 
 class TestDeriveChunkSeed:
@@ -1706,11 +1690,11 @@ class TestOrderIdInt64PathsAgree:
 
     def _arrow_is_int64(self, flag: bool) -> bool:
         bundle = build_worker_schemas(
-            file_format="parquet", skip_order_cols=False,
+            file_format="parquet",
             skip_order_cols_requested=False, returns_enabled=True,
             order_id_int64=flag,
         )
-        return bundle.sales_schema_gen.field("OrderNumber").type == pa.int64()
+        return bundle.sales_schema.field("OrderNumber").type == pa.int64()
 
     def _sql_is_bigint(self, flag: bool) -> bool:
         cols = dict(get_sales_schema(False, force_int64=flag))
