@@ -88,9 +88,21 @@ BEGIN
         CASE WHEN @net_exceed = 0 THEN 'PASS' ELSE 'FAIL' END,
         CAST(@net_exceed AS VARCHAR) + ' violations');
 
-    -- Delivery delay rate (IsOrderDelayed is on header in sales_order mode)
+    -- Delivery delay rate, at ORDER grain. IsOrderDelayed is an order-level
+    -- flag (any late line marks the whole order) that is broadcast to every
+    -- line of the order, so averaging it per Sales line over-weights large
+    -- orders and overstates the rate (e.g. 42% per line vs 31% per order on a
+    -- 1.8-lines/order set). Count the share of distinct *orders* delayed, which
+    -- is what "Delayed orders" means. OrderHeader is already one row per order;
+    -- in flat 'sales' mode without OrderNumber (skip_order_cols) each row is its
+    -- own order, so the row rate is correct there.
     DECLARE @delay_pct DECIMAL(5,1);
-    IF @has_sales = 1
+    IF @has_sales = 1 AND COL_LENGTH(N'dbo.Sales', N'OrderNumber') IS NOT NULL
+        SELECT @delay_pct = ISNULL(
+            COUNT(DISTINCT CASE WHEN IsOrderDelayed = 1 THEN OrderNumber END) * 100.0
+            / NULLIF(COUNT(DISTINCT OrderNumber), 0), 0)
+        FROM dbo.Sales;
+    ELSE IF @has_sales = 1
         SELECT @delay_pct = ISNULL(
             SUM(CAST(IsOrderDelayed AS INT)) * 100.0 / NULLIF(COUNT(*), 0), 0)
         FROM dbo.Sales;
@@ -99,7 +111,7 @@ BEGIN
             SUM(CAST(IsOrderDelayed AS INT)) * 100.0 / NULLIF(COUNT(*), 0), 0)
         FROM dbo.OrderHeader;
     INSERT INTO #R VALUES ('Distribution', 'Delayed orders < 35%',
-        'Order delay rate should be a minority',
+        'Order delay rate should be a minority (share of distinct orders delayed)',
         CASE WHEN @delay_pct < 35 THEN 'PASS' ELSE 'FAIL' END,
         CAST(@delay_pct AS VARCHAR) + '% delayed');
 
