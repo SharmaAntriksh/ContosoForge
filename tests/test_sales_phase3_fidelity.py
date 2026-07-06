@@ -229,8 +229,10 @@ class TestFulfillmentFriction:
     def test_delivery_status_shares_are_configured(self, phase3_env):
         """Delivery status shares track the configured (p_early, p_delayed)."""
         shares = phase3_env.sales["DeliveryStatus"].value_counts(normalize=True)
-        # models.yaml ships p_early=0.10, p_delayed=0.20.
-        assert abs(shares.get("Delayed", 0.0) - 0.20) < 0.04
+        # models.yaml ships p_early=0.10, p_delayed=0.08 (per line). The delayed
+        # share tracks p_delayed directly; the order-grain late rate is higher
+        # (1-(1-p)^lines_per_order) but that's not what DeliveryStatus measures.
+        assert abs(shares.get("Delayed", 0.0) - 0.08) < 0.04
         assert abs(shares.get("Early Delivery", 0.0) - 0.10) < 0.04
 
     def test_late_deliveries_are_returned_more(self, phase3_env):

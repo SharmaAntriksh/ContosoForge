@@ -1104,7 +1104,8 @@ class FulfillmentConfig(_Base):
     """
     enabled: bool = True
     p_early: float = 0.10       # share of lines delivered early
-    p_delayed: float = 0.20     # share of lines delivered late (p_ontime = 1 - both)
+    p_delayed: float = 0.08     # per-line late share (p_ontime = 1 - both); order-grain
+                                # late rate = 1-(1-p)^lines_per_order (~13-14% typical)
     delay_distribution: Literal["uniform", "triangular"] = "triangular"
     delay_min: int = 1
     delay_max: int = 10

@@ -164,7 +164,9 @@ models:
   fulfillment:
     enabled: true
     p_early: 0.10               # share delivered early
-    p_delayed: 0.20             # share delivered late (on-time = remainder)
+    p_delayed: 0.08             # per-line late share; ~13-14% of orders late
+                                #   (order-grain = 1-(1-p)^lines_per_order), in
+                                #   the realistic retail 5-15% band. On-time = rest.
     delay_distribution: triangular   # uniform | triangular
     delay_min: 1
     delay_max: 10

@@ -122,7 +122,7 @@ def _friction_delivery_offset(n, has_orders, order_ids_int, line_numbers,
         friction = np.asarray(hash_vals, dtype=np.float64) / _TWO_POW_63
 
     p_early = min(max(float(cfg.get("p_early", 0.10)), 0.0), 1.0)
-    p_delayed = min(max(float(cfg.get("p_delayed", 0.20)), 0.0), 1.0 - p_early)
+    p_delayed = min(max(float(cfg.get("p_delayed", 0.08)), 0.0), 1.0 - p_early)
     dmin = int(cfg.get("delay_min", 1))
     dmax = int(cfg.get("delay_max", 10))
     mode = int(cfg.get("delay_mode", 3))
