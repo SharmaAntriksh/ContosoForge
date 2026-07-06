@@ -49,24 +49,51 @@ def resolve_merged_parquet(fact_out: Path, sales_cfg: dict, table: str) -> Optio
     return None
 
 
-def _find_chunk_parquets(fact_out: Path, table: str) -> list[Path]:
-    """Find unmerged chunk parquet files for a table when merge is disabled."""
+def _find_chunk_parquets(
+    fact_out: Path, table: str, manifest_out_dir: Optional[Path] = None
+) -> list[Path]:
+    """Find unmerged chunk parquet files for a table when merge is disabled.
+
+    Prefers the manifest-declared scratch dir (authoritative — copies from exactly
+    where the writer put the chunks, no candidate probing); falls back to the
+    legacy candidate roots only when no manifest dir was threaded in.
+    """
     snake = table_dir_name(table)
+    prefix = f"{snake}_chunk"
+
+    if manifest_out_dir is not None:
+        return sorted(manifest_out_dir.glob(f"{prefix}*.parquet"))
 
     if table == TABLE_SALES:
-        # Sales chunks live directly in fact_out or fact_out/parquet
-        for root in [fact_out, fact_out / "parquet"]:
-            chunks = sorted(root.glob("sales_chunk*.parquet"))
-            if chunks:
-                return chunks
+        # Uniform layout puts Sales chunks in fact_out/parquet/sales; older layouts
+        # rooted them at fact_out or fact_out/parquet.
+        roots = [fact_out / "parquet" / snake, fact_out, fact_out / "parquet"]
     else:
         # Other tables: chunks live in fact_out/<subdir>/ or fact_out/parquet/<subdir>/
-        prefix = f"{snake}_chunk"
-        for root in [fact_out / snake, fact_out / "parquet" / snake, fact_out, fact_out / "parquet"]:
-            chunks = sorted(root.glob(f"{prefix}*.parquet"))
-            if chunks:
-                return chunks
+        roots = [fact_out / snake, fact_out / "parquet" / snake, fact_out, fact_out / "parquet"]
+    for root in roots:
+        chunks = sorted(root.glob(f"{prefix}*.parquet"))
+        if chunks:
+            return chunks
     return []
+
+
+def _manifest_out_dir(manifest, table: str) -> Optional[Path]:
+    """The scratch dir the run manifest declared for ``table``'s parquet chunks.
+
+    Authoritative: returns the declared dir only if it exists, so a merge-disabled
+    run copies chunks from exactly where the writer put them (never a stale sibling
+    from a prior run at a different layout).
+    """
+    if manifest is None:
+        return None
+    entry = getattr(manifest, "tables", {}).get(table)
+    out_dir = getattr(entry, "out_dir", None) if entry is not None else None
+    if out_dir:
+        p = Path(out_dir)
+        if p.is_dir():
+            return p
+    return None
 
 
 def _manifest_merged_parquet(manifest, table: str) -> Optional[Path]:
@@ -110,8 +137,9 @@ def copy_parquet_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
             copied += 1
             continue
 
-        # No merged file — try copying unmerged chunks into a subdirectory
-        chunks = _find_chunk_parquets(fact_out, t)
+        # No merged file — copy unmerged chunks into a subdirectory. Prefer the
+        # manifest's declared scratch dir; probe legacy roots only without one.
+        chunks = _find_chunk_parquets(fact_out, t, _manifest_out_dir(manifest, t))
         if chunks:
             dst_dir = facts_out / table_dir_name(t)
             dst_dir.mkdir(parents=True, exist_ok=True)

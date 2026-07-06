@@ -32,7 +32,8 @@ from tests import sales_gen  # noqa: E402
 _SALES_MARKER_COLS = {"UnitPrice", "CustomerKey", "ProductKey"}
 
 
-def _make_cfg(dims_dir, scratch, final, *, fmt, sales_output="sales", returns=False):
+def _make_cfg(dims_dir, scratch, final, *, fmt, sales_output="sales",
+              returns=False, merge_parquet=None):
     """A small_config patched to a specific output format / sales mode."""
     cfg = sales_gen.small_config(
         dims_dir=dims_dir, scratch_dir=scratch, final_dir=final,
@@ -40,6 +41,8 @@ def _make_cfg(dims_dir, scratch, final, *, fmt, sales_output="sales", returns=Fa
     )
     cfg["sales"]["file_format"] = fmt
     cfg["sales"]["sales_output"] = sales_output
+    if merge_parquet is not None:
+        cfg["sales"]["merge_parquet"] = merge_parquet
     if returns:
         cfg.setdefault("returns", {})["enabled"] = True
         cfg["returns"].setdefault("return_rate", 0.2)
@@ -74,12 +77,14 @@ def dims_dir(tmp_path_factory):
     return ddir
 
 
-def _run(dims_dir, tmp_path, *, fmt, sales_output="sales", returns=False) -> Path:
+def _run(dims_dir, tmp_path, *, fmt, sales_output="sales", returns=False,
+         merge_parquet=None) -> Path:
     scratch, final = tmp_path / "scratch", tmp_path / "final"
     scratch.mkdir(parents=True, exist_ok=True)
     final.mkdir(parents=True, exist_ok=True)
     cfg = _make_cfg(dims_dir, scratch, final, fmt=fmt,
-                    sales_output=sales_output, returns=returns)
+                    sales_output=sales_output, returns=returns,
+                    merge_parquet=merge_parquet)
     sales_gen.run_pipeline_stage(tmp_path, cfg, only="sales")
     return _packaged_facts_dir(final)
 
@@ -97,6 +102,21 @@ class TestParquetPackaging:
         for name in ("sales.parquet", "order_detail.parquet",
                      "order_header.parquet", "returns.parquet"):
             assert (facts / name).is_file(), f"missing packaged {name} under {facts}"
+
+    def test_merge_disabled_ships_unmerged_chunks(self, dims_dir, tmp_path):
+        """merge_parquet=False must package the Sales chunk files, not crash.
+
+        Regression for the uniform-scratch-layout move: Sales chunks now land in
+        ``scratch/parquet/sales/`` and the chunk fallback has to look there.
+        """
+        facts = _run(dims_dir, tmp_path, fmt="parquet",
+                     sales_output="sales", merge_parquet=False)
+        assert not (facts / "sales.parquet").exists(), "expected no merged file"
+        sales_dir = facts / "sales"
+        assert sales_dir.is_dir(), f"missing packaged facts/sales/ under {facts}"
+        chunks = list(sales_dir.glob("sales_chunk*.parquet"))
+        assert chunks, f"no unmerged sales chunks packaged under {sales_dir}"
+        assert _is_sales_parquet(chunks[0])
 
 
 class TestCSVPackaging:

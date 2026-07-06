@@ -841,6 +841,47 @@ class TestPackagerManifest:
         assert (facts_out / "sales" / "sales_chunk0001.parquet").exists()
         assert (facts_out / "sales" / "sales_chunk0002.parquet").exists()
 
+    def test_parquet_merge_disabled_uniform_layout_ships_chunks(self, tmp_path):
+        """Merge disabled under the uniform layout: Sales chunks live in
+        ``parquet/sales/`` and are copied via the manifest's ``out_dir``.
+
+        Regression: the chunk fallback used to probe only ``fact_out`` and
+        ``fact_out/parquet`` — never ``fact_out/parquet/sales`` — so a
+        merge-disabled parquet run crashed with ``No merged parquet found``.
+        """
+        fact_out = tmp_path / "scratch"
+        chunk_dir = fact_out / "parquet" / "sales"
+        chunk_dir.mkdir(parents=True)
+        (chunk_dir / "sales_chunk0001.parquet").write_bytes(b"CHUNK1")
+        (chunk_dir / "sales_chunk0002.parquet").write_bytes(b"CHUNK2")
+
+        facts_out = tmp_path / "packaged"
+        facts_out.mkdir()
+
+        manifest = self._manifest("parquet", "Sales",
+                                  merged_path=str(fact_out / "never" / "sales.parquet"),
+                                  out_dir=str(chunk_dir))
+        copy_parquet_facts(fact_out=fact_out, facts_out=facts_out,
+                           sales_cfg={}, tables=["Sales"], manifest=manifest)
+        assert (facts_out / "sales" / "sales_chunk0001.parquet").exists()
+        assert (facts_out / "sales" / "sales_chunk0002.parquet").exists()
+
+    def test_parquet_merge_disabled_no_manifest_probes_sales_subdir(self, tmp_path):
+        """Without a manifest, the legacy probe still finds Sales chunks in the
+        uniform ``parquet/sales/`` layout (not only the older roots)."""
+        fact_out = tmp_path / "scratch"
+        chunk_dir = fact_out / "parquet" / "sales"
+        chunk_dir.mkdir(parents=True)
+        (chunk_dir / "sales_chunk0001.parquet").write_bytes(b"CHUNK1")
+
+        facts_out = tmp_path / "packaged"
+        facts_out.mkdir()
+
+        copy_parquet_facts(fact_out=fact_out, facts_out=facts_out,
+                           sales_cfg={"merged_file": "sales.parquet"},
+                           tables=["Sales"], manifest=None)
+        assert (facts_out / "sales" / "sales_chunk0001.parquet").exists()
+
     # --- delta -----------------------------------------------------
 
     def test_delta_ships_declared_table_dir(self, tmp_path):
