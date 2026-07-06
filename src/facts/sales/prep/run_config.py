@@ -33,7 +33,7 @@ class ReturnsResolved:
     flags. ``effective`` differs from ``requested`` only when returns are
     switched off because ``sales_output='sales'`` with ``skip_order_cols`` leaves
     no order identifiers to link a return back to a sale. The fields feed the
-    ``tables`` list, the ReturnEventKey capacity, and ``build_returns_policy``.
+    ``tables`` list and ``build_returns_policy``.
     """
 
     returns_enabled_requested: bool

@@ -43,10 +43,11 @@ def _require_start_end(raw_start: Any, raw_end: Any) -> Tuple[pd.Timestamp, pd.T
     """Parse and validate the start/end date pair.
 
     An inverted range (end < start) is a config bug — raise rather than silently
-    swap, matching the customers dimension. NOTE: this is stricter than the
-    shared ``config_helpers.parse_global_dates`` (used by employees, products,
-    and complaints), which still warn-and-swaps; that inconsistency is a known
-    open decision, not parity.
+    swap, matching the customers dimension. The shared
+    ``config_helpers.parse_global_dates`` (used by employees, products, and
+    complaints) now raises on the same condition too; the only difference is the
+    exception type — this dimension-layer entry point raises ``DimensionError``
+    while the shared helper raises ``ConfigError``.
     """
     if raw_start is None or raw_end is None or raw_start == "" or raw_end == "":
         raise DimensionError("Missing required start/end dates (defaults.dates or dates.override).")
