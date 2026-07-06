@@ -306,9 +306,17 @@ GO
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
--- PK: ReturnEventKey (surrogate; only when column exists)
+-- PK: natural composite (OrderNumber, OrderLineNumber, ReturnSequence).
+-- Unique by construction. ReturnEventKey is a 63-bit hash of that same triple,
+-- so it is only *probabilistically* unique -- it is kept as a plain surrogate
+-- column (still joinable) rather than the declared key, to avoid a downstream
+-- duplicate-key import failure on the rare hash collision at very large scales.
+-- The PK index's leading (OrderNumber, OrderLineNumber) prefix also serves the
+-- FK join back to Sales, so no separate natural-key index is needed.
 IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.Returns', N'ReturnEventKey') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'OrderNumber') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'OrderLineNumber') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'ReturnSequence') IS NOT NULL
 AND NOT EXISTS (
     SELECT 1
     FROM sys.key_constraints
@@ -317,22 +325,7 @@ AND NOT EXISTS (
 )
 BEGIN
     ALTER TABLE dbo.Returns
-    ADD CONSTRAINT PK_Returns PRIMARY KEY NONCLUSTERED ([ReturnEventKey]);
-END;
-
--- Natural-key access path (non-unique; supports joins back to Sales)
-IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
-AND COL_LENGTH(N'dbo.Returns', N'OrderNumber') IS NOT NULL
-AND COL_LENGTH(N'dbo.Returns', N'OrderLineNumber') IS NOT NULL
-AND NOT EXISTS (
-    SELECT 1
-    FROM sys.indexes
-    WHERE name = N'IX_Returns_NaturalKey'
-      AND object_id = OBJECT_ID(N'dbo.Returns')
-)
-BEGIN
-    CREATE INDEX IX_Returns_NaturalKey
-    ON dbo.Returns ([OrderNumber], [OrderLineNumber], [ReturnSequence]);
+    ADD CONSTRAINT PK_Returns PRIMARY KEY NONCLUSTERED ([OrderNumber], [OrderLineNumber], [ReturnSequence]);
 END;
 GO
 

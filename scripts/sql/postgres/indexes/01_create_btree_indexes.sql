@@ -268,8 +268,8 @@ END $$;
 
 -----------------------------------------------------------------------
 -- SALESRETURN FACT FK COLUMNS
--- (OrderNumber + OrderLineNumber composite is already
---  indexed via IX_Returns_NaturalKey from the constraints script.)
+-- (OrderNumber + OrderLineNumber composite is already indexed as the leading
+--  prefix of PK_Returns from the constraints script.)
 -----------------------------------------------------------------------
 
 DO $$

@@ -211,28 +211,23 @@ END $$;
 -- 4. SALESRETURN: PRIMARY KEY + INDEXES
 -----------------------------------------------------------------------
 
--- PK: ReturnEventKey (surrogate; only when column exists)
-DO $$
-BEGIN
-    IF to_regclass('"public"."Returns"') IS NOT NULL
-       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnEventKey')
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Returns')
-    THEN
-        ALTER TABLE "public"."Returns"
-        ADD CONSTRAINT "PK_Returns" PRIMARY KEY ("ReturnEventKey");
-    END IF;
-END $$;
-
--- Natural-key access path (non-unique; supports joins back to Sales)
+-- PK: natural composite (OrderNumber, OrderLineNumber, ReturnSequence).
+-- Unique by construction. ReturnEventKey is a 63-bit hash of that same triple,
+-- so it is only *probabilistically* unique -- it is kept as a plain surrogate
+-- column (still joinable) rather than the declared key, to avoid a downstream
+-- duplicate-key import failure on the rare hash collision at very large scales.
+-- The PK index's leading (OrderNumber, OrderLineNumber) prefix also serves the
+-- FK join back to Sales, so no separate natural-key index is needed.
 DO $$
 BEGIN
     IF to_regclass('"public"."Returns"') IS NOT NULL
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderNumber')
        AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='OrderLineNumber')
-       AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='Returns' AND indexname='IX_Returns_NaturalKey')
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ReturnSequence')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PK_Returns')
     THEN
-        CREATE INDEX "IX_Returns_NaturalKey"
-        ON "public"."Returns" ("OrderNumber", "OrderLineNumber", "ReturnSequence");
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "PK_Returns" PRIMARY KEY ("OrderNumber", "OrderLineNumber", "ReturnSequence");
     END IF;
 END $$;
 
