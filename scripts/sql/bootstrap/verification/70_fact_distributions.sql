@@ -98,10 +98,17 @@ BEGIN
     -- own order, so the row rate is correct there.
     DECLARE @delay_pct DECIMAL(5,1);
     IF @has_sales = 1 AND COL_LENGTH(N'dbo.Sales', N'OrderNumber') IS NOT NULL
+        -- Collapse to one row per order first (MAX flag = "any line late"),
+        -- then average over orders. Avoids COUNT(DISTINCT CASE ...), whose NULL
+        -- branch trips a spurious "Null value is eliminated by an aggregate"
+        -- warning, and scans the table once instead of twice.
         SELECT @delay_pct = ISNULL(
-            COUNT(DISTINCT CASE WHEN IsOrderDelayed = 1 THEN OrderNumber END) * 100.0
-            / NULLIF(COUNT(DISTINCT OrderNumber), 0), 0)
-        FROM dbo.Sales;
+            SUM(o.IsDelayed) * 100.0 / NULLIF(COUNT(*), 0), 0)
+        FROM (
+            SELECT MAX(CAST(IsOrderDelayed AS INT)) AS IsDelayed
+            FROM dbo.Sales
+            GROUP BY OrderNumber
+        ) o;
     ELSE IF @has_sales = 1
         SELECT @delay_pct = ISNULL(
             SUM(CAST(IsOrderDelayed AS INT)) * 100.0 / NULLIF(COUNT(*), 0), 0)
