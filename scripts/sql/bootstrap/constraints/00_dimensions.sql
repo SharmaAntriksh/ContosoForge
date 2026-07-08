@@ -1257,3 +1257,107 @@ BEGIN
             CHECK ([ResponseDays] >= 0);
 END;
 GO
+
+-----------------------------------------------------------------------
+-- RETURNS -> SNAPSHOT-AT-SALE DIMENSION FKs
+--   Returns carries CustomerKey/ProductKey/StoreKey/EmployeeKey copied verbatim
+--   from the sold line, so these links are valid in EVERY sales_output mode
+--   (sales / sales_order / both). They live here — the always-composed dimension
+--   constraints file — rather than being duplicated across the mode-gated
+--   flat-Sales and order-split constraint files, so one definition covers all
+--   modes. OBJECT_ID + COL_LENGTH guards skip each FK when Returns or the key
+--   column is absent (e.g. returns disabled, or an older Returns table).
+-----------------------------------------------------------------------
+SET NOCOUNT ON;
+SET XACT_ABORT ON;
+
+-- Returns -> Customers
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
+AND OBJECT_ID(N'dbo.Customers', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'CustomerKey') IS NOT NULL
+AND NOT EXISTS (
+    SELECT 1
+    FROM sys.foreign_keys
+    WHERE name = N'FK_Returns_Customers'
+      AND parent_object_id = OBJECT_ID(N'dbo.Returns')
+)
+BEGIN
+    ALTER TABLE dbo.Returns WITH CHECK
+    ADD CONSTRAINT FK_Returns_Customers
+        FOREIGN KEY ([CustomerKey])
+        REFERENCES dbo.Customers ([CustomerKey]);
+
+    ALTER TABLE dbo.Returns CHECK CONSTRAINT FK_Returns_Customers;
+END;
+
+-- Returns -> Products (ProductKey is the exact SCD2 version that was sold)
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
+AND OBJECT_ID(N'dbo.Products', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'ProductKey') IS NOT NULL
+AND NOT EXISTS (
+    SELECT 1
+    FROM sys.foreign_keys
+    WHERE name = N'FK_Returns_Products'
+      AND parent_object_id = OBJECT_ID(N'dbo.Returns')
+)
+BEGIN
+    ALTER TABLE dbo.Returns WITH CHECK
+    ADD CONSTRAINT FK_Returns_Products
+        FOREIGN KEY ([ProductKey])
+        REFERENCES dbo.Products ([ProductKey]);
+
+    ALTER TABLE dbo.Returns CHECK CONSTRAINT FK_Returns_Products;
+END;
+
+-- Returns -> Stores
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
+AND OBJECT_ID(N'dbo.Stores', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'StoreKey') IS NOT NULL
+AND NOT EXISTS (
+    SELECT 1
+    FROM sys.foreign_keys
+    WHERE name = N'FK_Returns_Stores'
+      AND parent_object_id = OBJECT_ID(N'dbo.Returns')
+)
+BEGIN
+    ALTER TABLE dbo.Returns WITH CHECK
+    ADD CONSTRAINT FK_Returns_Stores
+        FOREIGN KEY ([StoreKey])
+        REFERENCES dbo.Stores ([StoreKey]);
+
+    ALTER TABLE dbo.Returns CHECK CONSTRAINT FK_Returns_Stores;
+END;
+
+-- Returns -> Employees (full type-compatibility guard, matching FK_Sales_Employees)
+IF OBJECT_ID(N'dbo.Returns', N'U') IS NOT NULL
+AND OBJECT_ID(N'dbo.Employees', N'U') IS NOT NULL
+AND COL_LENGTH(N'dbo.Returns', N'EmployeeKey') IS NOT NULL
+AND NOT EXISTS (
+    SELECT 1
+    FROM sys.foreign_keys
+    WHERE name = N'FK_Returns_Employees'
+      AND parent_object_id = OBJECT_ID(N'dbo.Returns')
+)
+AND EXISTS (
+    SELECT 1
+    FROM sys.columns pc
+    JOIN sys.columns rc
+      ON rc.object_id = OBJECT_ID(N'dbo.Employees')
+     AND rc.name = N'EmployeeKey'
+    WHERE pc.object_id = OBJECT_ID(N'dbo.Returns')
+      AND pc.name = N'EmployeeKey'
+      AND pc.system_type_id = rc.system_type_id
+      AND pc.user_type_id  = rc.user_type_id
+      AND pc.max_length    = rc.max_length
+      AND pc.precision     = rc.precision
+      AND pc.scale         = rc.scale
+)
+BEGIN
+    ALTER TABLE dbo.Returns WITH CHECK
+    ADD CONSTRAINT FK_Returns_Employees
+        FOREIGN KEY ([EmployeeKey])
+        REFERENCES dbo.Employees ([EmployeeKey]);
+
+    ALTER TABLE dbo.Returns CHECK CONSTRAINT FK_Returns_Employees;
+END;
+GO

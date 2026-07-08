@@ -151,3 +151,19 @@ relationship 935eba66-7eab-315d-b084-dd857b8a7e7e
 	fromColumn: Complaints.CustomerKey
 	toColumn: Customer.CustomerKey
 
+
+relationship b0000001-0000-4000-8000-000000000001
+	fromColumn: Returns.CustomerKey
+	toColumn: Customer.CustomerKey
+
+relationship b0000002-0000-4000-8000-000000000002
+	fromColumn: Returns.ProductKey
+	toColumn: Products.ProductKey
+
+relationship b0000003-0000-4000-8000-000000000003
+	fromColumn: Returns.StoreKey
+	toColumn: Store.StoreKey
+
+relationship b0000004-0000-4000-8000-000000000004
+	fromColumn: Returns.EmployeeKey
+	toColumn: Employee.EmployeeKey

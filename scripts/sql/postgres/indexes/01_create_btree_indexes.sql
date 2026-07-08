@@ -292,6 +292,48 @@ BEGIN
     END IF;
 END $$;
 
+-- Snapshot-at-sale dimension FK columns (carried from the sold line). Guarded on
+-- column existence so an older Returns table generated before these keys is skipped.
+DO $$
+BEGIN
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='CustomerKey')
+    THEN
+        CREATE INDEX IF NOT EXISTS "IX_Returns_CustomerKey"
+            ON "public"."Returns" ("CustomerKey");
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ProductKey')
+    THEN
+        CREATE INDEX IF NOT EXISTS "IX_Returns_ProductKey"
+            ON "public"."Returns" ("ProductKey");
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='StoreKey')
+    THEN
+        CREATE INDEX IF NOT EXISTS "IX_Returns_StoreKey"
+            ON "public"."Returns" ("StoreKey");
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='EmployeeKey')
+    THEN
+        CREATE INDEX IF NOT EXISTS "IX_Returns_EmployeeKey"
+            ON "public"."Returns" ("EmployeeKey");
+    END IF;
+END $$;
+
 -----------------------------------------------------------------------
 -- SALESORDERHEADER FK COLUMNS
 -- (OrderNumber has UQ_OrderHeader_OrderNumber.)

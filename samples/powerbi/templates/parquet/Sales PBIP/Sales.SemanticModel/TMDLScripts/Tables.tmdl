@@ -4220,6 +4220,42 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
+		column CustomerKey
+			dataType: int64
+			formatString: 0
+			lineageTag: c0000001-0000-4000-8000-000000000001
+			summarizeBy: none
+			sourceColumn: CustomerKey
+
+			annotation SummarizationSetBy = Automatic
+
+		column ProductKey
+			dataType: int64
+			formatString: 0
+			lineageTag: c0000002-0000-4000-8000-000000000002
+			summarizeBy: none
+			sourceColumn: ProductKey
+
+			annotation SummarizationSetBy = Automatic
+
+		column StoreKey
+			dataType: int64
+			formatString: 0
+			lineageTag: c0000003-0000-4000-8000-000000000003
+			summarizeBy: none
+			sourceColumn: StoreKey
+
+			annotation SummarizationSetBy = Automatic
+
+		column EmployeeKey
+			dataType: int64
+			formatString: 0
+			lineageTag: c0000004-0000-4000-8000-000000000004
+			summarizeBy: none
+			sourceColumn: EmployeeKey
+
+			annotation SummarizationSetBy = Automatic
+
 		column ReturnDate
 			dataType: dateTime
 			formatString: yyyy-mm-dd

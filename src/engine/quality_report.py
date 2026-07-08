@@ -311,8 +311,12 @@ def _check_referential_integrity(
         ("sales", "fact", "EmployeeKey", "employees", "EmployeeKey"),
         ("sales", "fact", "ChannelKey", "channels", "ChannelKey"),
         ("sales", "fact", "TimeKey", "time", "TimeKey"),
-        # Sales return → dimensions
+        # Sales return → dimensions (snapshot-at-sale keys carried from the sold line)
         ("returns", "fact", "ReturnReasonKey", "return_reason", "ReturnReasonKey"),
+        ("returns", "fact", "CustomerKey", "customers", "CustomerKey"),
+        ("returns", "fact", "ProductKey", "products", "ProductKey"),
+        ("returns", "fact", "StoreKey", "stores", "StoreKey"),
+        ("returns", "fact", "EmployeeKey", "employees", "EmployeeKey"),
         # Inventory → dimensions
         ("inventory_snapshot", "fact", "ProductKey", "products", "ProductKey"),
         ("inventory_snapshot", "fact", "StoreKey", "stores", "StoreKey"),

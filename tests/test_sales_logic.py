@@ -96,6 +96,7 @@ from src.facts.sales.sales_worker.schemas import (
     build_worker_schemas,
     schema_dict_cols,
 )
+from tests.returns_fixtures import dim_keys
 
 
 # ===================================================================
@@ -1416,6 +1417,7 @@ def _make_detail_table(n: int = 50) -> pa.Table:
         "Quantity": pa.array(rng.integers(1, 10, size=n, dtype=np.int32), type=pa.int32()),
         "NetPrice": pa.array(rng.uniform(10.0, 100.0, size=n), type=pa.float64()),
         "IsOrderDelayed": pa.array(rng.integers(0, 2, size=n, dtype=np.int32), type=pa.int32()),
+        **dim_keys(n),
     })
 
 
@@ -1446,6 +1448,7 @@ class TestBuildReturns:
             "Quantity": pa.array(rng.integers(1, 10, size=n, dtype=np.int32), type=pa.int32()),
             "NetPrice": pa.array(rng.uniform(10.0, 100.0, size=n), type=pa.float64()),
             "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32), type=pa.int32()),
+            **dim_keys(n),
         })
 
     def test_int64_detail_preserves_dtype_and_value(self):

@@ -944,3 +944,72 @@ BEGIN
             CHECK ("ResponseDays" >= 0);
     END IF;
 END $$;
+
+-----------------------------------------------------------------------
+-- Returns -> snapshot-at-sale dimension FKs
+--   Returns carries CustomerKey/ProductKey/StoreKey/EmployeeKey copied verbatim
+--   from the sold line, valid in every sales_output mode. Defined here (the
+--   always-composed dimension constraints file) instead of being duplicated
+--   across the mode-gated flat-Sales and order-split constraint files. Column-
+--   existence guards skip each FK when Returns or the key column is absent.
+-----------------------------------------------------------------------
+
+-- Returns -> Customers
+DO $$
+BEGIN
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND to_regclass('"public"."Customers"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='CustomerKey')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Customers' AND conrelid = to_regclass('"public"."Returns"') AND contype = 'f')
+    THEN
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "FK_Returns_Customers"
+            FOREIGN KEY ("CustomerKey")
+            REFERENCES "public"."Customers" ("CustomerKey");
+    END IF;
+END $$;
+
+-- Returns -> Products (ProductKey is the exact SCD2 version that was sold)
+DO $$
+BEGIN
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND to_regclass('"public"."Products"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='ProductKey')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Products' AND conrelid = to_regclass('"public"."Returns"') AND contype = 'f')
+    THEN
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "FK_Returns_Products"
+            FOREIGN KEY ("ProductKey")
+            REFERENCES "public"."Products" ("ProductKey");
+    END IF;
+END $$;
+
+-- Returns -> Stores
+DO $$
+BEGIN
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND to_regclass('"public"."Stores"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='StoreKey')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Stores' AND conrelid = to_regclass('"public"."Returns"') AND contype = 'f')
+    THEN
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "FK_Returns_Stores"
+            FOREIGN KEY ("StoreKey")
+            REFERENCES "public"."Stores" ("StoreKey");
+    END IF;
+END $$;
+
+-- Returns -> Employees
+DO $$
+BEGIN
+    IF to_regclass('"public"."Returns"') IS NOT NULL
+       AND to_regclass('"public"."Employees"') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='Returns' AND column_name='EmployeeKey')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'FK_Returns_Employees' AND conrelid = to_regclass('"public"."Returns"') AND contype = 'f')
+    THEN
+        ALTER TABLE "public"."Returns"
+        ADD CONSTRAINT "FK_Returns_Employees"
+            FOREIGN KEY ("EmployeeKey")
+            REFERENCES "public"."Employees" ("EmployeeKey");
+    END IF;
+END $$;

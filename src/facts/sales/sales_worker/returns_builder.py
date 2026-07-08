@@ -18,6 +18,12 @@ _RETURN_EVENT_SALT = np.uint64(0x8E7040DE00000001)
 
 
 # Columns required from OrderDetail to produce a returns fact table.
+#
+# The first block is consumed by the returns *logic* (dates, quantities, reasons,
+# friction). The dimension keys that follow are pure carry-through: they are
+# snapshotted from the sold line onto each return event so Returns is a first-class
+# star fact (direct Customer/Product/Store/Employee relationships) rather than one
+# that can only be sliced by routing filter context through Sales.
 RETURNS_REQUIRED_DETAIL_COLS: tuple[str, ...] = (
     "OrderNumber",
     "OrderLineNumber",
@@ -25,16 +31,28 @@ RETURNS_REQUIRED_DETAIL_COLS: tuple[str, ...] = (
     "Quantity",
     "NetPrice",
     "IsOrderDelayed",
+    # Snapshot-at-sale dimension keys (carry-through)
+    "CustomerKey",
+    "ProductKey",
+    "StoreKey",
+    "EmployeeKey",
 )
 
 # Output schema for the Returns fact table.
 #
 # Notes on semantics:
+# - CustomerKey/ProductKey/StoreKey/EmployeeKey are snapshotted from the sold line
+#   (value-at-transaction), so under SCD2 the ProductKey is the exact product
+#   *version* that was sold. They enable direct star relationships to those dims.
 # - ReturnNetPrice is a *line amount* prorated by returned quantity.
 RETURNS_SCHEMA = pa.schema(
     [
         ("OrderNumber", pa.int32()),
         ("OrderLineNumber", pa.int32()),
+        ("CustomerKey", pa.int32()),
+        ("ProductKey", pa.int32()),
+        ("StoreKey", pa.int32()),
+        ("EmployeeKey", pa.int32()),
         ("ReturnDate", pa.date32()),
         ("ReturnReasonKey", pa.int32()),
         ("ReturnQuantity", pa.int32()),
@@ -340,6 +358,14 @@ def build_sales_returns_from_detail(
     is_delayed = _as_np_i32(_col_np(detail_cc, "IsOrderDelayed"))[mask]
     friction = friction_all[mask] if friction_all is not None else None
 
+    # Snapshot-at-sale dimension keys — pure carry-through (no RNG consumed), so
+    # the rest of the returns table stays byte-identical; only these columns are
+    # added. Masked to the returned lines here, expanded per event below.
+    cust = _as_np_i32(_col_np(detail_cc, "CustomerKey"))[mask]
+    prod = _as_np_i32(_col_np(detail_cc, "ProductKey"))[mask]
+    store = _as_np_i32(_col_np(detail_cc, "StoreKey"))[mask]
+    emp = _as_np_i32(_col_np(detail_cc, "EmployeeKey"))[mask]
+
     m = int(qty.size)
     if m == 0:
         return _empty_returns_table(_so_type)
@@ -378,6 +404,10 @@ def build_sales_returns_from_detail(
     delivery_exp = np.repeat(delivery, num_events)
     qty_exp = np.repeat(qty, num_events)  # original line qty (for pro-rating)
     net_price_exp = np.repeat(net_price, num_events)
+    cust_exp = np.repeat(cust, num_events)
+    prod_exp = np.repeat(prod, num_events)
+    store_exp = np.repeat(store, num_events)
+    emp_exp = np.repeat(emp, num_events)
 
     # --- ReturnSequence: 1, 2, 3... per group ---
     if total_events == m:
@@ -508,6 +538,10 @@ def build_sales_returns_from_detail(
         {
             "OrderNumber": pa.array(so_exp, type=_so_type),
             "OrderLineNumber": pa.array(line_exp, type=pa.int32()),
+            "CustomerKey": pa.array(cust_exp, type=pa.int32()),
+            "ProductKey": pa.array(prod_exp, type=pa.int32()),
+            "StoreKey": pa.array(store_exp, type=pa.int32()),
+            "EmployeeKey": pa.array(emp_exp, type=pa.int32()),
             "ReturnDate": pa.array(ret_date, type=pa.date32()),
             "ReturnReasonKey": pa.array(reason, type=pa.int32()),
             "ReturnQuantity": pa.array(event_qty, type=pa.int32()),

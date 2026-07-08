@@ -848,6 +848,14 @@ FACT_SCHEMAS: Dict[str, Schema] = {
     "Returns": (
         ("OrderNumber", INT_NN),
         ("OrderLineNumber", INT_NN),
+        # Snapshot-at-sale dimension keys (carry-through from the sold line) — make
+        # Returns a first-class star fact with direct dim relationships. Order must
+        # match RETURNS_SCHEMA in returns_builder.py so CSV columns line up with the
+        # generated DDL / BULK INSERT.
+        ("CustomerKey", INT_NN),
+        ("ProductKey", INT_NN),
+        ("StoreKey", INT_NN),
+        ("EmployeeKey", INT_NN),
         ("ReturnDate", DATE_NN),
         ("ReturnReasonKey", INT_NN),
         ("ReturnQuantity", INT_NN),

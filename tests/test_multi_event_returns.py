@@ -12,6 +12,7 @@ from src.facts.sales.sales_worker.returns_builder import (
     build_sales_returns_from_detail,
 )
 from src.exceptions import SalesError
+from tests.returns_fixtures import dim_keys
 
 
 class TestReturnsConfigValidationRaisesSalesError:
@@ -45,6 +46,7 @@ def _make_detail(n: int = 100) -> pa.Table:
         "Quantity": pa.array(rng.integers(2, 10, size=n, dtype=np.int32)),
         "NetPrice": pa.array(rng.uniform(20.0, 200.0, size=n)),
         "IsOrderDelayed": pa.array(rng.integers(0, 2, size=n, dtype=np.int32)),
+        **dim_keys(n),
     })
 
 
@@ -60,6 +62,7 @@ def _ugly_detail(n: int = 60) -> pa.Table:
         "Quantity": pa.array(np.full(n, 3, dtype=np.int32)),
         "NetPrice": pa.array(np.full(n, 100.0)),
         "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
+        **dim_keys(n),
     })
 
 
@@ -299,6 +302,51 @@ class TestReturnEventKey:
         assert keys1.isdisjoint(keys2)
 
 
+class TestDimKeyCarryThrough:
+    """The 4 snapshot-at-sale keys (CustomerKey/ProductKey/StoreKey/EmployeeKey)
+    on each return event must equal the sold line's keys for the same
+    (OrderNumber, OrderLineNumber) — the whole point of carrying them through."""
+
+    _KEYS = ("CustomerKey", "ProductKey", "StoreKey", "EmployeeKey")
+
+    def test_event_keys_match_sold_line(self):
+        detail = _make_detail(300)
+        cfg = ReturnsConfig(
+            enabled=True, return_rate=1.0,
+            split_return_rate=1.0, max_splits=3,  # exercise multi-event expansion
+        )
+        result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+        assert result.num_rows > 0
+
+        d = {c: detail.column(c).to_numpy() for c in
+             ("OrderNumber", "OrderLineNumber", *self._KEYS)}
+        expected = {
+            (int(o), int(l)): tuple(int(d[k][i]) for k in self._KEYS)
+            for i, (o, l) in enumerate(zip(d["OrderNumber"], d["OrderLineNumber"]))
+        }
+        cols = {c: result.column(c).to_numpy() for c in
+                ("OrderNumber", "OrderLineNumber", *self._KEYS)}
+        for i in range(result.num_rows):
+            key = (int(cols["OrderNumber"][i]), int(cols["OrderLineNumber"][i]))
+            got = tuple(int(cols[k][i]) for k in self._KEYS)
+            assert got == expected[key], (
+                f"event {i} for order {key}: keys {got} != sold-line {expected[key]}")
+
+    def test_split_events_share_parent_keys(self):
+        # Every event of a multi-event (split) line inherits identical parent keys.
+        detail = _make_detail(200)
+        cfg = ReturnsConfig(
+            enabled=True, return_rate=1.0,
+            split_return_rate=1.0, max_splits=3, full_line_probability=1.0,
+        )
+        result = build_sales_returns_from_detail(detail, chunk_seed=7, cfg=cfg)
+        df = result.to_pandas()
+        assert (df["ReturnSequence"] > 1).any()  # splits actually occurred
+        for (o, l), g in df.groupby(["OrderNumber", "OrderLineNumber"]):
+            for col in self._KEYS:
+                assert g[col].nunique() == 1, f"{col} varies within order {(o, l)}"
+
+
 class TestDeterminism:
     def test_same_seed_same_output(self):
         detail = _make_detail(100)
@@ -328,6 +376,7 @@ class TestCategoryAwareSampling:
             "Quantity": pa.array(rng.integers(1, 5, size=n, dtype=np.int32)),
             "NetPrice": pa.array(rng.uniform(10.0, 100.0, size=n)),
             "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
+            **dim_keys(n),
         })
 
     def _make_all_delayed(self, n: int = 200) -> pa.Table:
@@ -341,6 +390,7 @@ class TestCategoryAwareSampling:
             "Quantity": pa.array(rng.integers(1, 5, size=n, dtype=np.int32)),
             "NetPrice": pa.array(rng.uniform(10.0, 100.0, size=n)),
             "IsOrderDelayed": pa.array(np.ones(n, dtype=np.int32)),
+            **dim_keys(n),
         })
 
     def test_ontime_orders_no_logistics_reasons(self):
@@ -390,6 +440,7 @@ class TestEdgeCases:
             "Quantity": np.ones(n, dtype=np.int32),
             "NetPrice": np.full(n, 25.0),
             "IsOrderDelayed": np.zeros(n, dtype=np.int8),
+            **dim_keys(n),
         })
 
     def test_single_unit_return_quantity_is_one(self):
@@ -420,6 +471,7 @@ class TestFrictionCoupling:
             "Quantity": pa.array(np.full(n, 4, dtype=np.int32)),
             "NetPrice": pa.array(np.full(n, 100.0)),
             "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
+            **dim_keys(n),
         })
 
     def test_high_friction_lines_returned_more(self):
