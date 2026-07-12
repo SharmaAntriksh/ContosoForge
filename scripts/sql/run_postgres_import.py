@@ -15,7 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.exceptions import PostgresImportError
+from src.exceptions import PipelineError, PostgresImportError
 from src.tools.sql.postgres_import import import_postgres
 
 
@@ -23,7 +23,7 @@ def _resolve_run_dir(run_path: str) -> Path:
     run_dir = Path(run_path).expanduser().resolve()
     if not run_dir.exists():
         raise ValueError(f"Run path does not exist: {run_dir}")
-    schema_dir = run_dir / "postgres" / "schema"
+    schema_dir = run_dir / "sql" / "postgres" / "schema"
     if not schema_dir.is_dir():
         raise ValueError(
             f"Missing folder (Postgres CSV runs only): {schema_dir}. "
@@ -45,7 +45,19 @@ def main() -> int:
         default=None,
         help="Postgres password. Falls back to $PGPASSWORD if unset.",
     )
-    parser.add_argument("--run-path", required=True, help="Generated run folder (contains postgres/schema/ and postgres/load/)")
+    parser.add_argument("--run-path", required=True, help="Generated run folder (contains sql/postgres/schema/ and sql/postgres/load/)")
+    parser.add_argument(
+        "--identifier-case",
+        choices=["pascal", "snake"],
+        default="pascal",
+        help=(
+            "Identifier casing to import under. 'pascal' (default) runs the "
+            "PascalCase scripts packaged with the run. 'snake' re-renders the "
+            "DDL/constraints/views/indexes/load in lower_snake_case from the "
+            "run's config before importing (data files are never touched), so "
+            "you can query the loaded tables without double-quoting."
+        ),
+    )
     parser.add_argument(
         "--no-verify",
         action="store_true",
@@ -73,20 +85,44 @@ def main() -> int:
 
     password = args.password or os.environ.get("PGPASSWORD", "") or ""
 
+    # Identifier casing is chosen at import. 'snake' re-renders the SQL from the
+    # run's config into a temp dir; 'pascal' uses the packaged scripts.
+    import contextlib
+    import tempfile
+
+    case = str(args.identifier_case or "pascal").strip().lower()
     try:
-        import_postgres(
-            host=args.host,
-            port=args.port,
-            database=args.database,
-            user=args.user,
-            password=password,
-            run_dir=run_dir,
-            verify=not args.no_verify,
-            load_workers=args.load_workers,
-        )
+        with contextlib.ExitStack() as stack:
+            sql_root_override = None
+            if case != "pascal":
+                from src.engine.packaging.reemit_sql import reemit_run_sql
+
+                tmp = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="cf_pg_import_")
+                )
+                sql_root_override = Path(tmp) / "sql"
+                reemit_run_sql(run_dir=run_dir, out_sql_root=sql_root_override, case=case)
+
+            import_postgres(
+                host=args.host,
+                port=args.port,
+                database=args.database,
+                user=args.user,
+                password=password,
+                run_dir=run_dir,
+                verify=not args.no_verify,
+                load_workers=args.load_workers,
+                sql_root_override=sql_root_override,
+            )
     except PostgresImportError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
+    except (FileNotFoundError, PipelineError) as exc:
+        # e.g. re-emit could not find/load the run's packaged config for a
+        # non-pascal --identifier-case. PostgresImportError (a PipelineError
+        # subclass) is handled above, so it never reaches here.
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

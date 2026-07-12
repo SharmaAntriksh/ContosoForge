@@ -1,6 +1,6 @@
 # SQL Server Import
 
-Load a CSV-format generated dataset into SQL Server in one step. The import script reads the SQL scripts that were generated alongside the CSVs (`schema/`, `load/`, `indexes/`) and executes them with configurable parallelism, constraint handling, and post-load verification.
+Load a CSV-format generated dataset into SQL Server in one step. The import script reads the SQL scripts that were generated alongside the CSVs (`sql/sqlserver/schema/`, `sql/sqlserver/load/`, `sql/sqlserver/indexes/`) and executes them with configurable parallelism, constraint handling, and post-load verification.
 
 > Available only for `--format csv` runs. Parquet and Delta outputs do not generate SQL bootstrap scripts.
 
@@ -141,6 +141,7 @@ On spinning disks, parallel workers cause seek thrashing. Use 2 workers max.
 | `-DropPK $true` | Drop PKs and FKs **after** load (analytics-only end state, smallest DB). Keeps constraints active during the load. |
 | `-LoadWorkers <N>` | Parallel `BULK INSERT` worker count for multi-chunk fact tables (default `4`). Each worker holds its own pyodbc connection. |
 | `-Verify` | Run post-import data integrity checks (executes `verify.RunAll`) |
+| `-IdentifierCase` | `pascal` (default) or `snake`. `pascal` runs the PascalCase scripts packaged with the run. `snake` re-renders the DDL/constraints/views/indexes/load in `lower_snake_case` from the run's config before importing (cosmetic on case-insensitive SQL Server; the CSV data files are never touched). `snake` skips the PascalCase-only verification diagnostics, so it pairs with `-Verify` as a no-op. Runs generated before `config/sql_generation.json` existed re-render from the packaged `config.yaml` and warn if the run used CLI overrides (e.g. `--sales-rows`) at generation. |
 | `-ProvisionTabularUser` | After import, ensure a SQL login + DB user exists with `DB_OWNER`. See [tabular-user.md](./tabular-user.md). |
 | `-TabularLogin` | Login name for the tabular user (default: `tabular_user`) |
 | `-TabularPassword` | `SecureString` password for the tabular user |

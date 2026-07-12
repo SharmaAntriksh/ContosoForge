@@ -62,6 +62,12 @@ python main.py --format parquet --row-group-size 500000
 ### `--skip-order-cols`
 Omit `OrderNumber` and `OrderLineNumber` columns from the sales fact. Saves space when those columns aren't needed. Note: returns are auto-disabled when this flag is on with `sales_output='sales'`, because returns need `OrderNumber` to link back.
 
+> **Identifier casing is chosen at import, not here.** Generated SQL is always
+> PascalCase; you select `pascal` or `snake` when importing a CSV run (the
+> importer re-renders the SQL in that case). See
+> [sql-server-import](operations/sql-server-import.md) /
+> [postgres-import](operations/postgres-import.md).
+
 ---
 
 ## Scale

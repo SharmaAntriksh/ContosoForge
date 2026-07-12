@@ -1,6 +1,6 @@
 # NOTE:
 # This script is intended for CSV-based runs only.
-# The run path must contain 'postgres/schema/' and (optionally) 'postgres/load/' folders.
+# The run path must contain 'sql/postgres/schema/' and (optionally) 'sql/postgres/load/' folders.
 #
 # Mirrors run_sql_server_import.ps1. Drop / restore / CCI / tabular-user
 # flags from the SQL Server wrapper are intentionally absent — Postgres
@@ -43,6 +43,13 @@ param (
     # Dim tables always load on the main connection.
     [int]$LoadWorkers = 1,
 
+    # Identifier casing to import under. 'pascal' (default) runs the PascalCase
+    # scripts packaged with the run; 'snake' re-renders the DDL/load/constraints/
+    # views/indexes in lower_snake_case from the run's config before importing
+    # (the CSV data files are never touched), so you can query without quoting.
+    [ValidateSet("pascal", "snake")]
+    [string]$IdentifierCase = "pascal",
+
     [string]$PythonExe = "python",
 
     [switch]$ShowFullPaths
@@ -64,12 +71,12 @@ try {
 
     $ResolvedRunPath = (Resolve-Path $RunPath).Path
 
-    $schemaDir = Join-Path $ResolvedRunPath "postgres\schema"
+    $schemaDir = Join-Path $ResolvedRunPath "sql\postgres\schema"
     if (-not (Test-Path $schemaDir)) {
-        throw "Postgres CSV run required. Expected 'postgres/schema/' under: $ResolvedRunPath"
+        throw "Postgres CSV run required. Expected 'sql/postgres/schema/' under: $ResolvedRunPath"
     }
     if ((Get-ChildItem -Path $schemaDir -File -Filter *.sql | Measure-Object).Count -eq 0) {
-        throw "postgres/schema/ folder is empty - no SQL scripts to execute in: $schemaDir"
+        throw "sql/postgres/schema/ folder is empty - no SQL scripts to execute in: $schemaDir"
     }
 
     # Log the resolved python interpreter and version
@@ -113,6 +120,7 @@ try {
         "--database", $Database,
         "--user",     $Username,
         "--run-path", $ResolvedRunPath,
+        "--identifier-case", $IdentifierCase,
         "--load-workers", $LoadWorkers.ToString()
     )
     if ($NoVerify) { $argsList += "--no-verify" }
@@ -133,6 +141,7 @@ try {
 
         $flags = @()
         if ($NoVerify) { $flags += "no-verify" }
+        $flags += ("case=" + $IdentifierCase)
         if ($LoadWorkers -gt 1) { $flags += "load-workers=$LoadWorkers" }
         $flagText = if ($flags.Count -gt 0) { " [" + ($flags -join ", ") + "]" } else { "" }
 

@@ -960,6 +960,7 @@ def import_sql_server(
     tabular_password: str | None = None,
     load_workers: int = 4,
     manage_recovery: bool = True,
+    sql_root_override: Path | None = None,
 ) -> None:
     if pyodbc is None:
         raise SqlServerImportError(
@@ -969,14 +970,18 @@ def import_sql_server(
     import time as _time
 
     run_dir = Path(run_dir)
-    sql_dir = run_dir / "sql"
+    # ``sql_root_override`` points at a re-rendered ``sql/`` tree (e.g. a snake
+    # re-emit into a temp dir) so casing can be chosen at import; default uses the
+    # PascalCase scripts packaged with the run.
+    sql_root = Path(sql_root_override) if sql_root_override is not None else (run_dir / "sql")
+    sql_dir = sql_root / "sqlserver"
     schema_dir = sql_dir / "schema"
     load_dir = sql_dir / "load"
 
     if not schema_dir.is_dir() or not load_dir.is_dir():
         raise SqlServerImportError(
             "SQL Server import is supported only for CSV runs. "
-            "Expected 'sql/schema/' and 'sql/load/' folders in run directory."
+            "Expected 'sql/sqlserver/schema/' and 'sql/sqlserver/load/' folders in run directory."
         )
 
     bootstrap_dir = PROJECT_ROOT / "scripts" / "sql" / "bootstrap"
@@ -988,7 +993,7 @@ def import_sql_server(
     if not tables_files:
         raise SqlServerImportError(
             f"No table scripts found. Expected files under '{schema_dir}' "
-            "or under 'sql/schema/tables/'."
+            "or under 'sql/sqlserver/schema/tables/'."
         )
 
     _t_total = _time.time()

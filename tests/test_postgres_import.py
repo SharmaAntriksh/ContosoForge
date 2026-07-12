@@ -191,6 +191,6 @@ class TestImportPostgresErrors:
             import_postgres(database="x", run_dir=tmp_path)
 
     def test_empty_schema_folder_raises(self, tmp_path: Path) -> None:
-        (tmp_path / "postgres" / "schema").mkdir(parents=True)
+        (tmp_path / "sql" / "postgres" / "schema").mkdir(parents=True)
         with pytest.raises(PostgresImportError, match="No schema scripts found"):
             import_postgres(database="x", run_dir=tmp_path)

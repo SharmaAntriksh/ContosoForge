@@ -9,10 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from .base import ColumnSpec, Dialect, SqlType, sql_escape_literal
+from ..reserved_words import SQLSERVER_RESERVED
 
 
 class SqlServerDialect(Dialect):
     name = "sqlserver"
+    reserved_words = SQLSERVER_RESERVED
     batch_separator = "GO"
     default_schema = "dbo"
     script_preamble = ("SET NOCOUNT ON;",)

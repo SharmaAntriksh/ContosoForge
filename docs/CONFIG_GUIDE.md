@@ -355,6 +355,16 @@ Inventory snapshot fact table: periodic stock levels by product and store.
 
 ---
 
+> **SQL identifier casing is chosen at import, not generation.** The generated
+> SQL scripts are always PascalCase. When you import a CSV run into SQL Server or
+> PostgreSQL you pick `pascal` or `snake` (`snake` lets Postgres query without
+> double-quoting), and the importer re-renders the SQL in that case from the
+> run's config — the CSV/parquet data files are never touched. See
+> [sql-server-import](operations/sql-server-import.md) /
+> [postgres-import](operations/postgres-import.md).
+
+---
+
 ## Scaling tips
 
 Chart quality and data realism depend on the balance between customers, sales rows, and date range.

@@ -1,4 +1,9 @@
-"""Tests for the Postgres views composer + admin script copier (Steps 3+4)."""
+"""Tests for the Postgres views composer wiring + admin script copier.
+
+Views are now *generated* from the roster in ``src/tools/sql/view_sql.py`` (see
+``test_view_generation.py`` for the generator itself); these cover the composer
+wiring (output location, view-schema resolution) and the unrelated admin copier.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,7 +13,6 @@ import pytest
 from src.engine.config.config_schema import AppConfig
 from src.engine.packaging.sql_scripts import (
     _resolve_postgres_view_schema,
-    _rewrite_postgres_view_schema,
     compose_postgres_views_sql,
     copy_postgres_admin_sql,
 )
@@ -42,97 +46,41 @@ class TestResolvePostgresViewSchema:
         assert _resolve_postgres_view_schema(cfg) == "bi"
 
 
-class TestRewritePostgresViewSchema:
-    def test_default_returns_input_unchanged(self) -> None:
-        sql = 'CREATE OR REPLACE VIEW "public"."vw_Sales" AS SELECT * FROM "public"."Sales"'
-        assert _rewrite_postgres_view_schema(sql, "public") == sql
-
-    def test_custom_drops_vw_prefix_and_reschemas(self) -> None:
-        sql = 'CREATE OR REPLACE VIEW "public"."vw_Sales" AS SELECT * FROM "public"."Sales"'
-        out = _rewrite_postgres_view_schema(sql, "bi")
-        # View target rewritten, source table reference untouched.
-        assert '"bi"."Sales"' in out
-        assert '"public"."Sales"' in out  # source table still public
-        assert '"public"."vw_' not in out  # all view targets relocated
-
-
 class TestComposePostgresViewsOutput:
     def test_writes_under_postgres_schema(self, run_layout: Path) -> None:
         compose_postgres_views_sql(sql_root=run_layout / "sql", cfg=None)
-        out = run_layout / "postgres" / "schema" / "04_create_views.sql"
+        out = run_layout / "sql" / "postgres" / "schema" / "04_create_views.sql"
         assert out.is_file()
 
     def test_default_schema_no_create_schema_preamble(self, run_layout: Path) -> None:
         compose_postgres_views_sql(sql_root=run_layout / "sql", cfg=None)
-        out = _read(run_layout / "postgres" / "schema" / "04_create_views.sql")
+        out = _read(run_layout / "sql" / "postgres" / "schema" / "04_create_views.sql")
         assert "CREATE SCHEMA IF NOT EXISTS" not in out
         assert '"public"."vw_Sales"' in out  # vw_ prefix retained
 
     def test_custom_schema_emits_create_schema(self, run_layout: Path) -> None:
         cfg = AppConfig.model_validate({"defaults": {"view_schema": "bi"}})
         compose_postgres_views_sql(sql_root=run_layout / "sql", cfg=cfg)
-        out = _read(run_layout / "postgres" / "schema" / "04_create_views.sql")
+        out = _read(run_layout / "sql" / "postgres" / "schema" / "04_create_views.sql")
         assert 'CREATE SCHEMA IF NOT EXISTS "bi";' in out
         assert '"bi"."Sales"' in out  # vw_ stripped, schema rewritten
         assert '"public"."vw_' not in out
         # Source table refs still under public.
         assert '"public"."Sales"' in out
 
-    def test_includes_both_view_files(self, run_layout: Path) -> None:
-        compose_postgres_views_sql(sql_root=run_layout / "sql", cfg=None)
-        out = _read(run_layout / "postgres" / "schema" / "04_create_views.sql")
-        assert "00_model_views.sql" in out
-        assert "10_budget_views.sql" in out
-
     def test_dbo_cfg_treated_as_public(self, run_layout: Path) -> None:
         """A SQL Server-style view_schema=dbo should produce default (public) output."""
         cfg = AppConfig.model_validate({"defaults": {"view_schema": "dbo"}})
         compose_postgres_views_sql(sql_root=run_layout / "sql", cfg=cfg)
-        out = _read(run_layout / "postgres" / "schema" / "04_create_views.sql")
+        out = _read(run_layout / "sql" / "postgres" / "schema" / "04_create_views.sql")
         assert "CREATE SCHEMA IF NOT EXISTS" not in out
         assert '"public"."vw_Sales"' in out
-
-
-class TestPostgresViewFilesContent:
-    def _all_files(self) -> list[Path]:
-        repo_root = Path(__file__).resolve().parents[1]
-        return sorted((repo_root / "scripts" / "sql" / "postgres" / "views").glob("*.sql"))
-
-    @staticmethod
-    def _strip_comments(text: str) -> str:
-        import re
-        text = re.sub(r"/\*[\s\S]*?\*/", "", text)
-        text = re.sub(r"--[^\n]*", "", text)
-        return text
-
-    def test_both_files_present(self) -> None:
-        names = {p.name for p in self._all_files()}
-        assert names == {"00_model_views.sql", "10_budget_views.sql"}
-
-    def test_no_sql_server_idioms(self) -> None:
-        for p in self._all_files():
-            text = self._strip_comments(p.read_text(encoding="utf-8"))
-            assert "OBJECT_ID(" not in text, f"{p.name}: OBJECT_ID() leaked"
-            assert "EXEC(" not in text, f"{p.name}: T-SQL EXEC() leaked"
-            assert "sp_executesql" not in text, f"{p.name}: sp_executesql leaked"
-            assert "[dbo]" not in text, f"{p.name}: [dbo] bracket leaked"
-            assert "\nGO\n" not in text, f"{p.name}: GO separator leaked"
-            assert "SET NOCOUNT" not in text, f"{p.name}: SET NOCOUNT leaked"
-            assert " MONEY" not in text.upper().replace("NUMERIC", "X"), (
-                f"{p.name}: MONEY type leaked (should be NUMERIC(19,4))"
-            )
-
-    def test_uses_create_or_replace(self) -> None:
-        for p in self._all_files():
-            text = self._strip_comments(p.read_text(encoding="utf-8"))
-            assert "CREATE OR REPLACE VIEW" in text, f"{p.name}: missing CREATE OR REPLACE VIEW"
-            assert "CREATE OR ALTER VIEW" not in text, f"{p.name}: T-SQL CREATE OR ALTER leaked"
 
 
 class TestCopyPostgresAdmin:
     def test_copies_pk_proc(self, run_layout: Path) -> None:
         copy_postgres_admin_sql(sql_root=run_layout / "sql")
-        out = run_layout / "postgres" / "admin" / "create_pk_proc.sql"
+        out = run_layout / "sql" / "postgres" / "admin" / "create_pk_proc.sql"
         assert out.is_file()
         text = _read(out)
         assert "CREATE OR REPLACE PROCEDURE admin.manage_primary_keys" in text
@@ -145,7 +93,7 @@ class TestCopyPostgresAdmin:
     def test_does_not_touch_schema_folder(self, run_layout: Path) -> None:
         copy_postgres_admin_sql(sql_root=run_layout / "sql")
         # admin file lands under postgres/admin/, NOT postgres/schema/
-        assert not (run_layout / "postgres" / "schema" / "create_pk_proc.sql").exists()
+        assert not (run_layout / "sql" / "postgres" / "schema" / "create_pk_proc.sql").exists()
 
 
 class TestPostgresAdminProcContent:

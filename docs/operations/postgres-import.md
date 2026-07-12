@@ -1,6 +1,6 @@
 # PostgreSQL Import
 
-Load a CSV-format generated dataset into PostgreSQL in one step. The import script reads the SQL scripts generated alongside the CSVs (`postgres/schema/`, `postgres/load/`, `postgres/admin/`, `postgres/indexes/`) and applies them in the right order: schema → admin tools → COPY load → constraints → indexes → statistics.
+Load a CSV-format generated dataset into PostgreSQL in one step. The import script reads the SQL scripts generated alongside the CSVs (`sql/postgres/schema/`, `sql/postgres/load/`, `sql/postgres/admin/`, `sql/postgres/indexes/`) and applies them in the right order: schema → admin tools → COPY load → constraints → indexes → statistics.
 
 > Available only for `--format csv` runs. Parquet and Delta outputs do not generate SQL bootstrap scripts.
 
@@ -106,7 +106,7 @@ Useful for cross-platform automation (the PS1 wrapper is Windows-only).
 
 | Flag | Description |
 |---|---|
-| `-RunPath` | Path to the generated dataset folder (the one containing `postgres/`). |
+| `-RunPath` | Path to the generated dataset folder (the one containing `sql/postgres/`). |
 | `-Database` | Target database name. **Must not exist** — the importer aborts if it does. |
 | `-PgHost` | Postgres host. Default `localhost`. Named `-PgHost` because `-Host` is reserved in PowerShell. |
 | `-Port` | TCP port. Default `5432`. |
@@ -114,6 +114,7 @@ Useful for cross-platform automation (the PS1 wrapper is Windows-only).
 | `-Password` | `SecureString` password. Resolution order: `-Password` > `$env:PGPASSWORD` > interactive prompt. |
 | `-Verify` | No-op (accepted for symmetry with `run_sql_server_import.ps1`). Verification is on by default. |
 | `-NoVerify` | Skip the per-table row-count summary at the end. |
+| `-IdentifierCase` | `pascal` (default) or `snake`. `pascal` imports the PascalCase scripts packaged with the run. `snake` re-renders the DDL/constraints/views/indexes/load in `lower_snake_case` from the run's config before importing, so you can query the loaded tables without double-quoting. The CSV data files are never touched. Runs generated before `config/sql_generation.json` existed re-render from the packaged `config.yaml` and warn if the run used CLI overrides (e.g. `--sales-rows`) at generation. |
 | `-PythonExe` | Python interpreter to invoke. Default `python`. |
 
 ---
@@ -125,12 +126,12 @@ The flow runs as a sequence of timed, logged phases against a single Postgres co
 | Phase | What it applies |
 |---|---|
 | **Create database** | `CREATE DATABASE <name>` against the `postgres` maintenance DB (autocommit, since CREATE DATABASE can't run in a transaction). Aborts if the DB already exists. |
-| **Creating Schema** | All `postgres/schema/*.sql` files except `*_create_constraints.sql`. Currently: `01_create_dimensions.sql`, `02_create_facts.sql`, `04_create_views.sql`. |
-| **Installing Admin Tools** | All `postgres/admin/*.sql`. Currently: `create_pk_proc.sql`, which installs the `admin.manage_primary_keys` procedure (see below). |
-| **Loading Dimensions** | `postgres/load/01_copy_dims.sql`. Streamed via `COPY ... FROM STDIN` from this Python process (bypasses server-side filesystem permissions). |
-| **Loading Facts** | `postgres/load/02_copy_facts.sql`. Same client-side STDIN streaming. |
-| **Applying Constraints** | `postgres/schema/03_create_constraints.sql`. Adds PKs, FKs, CHECKs. Deferred until **after** the load — adding FKs first would force per-row validation during COPY. |
-| **Creating Indexes** | `postgres/indexes/01_create_indexes.sql`. Btree on FK source columns + BRIN on naturally-ordered date columns. Also post-load to avoid per-row index maintenance during COPY. |
+| **Creating Schema** | All `sql/postgres/schema/*.sql` files except `*_create_constraints.sql`. Currently: `01_create_dimensions.sql`, `02_create_facts.sql`, `04_create_views.sql`. |
+| **Installing Admin Tools** | All `sql/postgres/admin/*.sql`. Currently: `create_pk_proc.sql`, which installs the `admin.manage_primary_keys` procedure (see below). |
+| **Loading Dimensions** | `sql/postgres/load/01_copy_dims.sql`. Streamed via `COPY ... FROM STDIN` from this Python process (bypasses server-side filesystem permissions). |
+| **Loading Facts** | `sql/postgres/load/02_copy_facts.sql`. Same client-side STDIN streaming. |
+| **Applying Constraints** | `sql/postgres/schema/03_create_constraints.sql`. Adds PKs, FKs, CHECKs. Deferred until **after** the load — adding FKs first would force per-row validation during COPY. |
+| **Creating Indexes** | `sql/postgres/indexes/01_create_indexes.sql`. Btree on FK source columns + BRIN on naturally-ordered date columns. Also post-load to avoid per-row index maintenance during COPY. |
 | **Updating Statistics** | Runs `ANALYZE;` so the query planner has accurate stats from the first user query, rather than waiting on autovacuum. |
 | **Row count verification** | Per-table `n_live_tup` summary via `pg_stat_user_tables` (cheap, no full scans). Skipped with `-NoVerify`. |
 
@@ -221,7 +222,7 @@ Tables stay in `public`; only the view layer relocates. This mirrors `run_sql_se
 | Idempotency guard syntax | `IF OBJECT_ID(N'dbo.X', N'U') IS NOT NULL` + `COL_LENGTH(...)` | `to_regclass('"public"."X"') IS NOT NULL` + `information_schema.columns` lookup, wrapped in `DO $$ ... END $$` |
 | Statistics refresh after load | `UPDATE STATISTICS` (optional) | `ANALYZE;` (built into the importer's post-index phase) |
 
-For the in-depth translation rules, see the constraint/view source files under [scripts/sql/postgres/](../../scripts/sql/postgres/).
+The constraints, indexes, and model views are **generated** per dialect from one declarative source rather than maintained as hand-written SQL: the roster in [`src/tools/sql/schema_model.py`](../../src/tools/sql/schema_model.py) and the renderers in [`constraint_sql.py`](../../src/tools/sql/constraint_sql.py) / [`view_sql.py`](../../src/tools/sql/view_sql.py). This is also what powers `-IdentifierCase snake` (see below): the importer re-renders the whole bundle in lower_snake_case from the run's config so Postgres queries need no double-quoting. The columnstore helper (`create_drop_cci.sql`) and the read-only verification diagnostics remain SQL-Server-only static assets.
 
 ---
 

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Iterable, Mapping, Optional, Set
+from typing import TYPE_CHECKING, Iterable, Mapping, Optional, Set
 
 from src.tools.sql.dialect import DEFAULT_DIALECT, Dialect
+
+if TYPE_CHECKING:
+    from src.tools.sql.name_map import NameMap
 from src.utils.logging_utils import work, skip
 from src.tools.sql.sql_helpers import (
     returns_enabled as _returns_enabled_from_cfg,
@@ -163,6 +166,7 @@ def generate_bulk_insert_script(
     recursive: bool = False,
     allowed_tables: Optional[Set[str]] = None,
     dialect: Dialect = DEFAULT_DIALECT,
+    name_map: "NameMap | None" = None,
 ) -> Optional[str]:
     """
     Generate a bulk-load script for the active dialect.
@@ -218,6 +222,10 @@ def generate_bulk_insert_script(
                 continue
 
         schema, table = _split_qualified(tgt)
+        # Map the load TARGET table to match the DDL (data-file names are
+        # untouched: COPY/BULK INSERT load by column position, not header).
+        if name_map is not None:
+            table = name_map.resolve(table)
         if not schema and dialect.qualify_load_target:
             schema = dialect.default_schema
         rel_hint = str(csv_path.relative_to(csv_folder)) if recursive else csv_path.name
@@ -251,6 +259,7 @@ def generate_dims_and_facts_bulk_insert_scripts(
     load_output_folder,
     dialect: Dialect = DEFAULT_DIALECT,
     allowed_fact_tables: Optional[Set[str]] = None,
+    name_map: "NameMap | None" = None,
 ) -> tuple[str, str]:
     """Write the dialect's load scripts to ``load_output_folder``.
 
@@ -296,6 +305,7 @@ def generate_dims_and_facts_bulk_insert_scripts(
         force_csv_format=True,
         recursive=False,
         dialect=dialect,
+        name_map=name_map,
     )
 
     if allowed_fact_tables is None:
@@ -326,6 +336,7 @@ def generate_dims_and_facts_bulk_insert_scripts(
         recursive=True,
         allowed_tables=allowed_fact_tables,
         dialect=dialect,
+        name_map=name_map,
     )
 
     return str(dims_sql), str(facts_sql)

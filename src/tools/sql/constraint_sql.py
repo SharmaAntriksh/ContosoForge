@@ -1,0 +1,437 @@
+"""Render the declarative constraint roster to per-dialect SQL.
+
+The roster in :mod:`schema_model` says *what* the constraints are; this module
+turns them into guarded, idempotent DDL for a given dialect. Every table/column
+identifier is routed through the run's :class:`NameMap` (``None`` = identity /
+PascalCase), so a ``snake`` case produces lower_snake identifiers
+in both the DDL statements *and* their existence guards (``OBJECT_ID`` /
+``information_schema`` string literals must reference the transformed names too).
+
+Two dialect writers implement the small idiom differences:
+
+  * **SQL Server** — ``IF … BEGIN … END; GO`` guards over ``sys.*`` catalog
+    views, ``PRIMARY KEY NONCLUSTERED``, ``WITH CHECK ADD CONSTRAINT``, ``N'…'``
+    string literals, the robust "any unique index on the column" candidate-key
+    detection, and a type-compatibility EXISTS guard on a few FKs.
+  * **Postgres** — ``DO $$ … END $$;`` blocks over ``to_regclass`` /
+    ``information_schema`` / ``pg_constraint``, plain ``PRIMARY KEY``, no
+    ``NONCLUSTERED``, plain ``'…'`` literals, BIT-flag CHECKs dropped (the
+    column is BOOLEAN), and type-compat guards dropped (a fresh generator-built
+    DB matches by construction).
+
+The output is semantically equivalent to the previously hand-written files but
+is now generated from one source, so it can honour the identifier-case flag and
+cannot drift between dialects.
+"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from src.tools.sql.sql_helpers import sql_escape_literal
+from src.tools.sql.schema_model import (
+    Check,
+    CheckExpr,
+    Enum,
+    Flag,
+    ForeignKey,
+    INDEXES,
+    IntSet,
+    Min,
+    PrimaryKey,
+    Range,
+    Unique,
+    UniqueIndex,
+    select_sections,
+)
+
+if TYPE_CHECKING:
+    from src.tools.sql.dialect.base import Dialect
+    from src.tools.sql.name_map import NameMap
+
+
+def _indent(text: str, spaces: int) -> str:
+    pad = " " * spaces
+    return "\n".join((pad + line) if line else line for line in text.split("\n"))
+
+
+def _render_check_expr(expr: CheckExpr, col: str, str_prefix: str) -> str:
+    """Render a CHECK body given the already-quoted column identifier."""
+    if isinstance(expr, Flag):
+        return f"{col} IN (0, 1)"
+    if isinstance(expr, Min):
+        return f"{col} >= {expr.value}"
+    if isinstance(expr, Range):
+        return f"{col} >= {expr.lo} AND {col} < {expr.hi}"
+    if isinstance(expr, IntSet):
+        return f"{col} IN ({', '.join(str(v) for v in expr.values)})"
+    if isinstance(expr, Enum):
+        lits = ", ".join(f"{str_prefix}'{sql_escape_literal(v)}'" for v in expr.values)
+        return f"{col} IN ({lits})"
+    raise TypeError(f"Unhandled CheckExpr: {expr!r}")
+
+
+class _Writer:
+    """Common driver; subclasses supply the dialect-specific SQL fragments."""
+
+    supports_flag_check = True
+    str_prefix = ""
+
+    def __init__(self, dialect: "Dialect", resolve) -> None:
+        self.dialect = dialect
+        self.resolve = resolve
+
+    # -- identifier helpers ------------------------------------------------
+    @property
+    def schema(self) -> str:
+        return self.dialect.default_schema
+
+    def q(self, ident: str) -> str:
+        """Quote a resolved identifier for this dialect."""
+        return self.dialect.quote_ident(ident)
+
+    def qcol(self, col: str) -> str:
+        return self.q(self.resolve(col))
+
+    def cols(self, columns) -> str:
+        return ", ".join(self.qcol(c) for c in columns)
+
+    def tref(self, table: str) -> str:
+        """Quoted, schema-qualified table reference, e.g. ``[dbo].[customers]``."""
+        return self.dialect.qualify(self.schema, self.resolve(table))
+
+    # -- to be provided by subclasses -------------------------------------
+    def file_preamble(self, mode: str) -> str:  # pragma: no cover - trivial
+        raise NotImplementedError
+
+    def section_banner(self, name: str) -> str:
+        return (
+            "-- ============================================================\n"
+            f"-- section: {name}\n"
+            "-- ============================================================"
+        )
+
+    def render(self, c, ) -> str | None:
+        if isinstance(c, PrimaryKey):
+            return self._primary_key(c)
+        if isinstance(c, Unique):
+            return self._unique(c)
+        if isinstance(c, UniqueIndex):
+            if self.dialect.name not in c.dialects:
+                return None
+            return self._unique_index(c)
+        if isinstance(c, ForeignKey):
+            return self._foreign_key(c)
+        if isinstance(c, Check):
+            if isinstance(c.expr, Flag) and not self.supports_flag_check:
+                return None
+            return self._check(c)
+        raise TypeError(f"Unhandled constraint: {c!r}")
+
+
+class _SqlServerWriter(_Writer):
+    supports_flag_check = True
+    str_prefix = "N"
+
+    def file_preamble(self, mode: str) -> str:
+        return (
+            "-- Auto-generated by packaging: generated constraints (sqlserver)\n"
+            f"-- mode: {mode}\n"
+            "SET NOCOUNT ON;\n"
+            "SET XACT_ABORT ON;\n"
+            "GO"
+        )
+
+    # -- guard fragments ---------------------------------------------------
+    def _dotted(self, table: str) -> str:
+        return f"{self.schema}.{self.resolve(table)}"
+
+    def _table_guard(self, table: str) -> str:
+        return f"OBJECT_ID(N'{sql_escape_literal(self._dotted(table))}', N'U') IS NOT NULL"
+
+    def _col_guard(self, table: str, col: str) -> str:
+        dotted = sql_escape_literal(self._dotted(table))
+        return f"COL_LENGTH(N'{dotted}', N'{sql_escape_literal(self.resolve(col))}') IS NOT NULL"
+
+    def _absent(self, catalog: str, name: str, table: str) -> str:
+        dotted = sql_escape_literal(self._dotted(table))
+        return (
+            f"NOT EXISTS (\n"
+            f"    SELECT 1 FROM {catalog}\n"
+            f"    WHERE name = N'{name}'\n"
+            f"      AND parent_object_id = OBJECT_ID(N'{dotted}')\n"
+            f")"
+        )
+
+    def _unique_index_absent(self, table: str, col: str) -> str:
+        dotted = sql_escape_literal(self._dotted(table))
+        rcol = sql_escape_literal(self.resolve(col))
+        return (
+            f"NOT EXISTS (\n"
+            f"    SELECT 1\n"
+            f"    FROM sys.indexes i\n"
+            f"    JOIN sys.index_columns ic\n"
+            f"      ON i.object_id = ic.object_id AND i.index_id = ic.index_id\n"
+            f"    JOIN sys.columns c\n"
+            f"      ON c.object_id = ic.object_id AND c.column_id = ic.column_id\n"
+            f"    WHERE i.object_id = OBJECT_ID(N'{dotted}')\n"
+            f"      AND i.is_unique = 1\n"
+            f"      AND ic.is_included_column = 0\n"
+            f"    GROUP BY i.index_id\n"
+            f"    HAVING COUNT(*) = 1\n"
+            f"       AND MAX(CASE WHEN c.name = N'{rcol}' AND ic.key_ordinal = 1 THEN 1 ELSE 0 END) = 1\n"
+            f")"
+        )
+
+    def _type_compat(self, c: ForeignKey) -> str:
+        parent = sql_escape_literal(self._dotted(c.table))
+        ref = sql_escape_literal(self._dotted(c.ref_table))
+        pcol = sql_escape_literal(self.resolve(c.columns[0]))
+        rcol = sql_escape_literal(self.resolve(c.ref_columns[0]))
+        return (
+            f"EXISTS (\n"
+            f"    SELECT 1\n"
+            f"    FROM sys.columns pc\n"
+            f"    JOIN sys.columns rc\n"
+            f"      ON rc.object_id = OBJECT_ID(N'{ref}') AND rc.name = N'{rcol}'\n"
+            f"    WHERE pc.object_id = OBJECT_ID(N'{parent}') AND pc.name = N'{pcol}'\n"
+            f"      AND pc.system_type_id = rc.system_type_id\n"
+            f"      AND pc.user_type_id  = rc.user_type_id\n"
+            f"      AND pc.max_length    = rc.max_length\n"
+            f"      AND pc.precision     = rc.precision\n"
+            f"      AND pc.scale         = rc.scale\n"
+            f")"
+        )
+
+    def _wrap(self, conds: list[str], body: str) -> str:
+        cond = "\nAND ".join(conds)
+        return f"IF {cond}\nBEGIN\n{_indent(body, 4)}\nEND;\nGO"
+
+    # -- statement bodies --------------------------------------------------
+    def _primary_key(self, c: PrimaryKey) -> str:
+        conds = [self._table_guard(c.table)]
+        conds += [self._col_guard(c.table, g) for g in c.guard_columns]
+        conds.append(self._absent("sys.key_constraints", c.name, c.table))
+        body = (
+            f"ALTER TABLE {self.tref(c.table)}\n"
+            f"ADD CONSTRAINT {c.name} PRIMARY KEY NONCLUSTERED ({self.cols(c.columns)});"
+        )
+        return self._wrap(conds, body)
+
+    def _unique(self, c: Unique) -> str:
+        conds = [self._table_guard(c.table)]
+        conds += [self._col_guard(c.table, g) for g in c.guard_columns]
+        conds.append(self._absent("sys.key_constraints", c.name, c.table))
+        body = (
+            f"ALTER TABLE {self.tref(c.table)}\n"
+            f"ADD CONSTRAINT {c.name} UNIQUE NONCLUSTERED ({self.cols(c.columns)});"
+        )
+        return self._wrap(conds, body)
+
+    def _unique_index(self, c: UniqueIndex) -> str:
+        conds = [self._table_guard(c.table)]
+        conds += [self._col_guard(c.table, g) for g in c.guard_columns]
+        conds.append(self._unique_index_absent(c.table, c.columns[0]))
+        body = (
+            f"CREATE UNIQUE INDEX {self.q(c.name)}\n"
+            f"ON {self.tref(c.table)} ({self.cols(c.columns)});"
+        )
+        return self._wrap(conds, body)
+
+    def _foreign_key(self, c: ForeignKey) -> str:
+        conds = [self._table_guard(c.table), self._table_guard(c.ref_table)]
+        conds += [self._col_guard(c.table, g) for g in c.guard_columns]
+        conds.append(self._absent("sys.foreign_keys", c.name, c.table))
+        if c.type_compat:
+            conds.append(self._type_compat(c))
+        body = (
+            f"ALTER TABLE {self.tref(c.table)} WITH CHECK\n"
+            f"ADD CONSTRAINT {c.name} FOREIGN KEY ({self.cols(c.columns)})\n"
+            f"    REFERENCES {self.tref(c.ref_table)} ({self.cols(c.ref_columns)});"
+        )
+        return self._wrap(conds, body)
+
+    def _check(self, c: Check) -> str:
+        conds = [self._table_guard(c.table)]
+        conds += [self._col_guard(c.table, g) for g in c.guards()]
+        conds.append(self._absent("sys.check_constraints", c.name, c.table))
+        expr = _render_check_expr(c.expr, self.qcol(c.column), self.str_prefix)
+        body = (
+            f"ALTER TABLE {self.tref(c.table)} WITH CHECK\n"
+            f"ADD CONSTRAINT {c.name} CHECK ({expr});"
+        )
+        return self._wrap(conds, body)
+
+
+class _PostgresWriter(_Writer):
+    supports_flag_check = False
+    str_prefix = ""
+
+    def file_preamble(self, mode: str) -> str:
+        return (
+            "-- Auto-generated by packaging: generated constraints (postgres)\n"
+            f"-- mode: {mode}"
+        )
+
+    # -- guard fragments ---------------------------------------------------
+    def _regclass(self, table: str) -> str:
+        return f"{self.q(self.schema)}.{self.q(self.resolve(table))}"
+
+    def _table_guard(self, table: str) -> str:
+        return f"to_regclass('{self._regclass(table)}') IS NOT NULL"
+
+    def _col_guard(self, table: str, col: str) -> str:
+        return (
+            "EXISTS (SELECT 1 FROM information_schema.columns "
+            f"WHERE table_schema='{self.schema}' "
+            f"AND table_name='{sql_escape_literal(self.resolve(table))}' "
+            f"AND column_name='{sql_escape_literal(self.resolve(col))}')"
+        )
+
+    def _absent(self, name: str, table: str, contype: str | None) -> str:
+        extra = f" AND contype = '{contype}'" if contype else ""
+        return (
+            f"NOT EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{name}' "
+            f"AND conrelid = to_regclass('{self._regclass(table)}'){extra})"
+        )
+
+    def _unique_index_absent(self, table: str, name: str) -> str:
+        return (
+            f"NOT EXISTS (SELECT 1 FROM pg_indexes "
+            f"WHERE schemaname='{self.schema}' "
+            f"AND tablename='{sql_escape_literal(self.resolve(table))}' "
+            f"AND indexname='{name}')"
+        )
+
+    def _wrap(self, conds: list[str], body: str) -> str:
+        cond = "\n       AND ".join(conds)
+        return (
+            "DO $$\nBEGIN\n"
+            f"    IF {cond}\n"
+            f"    THEN\n"
+            f"{_indent(body, 8)}\n"
+            f"    END IF;\nEND $$;"
+        )
+
+    # -- statement bodies --------------------------------------------------
+    def _primary_key(self, c: PrimaryKey) -> str:
+        conds = [self._table_guard(c.table)]
+        conds += [self._col_guard(c.table, g) for g in c.guard_columns]
+        conds.append(self._absent(c.name, c.table, None))
+        body = (
+            f"ALTER TABLE {self.tref(c.table)}\n"
+            f"ADD CONSTRAINT {self.q(c.name)} PRIMARY KEY ({self.cols(c.columns)});"
+        )
+        return self._wrap(conds, body)
+
+    def _unique(self, c: Unique) -> str:
+        conds = [self._table_guard(c.table)]
+        conds += [self._col_guard(c.table, g) for g in c.guard_columns]
+        conds.append(self._absent(c.name, c.table, None))
+        body = (
+            f"ALTER TABLE {self.tref(c.table)}\n"
+            f"ADD CONSTRAINT {self.q(c.name)} UNIQUE ({self.cols(c.columns)});"
+        )
+        return self._wrap(conds, body)
+
+    def _unique_index(self, c: UniqueIndex) -> str:
+        conds = [self._table_guard(c.table)]
+        conds += [self._col_guard(c.table, g) for g in c.guard_columns]
+        conds.append(self._unique_index_absent(c.table, c.name))
+        body = (
+            f"CREATE UNIQUE INDEX {self.q(c.name)}\n"
+            f"ON {self.tref(c.table)} ({self.cols(c.columns)});"
+        )
+        return self._wrap(conds, body)
+
+    def _foreign_key(self, c: ForeignKey) -> str:
+        conds = [self._table_guard(c.table), self._table_guard(c.ref_table)]
+        conds += [self._col_guard(c.table, g) for g in c.guard_columns]
+        conds.append(self._absent(c.name, c.table, "f"))
+        body = (
+            f"ALTER TABLE {self.tref(c.table)}\n"
+            f"ADD CONSTRAINT {self.q(c.name)} FOREIGN KEY ({self.cols(c.columns)})\n"
+            f"    REFERENCES {self.tref(c.ref_table)} ({self.cols(c.ref_columns)});"
+        )
+        return self._wrap(conds, body)
+
+    def _check(self, c: Check) -> str:
+        conds = [self._table_guard(c.table)]
+        conds += [self._col_guard(c.table, g) for g in c.guards()]
+        conds.append(self._absent(c.name, c.table, "c"))
+        expr = _render_check_expr(c.expr, self.qcol(c.column), self.str_prefix)
+        body = (
+            f"ALTER TABLE {self.tref(c.table)}\n"
+            f"ADD CONSTRAINT {self.q(c.name)} CHECK ({expr});"
+        )
+        return self._wrap(conds, body)
+
+    def render_index(self, idx) -> str:
+        conds = [self._table_guard(idx.table)]
+        if idx.guarded:
+            conds.append(self._col_guard(idx.table, idx.column))
+        using = " USING BRIN" if idx.kind == "brin" else ""
+        body = (
+            f"CREATE INDEX IF NOT EXISTS {self.q(idx.name)}\n"
+            f"ON {self.tref(idx.table)}{using} ({self.qcol(idx.column)});"
+        )
+        return self._wrap(conds, body)
+
+
+def _writer_for(dialect: "Dialect", resolve) -> _Writer:
+    if dialect.name == "postgres":
+        return _PostgresWriter(dialect, resolve)
+    if dialect.name == "sqlserver":
+        return _SqlServerWriter(dialect, resolve)
+    raise ValueError(f"No constraint writer for dialect {dialect.name!r}")
+
+
+def render_constraints_sql(
+    dialect: "Dialect",
+    *,
+    mode: str,
+    budget_enabled: bool,
+    inventory_enabled: bool,
+    name_map: "NameMap | None" = None,
+) -> str:
+    """Render the full ``03_create_constraints.sql`` body for ``dialect``.
+
+    ``mode`` is the sales_output mode (sales / sales_order / both). ``name_map``
+    is ``None`` for the default (PascalCase) case or a validated map for a
+    transformed identifier case. Returns the complete file text (trailing
+    newline included).
+    """
+    resolve = name_map.resolve if name_map is not None else (lambda s: s)
+    writer = _writer_for(dialect, resolve)
+
+    parts: list[str] = [writer.file_preamble(mode)]
+    for section_name, constraints in select_sections(
+        mode, budget_enabled=budget_enabled, inventory_enabled=inventory_enabled
+    ):
+        blocks = [b for b in (writer.render(c) for c in constraints) if b is not None]
+        if not blocks:
+            continue
+        parts.append(writer.section_banner(section_name))
+        parts.extend(blocks)
+
+    return "\n\n".join(parts) + "\n"
+
+
+def render_indexes_sql(dialect: "Dialect", *, name_map: "NameMap | None" = None) -> str:
+    """Render the Postgres secondary-index script (``01_create_indexes.sql``).
+
+    Postgres-only: SQL Server uses the clustered columnstore index, which is
+    applied by a separate dynamic script (no hardcoded identifiers). Returns an
+    empty string for other dialects. Every index is table/column guarded and
+    ``CREATE INDEX IF NOT EXISTS`` (idempotent); identifiers route through
+    ``name_map``.
+    """
+    if dialect.name != "postgres":
+        return ""
+    resolve = name_map.resolve if name_map is not None else (lambda s: s)
+    writer = _PostgresWriter(dialect, resolve)
+    parts = [
+        "-- Auto-generated by packaging: generated Postgres indexes (btree + BRIN)",
+    ]
+    parts += [writer.render_index(idx) for idx in INDEXES]
+    return "\n\n".join(parts) + "\n"

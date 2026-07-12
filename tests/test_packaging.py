@@ -1296,3 +1296,31 @@ class TestSQLScriptsHelpers:
         from src.engine.packaging.sql_scripts import _inventory_enabled
         assert _inventory_enabled(AppConfig.model_validate({"inventory": {"enabled": False}})) is False
         assert _inventory_enabled(None) is False
+
+
+class TestSqlGenerationManifest:
+    def test_writes_effective_values(self, tmp_path):
+        import json
+        from types import SimpleNamespace
+        from src.engine.packaging.package_output import _write_sql_generation_manifest
+
+        sales_cfg = SimpleNamespace(total_rows=300_000_000, skip_order_cols=True, sales_output="both")
+        _write_sql_generation_manifest(tmp_path, sales_cfg, order_id_int64=True)
+        data = json.loads((tmp_path / "config" / "sql_generation.json").read_text(encoding="utf-8"))
+        assert data == {
+            "schema_version": 1,
+            "order_id_int64": True,
+            "total_rows": 300_000_000,
+            "skip_order_cols": True,
+            "sales_output": "both",
+        }
+
+    def test_none_flag_is_null(self, tmp_path):
+        import json
+        from types import SimpleNamespace
+        from src.engine.packaging.package_output import _write_sql_generation_manifest
+
+        sales_cfg = SimpleNamespace(total_rows=1000, skip_order_cols=False, sales_output="sales")
+        _write_sql_generation_manifest(tmp_path, sales_cfg, order_id_int64=None)
+        data = json.loads((tmp_path / "config" / "sql_generation.json").read_text(encoding="utf-8"))
+        assert data["order_id_int64"] is None

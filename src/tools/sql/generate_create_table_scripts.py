@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import re as _re
 from pathlib import Path
-from typing import Mapping, Sequence, Tuple
+from typing import TYPE_CHECKING, Mapping, Sequence, Tuple
+
+if TYPE_CHECKING:
+    from src.tools.sql.name_map import NameMap
 
 from src.utils.static_schemas import (
     STATIC_SCHEMAS,
@@ -91,26 +94,32 @@ def create_table_from_schema(
     drop_existing: bool = True,
     include_batch_separator: bool = True,
     dialect: Dialect = DEFAULT_DIALECT,
+    name_map: "NameMap | None" = None,
 ) -> str:
     if schema is None:
         schema = dialect.default_schema
-    _validate_sql_identifier(table_name, "table name")
+    # Resolve identifiers through the name map (identity when name_map is None,
+    # so pascal/default output stays byte-identical). The table name is resolved
+    # once and reused for the DROP and CREATE so they always agree.
+    resolve = name_map.resolve if name_map is not None else (lambda s: s)
+    table_out = resolve(table_name)
+    _validate_sql_identifier(table_out, "table name")
     _validate_sql_identifier(schema, "schema name")
     if not cols:
         raise ValueError(f"Cannot generate CREATE TABLE for {table_name!r}: no columns.")
-    fq_table = dialect.qualify(schema, table_name)
+    fq_table = dialect.qualify(schema, table_out)
 
     emit_separator = include_batch_separator and bool(dialect.batch_separator)
 
     lines: list[str] = []
     if drop_existing:
-        lines.append(dialect.drop_table_if_exists(schema, table_name))
+        lines.append(dialect.drop_table_if_exists(schema, table_out))
         if emit_separator:
             lines.append(dialect.batch_separator)
 
     lines.append(f"CREATE TABLE {fq_table} (")
     for col, dtype in cols:
-        lines.append(f"    {dialect.quote_ident(col)} {dialect.render_type(dtype)},")
+        lines.append(f"    {dialect.quote_ident(resolve(col))} {dialect.render_type(dtype)},")
     if lines[-1].endswith(","):
         lines[-1] = lines[-1].rstrip(",")
     lines.append(");")
@@ -130,6 +139,7 @@ def generate_all_create_tables(
     drop_existing: bool = True,
     dialect: Dialect = DEFAULT_DIALECT,
     order_id_int64: bool | None = None,
+    name_map: "NameMap | None" = None,
 ):
     """
     Writes:
@@ -152,6 +162,7 @@ def generate_all_create_tables(
             drop_existing=drop_existing,
             include_batch_separator=True,
             dialect=dialect,
+            name_map=name_map,
         )
 
     schema_dir = Path(output_folder) / "schema"

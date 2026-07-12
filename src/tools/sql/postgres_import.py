@@ -33,10 +33,10 @@ only satisfiable by one session), so we pay the freeze cost once here in
 a single sequential pass.
 
 Run-directory layout (CSV mode):
-    <run>/postgres/schema/01_create_dimensions.sql
-    <run>/postgres/schema/02_create_facts.sql
-    <run>/postgres/load/01_copy_dims.sql
-    <run>/postgres/load/02_copy_facts.sql
+    <run>/sql/postgres/schema/01_create_dimensions.sql
+    <run>/sql/postgres/schema/02_create_facts.sql
+    <run>/sql/postgres/load/01_copy_dims.sql
+    <run>/sql/postgres/load/02_copy_facts.sql
 
 ``import_postgres()`` connects via psycopg, optionally creates the target
 database, applies the schema scripts, then the load scripts, then verifies
@@ -613,6 +613,7 @@ def import_postgres(
     run_dir: Path,
     verify: bool = True,
     load_workers: int = 1,
+    sql_root_override: Path | None = None,
 ) -> None:
     """Apply generated Postgres DDL and COPY scripts to a target database.
 
@@ -630,7 +631,11 @@ def import_postgres(
     # Validate inputs before requiring the driver — fail fast on bad layout
     # without forcing psycopg to be installed just to see the error message.
     run_dir = Path(run_dir)
-    postgres_dir = run_dir / "postgres"
+    # ``sql_root_override`` points at a re-rendered ``sql/`` tree (e.g. a snake
+    # re-emit into a temp dir) so casing can be chosen at import; default uses the
+    # PascalCase scripts packaged with the run.
+    sql_root = Path(sql_root_override) if sql_root_override is not None else (run_dir / "sql")
+    postgres_dir = sql_root / "postgres"
     schema_dir = postgres_dir / "schema"
     load_dir = postgres_dir / "load"
     admin_dir = postgres_dir / "admin"

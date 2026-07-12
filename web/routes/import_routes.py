@@ -50,7 +50,7 @@ _INTERRUPT_HINT = (
     "NOTE: an interrupted import can leave the target database partially "
     "populated — drop it before retrying (the importer refuses to reuse an "
     "existing database). On SQL Server it may also be left in BULK_LOGGED "
-    "recovery; re-run sql/load/99_*_finish_load.sql against it to restore the "
+    "recovery; re-run sql/sqlserver/load/99_*_finish_load.sql against it to restore the "
     "recovery model and then BACKUP LOG to restart the log-backup chain."
 )
 
@@ -367,7 +367,7 @@ def start_import(req: ImportRequest):
         raise HTTPException(400, "Invalid dataset name.")
     if not dataset_path.is_dir():
         raise HTTPException(404, f"Dataset not found: {req.dataset}")
-    sql_dir = dataset_path / "sql"
+    sql_dir = dataset_path / "sql" / "sqlserver"
     if not sql_dir.is_dir():
         raise HTTPException(400, "Dataset has no SQL scripts. SQL import requires CSV format output.")
 

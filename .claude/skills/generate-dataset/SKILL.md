@@ -172,6 +172,15 @@ scale:
 - **deltaparquet** (`delta`) — partitioned by Year/Month, ACID via delta-rs.
   **Intentionally skips** PBIP generation.
 
+### SQL identifier casing (chosen at import, not generation)
+
+Generated SQL is always **PascalCase**. Identifier casing is a per-import choice:
+the SQL Server / PostgreSQL import scripts take `-IdentifierCase pascal|snake` and
+re-render the whole SQL bundle in that case from the run's own config (`snake` =
+quote-free PostgreSQL; cosmetic on case-insensitive SQL Server). The CSV/parquet
+data files are never touched (positional load), so one generated dataset serves
+every casing. See the sql-and-dialects skill and the import operations docs.
+
 Post-generation compaction: `python scripts/optimize_delta.py <path>` /
 `python scripts/optimize_parquet.py <path>`.
 

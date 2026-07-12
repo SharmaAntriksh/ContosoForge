@@ -1,6 +1,6 @@
 # NOTE:
 # This script is intended for CSV-based runs only.
-# The run path must contain 'sql/schema/' and 'sql/load/' folders.
+# The run path must contain 'sql/sqlserver/schema/' and 'sql/sqlserver/load/' folders.
 
 [CmdletBinding(DefaultParameterSetName = "Trusted")]
 param (
@@ -70,6 +70,13 @@ param (
     # Default 4. Diminishing returns past ~8 on a single NVMe.
     [int]$LoadWorkers = 4,
 
+    # Identifier casing to import under. 'pascal' (default) runs the PascalCase
+    # scripts packaged with the run; 'snake' re-renders the DDL/load/constraints/
+    # views/indexes in lower_snake_case from the run's config before importing
+    # (the CSV data files are never touched).
+    [ValidateSet("pascal", "snake")]
+    [string]$IdentifierCase = "pascal",
+
     # Override python executable (defaults to active venv python if venv is activated)
     [string]$PythonExe = "python",
 
@@ -94,16 +101,16 @@ try {
     $ResolvedRunPath = (Resolve-Path $RunPath).Path
 
     # CSV-only guard
-    $schemaDir = Join-Path $ResolvedRunPath "sql\schema"
-    $loadDir   = Join-Path $ResolvedRunPath "sql\load"
+    $schemaDir = Join-Path $ResolvedRunPath "sql\sqlserver\schema"
+    $loadDir   = Join-Path $ResolvedRunPath "sql\sqlserver\load"
     if (-not (Test-Path $schemaDir) -or -not (Test-Path $loadDir)) {
-        throw "CSV run required. Expected sql/schema/ and sql/load/ folders in: $ResolvedRunPath"
+        throw "CSV run required. Expected sql/sqlserver/schema/ and sql/sqlserver/load/ folders in: $ResolvedRunPath"
     }
     if ((Get-ChildItem -Path $schemaDir -File | Measure-Object).Count -eq 0) {
-        throw "sql/schema/ folder is empty - no SQL scripts to execute in: $schemaDir"
+        throw "sql/sqlserver/schema/ folder is empty - no SQL scripts to execute in: $schemaDir"
     }
     if ((Get-ChildItem -Path $loadDir -File | Measure-Object).Count -eq 0) {
-        throw "sql/load/ folder is empty - no data files to load in: $loadDir"
+        throw "sql/sqlserver/load/ folder is empty - no data files to load in: $loadDir"
     }
 
     # Log the resolved python interpreter and version
@@ -125,7 +132,8 @@ try {
         $PyEntrypoint,
         "--server",   $Server,
         "--database", $Database,
-        "--run-path", $ResolvedRunPath
+        "--run-path", $ResolvedRunPath,
+        "--identifier-case", $IdentifierCase
     )
 
     # Tracks whether we set SYNDATA_DB_PASSWORD / SYNDATA_TABULAR_PASSWORD so the
@@ -213,6 +221,7 @@ try {
         if ($Verify)   { $flags += "verify" }
         if ($ProvisionTabularUser) { $flags += ("provision-tabular-user=" + $TabularLogin) }
         if ($OdbcDriver) { $flags += ("odbc=" + $OdbcDriver) }
+        $flags += ("case=" + $IdentifierCase)
         $flags += ("load-workers=" + $LoadWorkers)
 
         $flagText = if ($flags.Count -gt 0) { " [" + ($flags -join ", ") + "]" } else { "" }

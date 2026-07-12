@@ -145,6 +145,18 @@ def load_config(path: str | Path = "config.yaml"):
         require_defaults=True,
         normalize_keys=None,  # normalize all registered sections
     )
+    if isinstance(raw, dict) and "sql" in raw:
+        # Local import keeps config.py free of a logging dependency at module load
+        # (it is imported very early). The 'sql' section held identifier_case while
+        # that flag briefly existed on this branch; casing is now an import-time
+        # choice, so the section is inert but must not break loading.
+        from src.utils.logging_utils import warn
+
+        warn(
+            "config.yaml contains a 'sql:' section, which is no longer used. "
+            "Identifier casing is chosen at import time via --identifier-case "
+            "on the import runners (see docs/operations/*-import.md)."
+        )
     return AppConfig.from_raw_dict(raw)
 
 

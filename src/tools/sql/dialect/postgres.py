@@ -17,10 +17,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from .base import ColumnSpec, Dialect, SqlType, sql_escape_literal
+from ..reserved_words import POSTGRES_RESERVED
 
 
 class PostgresDialect(Dialect):
     name = "postgres"
+    reserved_words = POSTGRES_RESERVED
     load_script_kind = "copy"
     default_schema = "public"
     qualify_load_target = True

@@ -8,6 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]  # scripts/sql/ -> scripts -> repo root
 sys.path.insert(0, str(REPO_ROOT))
 
+from src.exceptions import PipelineError
 from src.tools.sql.sql_helpers import odbc_brace as _odbc_brace
 from src.tools.sql.sql_server_import import (
     import_sql_server,
@@ -74,7 +75,7 @@ def _install_graceful_stop() -> None:
 def _resolve_run_dir(run_path: str) -> Path:
     run_dir = Path(run_path).expanduser().resolve()
 
-    sql_dir = run_dir / "sql"
+    sql_dir = run_dir / "sql" / "sqlserver"
     schema_dir = sql_dir / "schema"
     load_dir = sql_dir / "load"
 
@@ -109,6 +110,18 @@ def main() -> int:
         "--run-path",
         required=True,
         help="Path to generator run output folder containing SQL scripts",
+    )
+    parser.add_argument(
+        "--identifier-case",
+        choices=["pascal", "snake"],
+        default="pascal",
+        help=(
+            "Identifier casing to import under. 'pascal' (default) runs the "
+            "PascalCase scripts packaged with the run. 'snake' re-renders the "
+            "DDL/constraints/views/indexes/load in lower_snake_case from the "
+            "run's config before importing (data files are never touched); on "
+            "PostgreSQL this lets you query without double-quoting."
+        ),
     )
 
     parser.add_argument("--user", help="SQL Server username")
@@ -267,22 +280,40 @@ def main() -> int:
                     "--provision-tabular-user requires SYNDATA_TABULAR_PASSWORD env var to be set."
                 )
 
-        import_sql_server(
-            server=args.server,
-            database=args.database,
-            run_dir=run_dir,
-            connection_string=connection_string,
-            apply_cci=bool(args.apply_cci),
-            drop_pk=bool(args.drop_pk),
-            drop_pk_before_load=bool(args.drop_pk_before_load),
-            restore_pk_after_load=bool(args.restore_pk_after_load),
-            verify=bool(args.verify),
-            provision_tabular_user=bool(args.provision_tabular_user),
-            tabular_login=args.tabular_login,
-            tabular_password=tabular_password,
-            load_workers=int(args.load_workers),
-            manage_recovery=not bool(args.no_recovery_management),
-        )
+        # Identifier casing is chosen at import. 'snake' re-renders the SQL from
+        # the run's config into a temp dir; 'pascal' uses the packaged scripts.
+        import contextlib
+        import tempfile
+
+        case = str(args.identifier_case or "pascal").strip().lower()
+        with contextlib.ExitStack() as stack:
+            sql_root_override = None
+            if case != "pascal":
+                from src.engine.packaging.reemit_sql import reemit_run_sql
+
+                tmp = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="cf_sql_import_")
+                )
+                sql_root_override = Path(tmp) / "sql"
+                reemit_run_sql(run_dir=run_dir, out_sql_root=sql_root_override, case=case)
+
+            import_sql_server(
+                server=args.server,
+                database=args.database,
+                run_dir=run_dir,
+                connection_string=connection_string,
+                apply_cci=bool(args.apply_cci),
+                drop_pk=bool(args.drop_pk),
+                drop_pk_before_load=bool(args.drop_pk_before_load),
+                restore_pk_after_load=bool(args.restore_pk_after_load),
+                verify=bool(args.verify),
+                provision_tabular_user=bool(args.provision_tabular_user),
+                tabular_login=args.tabular_login,
+                tabular_password=tabular_password,
+                load_workers=int(args.load_workers),
+                manage_recovery=not bool(args.no_recovery_management),
+                sql_root_override=sql_root_override,
+            )
 
     except KeyboardInterrupt:
         # Raised by _install_graceful_stop on CTRL_BREAK/SIGTERM. import_sql_server's
@@ -302,6 +333,12 @@ def main() -> int:
     except ConnectionError as exc:
         print(f"CONNECTION ERROR: {exc}", file=sys.stderr)
         return 3
+    except (FileNotFoundError, PipelineError) as exc:
+        # e.g. re-emit could not find/load the run's packaged config for a
+        # non-pascal --identifier-case. SqlServerImportError (a PipelineError
+        # subclass) is handled above, so it never reaches here.
+        print(f"VALIDATION ERROR: {exc}", file=sys.stderr)
+        return 2
 
     return 0
 

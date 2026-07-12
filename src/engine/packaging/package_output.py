@@ -23,6 +23,29 @@ from .sql_scripts import (
 )
 
 
+def _write_sql_generation_manifest(final_folder: Path, sales_cfg, order_id_int64) -> None:
+    """Record the effective SQL-shape inputs for import-time re-rendering.
+
+    The packaged config.yaml is a snapshot of the config FILE, taken before CLI
+    overrides are applied, so it cannot be trusted for values the SQL generators
+    read. This manifest records the effective values (and the authoritative
+    OrderNumber width decision) so reemit_run_sql reproduces exactly what
+    packaging rendered.
+    """
+    import json
+
+    manifest = {
+        "schema_version": 1,
+        "order_id_int64": None if order_id_int64 is None else bool(order_id_int64),
+        "total_rows": int(getattr(sales_cfg, "total_rows", 0) or 0),
+        "skip_order_cols": bool(getattr(sales_cfg, "skip_order_cols", False)),
+        "sales_output": str(getattr(sales_cfg, "sales_output", "sales") or "sales").strip().lower(),
+    }
+    out = final_folder / "config" / "sql_generation.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
                    *, order_id_int64: bool | None = None, manifest=None):
     """
@@ -209,21 +232,31 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
     if is_csv:
         sql_root = final_folder / "sql"
 
-        # CREATE TABLE — emits one script set per registered dialect.
-        # SQL Server lands at sql/; other dialects land at <run>/<dialect>/.
+        # Generated SQL is always emitted in PascalCase. Identifier casing is a
+        # per-import concern (SQL Server casing is cosmetic; Postgres wants snake
+        # to avoid quoting), so the importers re-render in the requested case
+        # from the same roster — the packaged scripts are the PascalCase baseline.
+
+        # Effective SQL-shape inputs for import-time re-rendering. The packaged
+        # config.yaml predates CLI overrides, so the re-emit path cannot trust it
+        # for values the generators read (OrderNumber width, skip_order_cols, ...).
+        _write_sql_generation_manifest(final_folder, sales_cfg, order_id_int64)
+
+        # CREATE TABLE — emits one script set per registered dialect under the
+        # umbrella sql/ root: SQL Server at sql/sqlserver/, Postgres at
+        # sql/postgres/, and any future dialect at sql/<dialect>/.
         write_create_table_scripts(dims_out=dims_out, facts_out=facts_out, sql_root=sql_root, cfg=cfg,
                                    order_id_int64=order_id_int64)
 
-        # The remaining scripts (constraints, views, verification, BULK INSERT,
-        # columnstore helpers) are T-SQL only and always emit at sql/.
+        # The remaining T-SQL-only scripts (constraints, views, verification,
+        # BULK INSERT, columnstore helpers) emit under sql/sqlserver/.
         compose_constraints_sql(sql_root=sql_root, sales_cfg=sales_cfg, cfg=cfg)
-        # Postgres constraint SQL is hand-translated, not auto-derived from the SQL Server parts.
+        # Postgres constraints are generated from the same declarative roster.
         compose_postgres_constraints_sql(sql_root=sql_root, sales_cfg=sales_cfg, cfg=cfg)
-        compose_postgres_views_sql(sql_root=sql_root, cfg=cfg)
+        compose_postgres_views_sql(sql_root=sql_root, cfg=cfg, sales_cfg=sales_cfg)
         compose_postgres_indexes_sql(sql_root=sql_root)
         copy_postgres_admin_sql(sql_root=sql_root)
-        view_schema = str(getattr(getattr(cfg, "defaults", None), "view_schema", "dbo") or "dbo").strip()
-        copy_views_sql(sql_root=sql_root, view_schema=view_schema)
+        copy_views_sql(sql_root=sql_root, cfg=cfg, sales_cfg=sales_cfg)
         compose_verification_sql(sql_root=sql_root)
         write_bulk_insert_scripts(dims_out=dims_out, facts_out=facts_out, sql_root=sql_root, cfg=cfg)
         copy_static_sql_assets(sql_root=sql_root)

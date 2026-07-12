@@ -344,15 +344,15 @@ class TestPostgresLoadScriptGeneration:
 
 
 class TestPackagingRouting:
-    """Packaging: SQL Server lands at sql/, every other dialect at <run>/<name>/.
+    """Packaging: every dialect lands under the umbrella sql/<dialect>/ root.
 
     These tests exercise ``write_create_table_scripts`` to lock in the routing
-    behaviour — a regression caught here when REGISTRY started holding a
-    fresh ``SqlServerDialect()`` instance instead of the ``DEFAULT_DIALECT``
-    singleton, which silently sent SQL Server output to ``<run>/sqlserver/``.
+    behaviour: SQL Server at ``sql/sqlserver/``, Postgres at ``sql/postgres/``,
+    each derived uniformly from ``sql_root / dialect.name`` with no
+    DEFAULT_DIALECT special-casing.
     """
 
-    def test_sql_server_lands_at_sql_root(self, tmp_path) -> None:
+    def test_sql_server_lands_at_sql_sqlserver(self, tmp_path) -> None:
         from src.engine.packaging.sql_scripts import write_create_table_scripts
 
         run = tmp_path / "run"
@@ -370,11 +370,13 @@ class TestPackagingRouting:
         )
         write_create_table_scripts(dims_out=dims_out, facts_out=facts_out, sql_root=sql_root, cfg=cfg)
 
-        assert (sql_root / "schema" / "01_create_dimensions.sql").exists()
-        assert (sql_root / "schema" / "02_create_facts.sql").exists()
-        assert not (run / "sqlserver").exists(), "SQL Server output must land at sql/, not <run>/sqlserver/"
+        assert (sql_root / "sqlserver" / "schema" / "01_create_dimensions.sql").exists()
+        assert (sql_root / "sqlserver" / "schema" / "02_create_facts.sql").exists()
+        # Not directly under the umbrella, nor at a top-level run/sqlserver.
+        assert not (sql_root / "schema").exists()
+        assert not (run / "sqlserver").exists()
 
-    def test_postgres_lands_at_run_sibling(self, tmp_path) -> None:
+    def test_postgres_lands_at_sql_postgres(self, tmp_path) -> None:
         from src.engine.packaging.sql_scripts import write_create_table_scripts
 
         run = tmp_path / "run"
@@ -391,10 +393,10 @@ class TestPackagingRouting:
         )
         write_create_table_scripts(dims_out=dims_out, facts_out=facts_out, sql_root=sql_root, cfg=cfg)
 
-        assert (run / "postgres" / "schema" / "01_create_dimensions.sql").exists()
-        assert (run / "postgres" / "schema" / "02_create_facts.sql").exists()
-        # Postgres output must not contaminate the SQL Server folder.
-        assert not (sql_root / "postgres").exists()
+        assert (sql_root / "postgres" / "schema" / "01_create_dimensions.sql").exists()
+        assert (sql_root / "postgres" / "schema" / "02_create_facts.sql").exists()
+        # Postgres lives under the umbrella, not at a top-level run/postgres.
+        assert not (run / "postgres").exists()
 
     def _setup_run(self, tmp_path):
         run = tmp_path / "run"
@@ -411,24 +413,27 @@ class TestPackagingRouting:
         )
         return run, sql_root, dims_out, run / "facts", cfg
 
-    def test_sql_server_load_lands_at_sql_load(self, tmp_path) -> None:
+    def test_sql_server_load_lands_at_sql_sqlserver_load(self, tmp_path) -> None:
         from src.engine.packaging.sql_scripts import write_bulk_insert_scripts
 
         run, sql_root, dims_out, facts_out, cfg = self._setup_run(tmp_path)
         write_bulk_insert_scripts(dims_out=dims_out, facts_out=facts_out, sql_root=sql_root, cfg=cfg)
 
-        assert (sql_root / "load" / "01_bulk_insert_dims.sql").exists()
-        assert (sql_root / "load" / "02_bulk_insert_facts.sql").exists()
-        assert not (run / "sqlserver").exists(), "SQL Server load must land at sql/load/, not <run>/sqlserver/load/"
+        assert (sql_root / "sqlserver" / "load" / "01_bulk_insert_dims.sql").exists()
+        assert (sql_root / "sqlserver" / "load" / "02_bulk_insert_facts.sql").exists()
+        # Not directly under the umbrella, nor at a top-level run/sqlserver.
+        assert not (sql_root / "load").exists()
+        assert not (run / "sqlserver").exists()
 
-    def test_postgres_load_lands_at_run_sibling(self, tmp_path) -> None:
+    def test_postgres_load_lands_at_sql_postgres_load(self, tmp_path) -> None:
         from src.engine.packaging.sql_scripts import write_bulk_insert_scripts
 
         run, sql_root, dims_out, facts_out, cfg = self._setup_run(tmp_path)
         write_bulk_insert_scripts(dims_out=dims_out, facts_out=facts_out, sql_root=sql_root, cfg=cfg)
 
-        assert (run / "postgres" / "load" / "01_copy_dims.sql").exists()
-        assert (run / "postgres" / "load" / "02_copy_facts.sql").exists()
-        assert not (sql_root / "postgres").exists()
+        assert (sql_root / "postgres" / "load" / "01_copy_dims.sql").exists()
+        assert (sql_root / "postgres" / "load" / "02_copy_facts.sql").exists()
+        # Postgres lives under the umbrella, not at a top-level run/postgres.
+        assert not (run / "postgres").exists()
         # SQL Server load filenames must NOT appear under Postgres.
-        assert not (run / "postgres" / "load" / "01_bulk_insert_dims.sql").exists()
+        assert not (sql_root / "postgres" / "load" / "01_bulk_insert_dims.sql").exists()

@@ -59,6 +59,10 @@ class Dialect(ABC):
     # One-line note prepended to load scripts under the timestamp banner,
     # typically calling out where the file path is resolved.
     load_script_note: ClassVar[str] = ""
+    # Lowercased reserved keywords for this dialect. Used by the identifier-case
+    # name map to warn when a transformed identifier lands on a reserved word
+    # (which still needs quoting). Empty base default; subclasses populate it.
+    reserved_words: ClassVar[frozenset[str]] = frozenset()
 
     # Subclasses populate these with the dialect's type spellings. The base
     # render_type/_render_base do the dispatch — subclasses only override if

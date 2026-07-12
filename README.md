@@ -181,16 +181,22 @@ generated_datasets/
       │   ├── inventory/                       ← if inventory enabled
       │   ├── customer_wishlists/              ← if wishlists enabled
       │   └── complaints/                      ← if complaints enabled
-      ├── sql/                                 ← CSV mode only - SQL Server bootstrap
-      │   ├── schema/
-      │   ├── load/
-      │   └── indexes/
-      └── postgres/                            ← CSV mode only - PostgreSQL bootstrap
-          ├── schema/                          ← CREATE TABLE, views, constraints (DDL)
-          ├── load/                            ← COPY scripts
-          ├── admin/                           ← manage_primary_keys procedure
-          └── indexes/                         ← btree + BRIN indexes
+      └── sql/                                 ← CSV mode only - one folder per dialect
+          ├── sqlserver/                       ← SQL Server bootstrap
+          │   ├── schema/                      ← CREATE TABLE, constraints, views, verify
+          │   ├── load/                        ← BULK INSERT scripts
+          │   └── indexes/                     ← columnstore (CCI) helper
+          └── postgres/                        ← PostgreSQL bootstrap
+              ├── schema/                      ← CREATE TABLE, constraints, views (DDL)
+              ├── load/                        ← COPY scripts
+              ├── admin/                       ← manage_primary_keys procedure
+              └── indexes/                     ← btree + BRIN indexes
 ```
+
+The generated SQL is always PascalCase. Identifier casing is chosen **at import**:
+the SQL Server / PostgreSQL import scripts take `-IdentifierCase pascal|snake` and
+re-render the SQL in that case (`snake` gives quote-free PostgreSQL querying). Only
+the emitted scripts change, never the CSV/parquet data.
 
 ---
 

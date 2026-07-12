@@ -496,3 +496,20 @@ class TestFoldFactsEnabled:
         assert "facts" not in result
 
 
+def test_legacy_sql_section_warns_but_loads(tmp_path, capsys):
+    import shutil
+    from pathlib import Path
+    from src.engine.config.config import load_config
+
+    repo_cfg = Path(__file__).resolve().parents[1] / "config.yaml"
+    dst = tmp_path / "config.yaml"
+    shutil.copyfile(repo_cfg, dst)
+    with dst.open("a", encoding="utf-8") as f:
+        f.write("\nsql:\n  identifier_case: snake\n")
+
+    cfg = load_config(dst)
+    assert cfg is not None
+    out = capsys.readouterr()
+    assert "sql:" in (out.out + out.err) or "'sql'" in (out.out + out.err)
+
+
