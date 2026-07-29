@@ -344,3 +344,13 @@ python scripts/helper_print_config_summary.py config.yaml
 ```bash
 python -m uvicorn web.api:app --port 8502
 ```
+
+The server uses committed, self-contained assets from `web/frontend/dist/`.
+Only frontend contributors need Node.js:
+
+```powershell
+cd web\frontend
+npm ci
+npm run build
+npm run build:check
+```

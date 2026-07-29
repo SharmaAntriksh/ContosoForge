@@ -1,5 +1,5 @@
 /* ═══ components.jsx — shared UI primitives ═══ */
-const {useState, useEffect, useRef, useCallback, useMemo} = React;
+const {useState, useEffect, useRef, useCallback, useMemo, useId} = React;
 
 const API = "/api";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -23,32 +23,67 @@ const iS = inputStyle;
 
 function Section({num, title, children, defaultOpen = true, badge}) {
   const [open, setOpen] = useState(defaultOpen);
+  const generatedId = useId().replace(/:/g, "");
+  const triggerId = `section-trigger-${generatedId}`;
+  const panelId = `section-panel-${generatedId}`;
   return (
     <div style={{background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, marginBottom: 14, boxShadow: "0 1px 3px rgba(0,0,0,.04)", overflow: "hidden"}}>
-      <button onClick={() => setOpen(!open)} style={{display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", cursor: "pointer", background: "none", border: "none", width: "100%", color: "var(--text)", fontFamily: "var(--sans)"}}>
+      <button type="button" id={triggerId} aria-expanded={open} aria-controls={panelId} onClick={() => setOpen(!open)} style={{display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", cursor: "pointer", background: "none", border: "none", width: "100%", color: "var(--text)", fontFamily: "var(--sans)"}}>
         <span style={{width: 26, height: 26, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, fontFamily: "var(--mono)", background: open ? "var(--accent)" : "var(--alt)", color: open ? "#fff" : "var(--muted)", transition: "all .15s"}}>{num}</span>
         <span style={{fontSize: 14.5, fontWeight: 600, flex: 1, textAlign: "left"}}>{title}</span>
         {badge && <Badge variant={badge.v}>{badge.t}</Badge>}
-        <span style={{fontSize: 16, color: "var(--muted)", transform: open ? "rotate(0)" : "rotate(-90deg)", transition: "transform .2s"}}>▾</span>
+        <span aria-hidden="true" style={{fontSize: 16, color: "var(--muted)", transform: open ? "rotate(0)" : "rotate(-90deg)", transition: "transform .2s"}}>▾</span>
       </button>
-      {open && <div style={{padding: "0 18px 18px", borderTop: "1px solid var(--border)"}}>{children}</div>}
+      <div
+        id={panelId}
+        role="region"
+        aria-labelledby={triggerId}
+        data-section-panel="true"
+        hidden={!open}
+        style={{padding: "0 18px 18px", borderTop: "1px solid var(--border)"}}
+      >
+        {children}
+      </div>
     </div>
   );
 }
 
-function FormField({label, help, children}) {
+function FormField({label, help, children, id}) {
+  const generatedId = useId().replace(/:/g, "");
+  const controlId = id || `field-${generatedId}`;
+  const helpId = `${controlId}-help`;
+  const onlyChild = React.Children.count(children) === 1
+    ? React.Children.only(children)
+    : null;
+  const isNativeControl = React.isValidElement(onlyChild)
+    && typeof onlyChild.type === "string"
+    && ["input", "select", "textarea"].includes(onlyChild.type);
+  const isSharedControl = React.isValidElement(onlyChild)
+    && [NumberInput, Select].includes(onlyChild.type);
+  const canAssociate = Boolean(label?.trim() && (isNativeControl || isSharedControl));
+  const renderedChildren = canAssociate
+    ? React.cloneElement(onlyChild, {
+        id: onlyChild.props.id || controlId,
+        "aria-describedby": help
+          ? [onlyChild.props["aria-describedby"], helpId].filter(Boolean).join(" ")
+          : onlyChild.props["aria-describedby"],
+      })
+    : children;
   return (
     <div style={{marginTop: 14}}>
-      {label && <label style={{display: "block", fontSize: 12.5, fontWeight: 500, color: "var(--dim)", marginBottom: 5}}>{label}</label>}
-      {children}
-      {help && <div style={{fontSize: 11, color: "var(--muted)", marginTop: 3}}>{help}</div>}
+      {label && (canAssociate
+        ? <label htmlFor={controlId} style={{display: "block", fontSize: 12.5, fontWeight: 500, color: "var(--dim)", marginBottom: 5}}>{label}</label>
+        : <div style={{display: "block", fontSize: 12.5, fontWeight: 500, color: "var(--dim)", marginBottom: 5}}>{label}</div>
+      )}
+      {renderedChildren}
+      {help && <div id={helpId} style={{fontSize: 11, color: "var(--muted)", marginTop: 3}}>{help}</div>}
     </div>
   );
 }
 /* Backward-compatible alias */
 const F = FormField;
 
-function NumberInput({value, onChange, min, max, step, style: extraStyle}) {
+function NumberInput({value, onChange, min, max, step, style: extraStyle, ...inputProps}) {
   const displayValue = value != null ? value : "";
   return (
     <input
@@ -58,6 +93,7 @@ function NumberInput({value, onChange, min, max, step, style: extraStyle}) {
       min={min}
       max={max}
       step={step || 1}
+      {...inputProps}
       onChange={event => {
         const parsed = parseFloat(event.target.value);
         onChange(isNaN(parsed) ? (min || 0) : parsed);
@@ -76,12 +112,13 @@ function NumberInput({value, onChange, min, max, step, style: extraStyle}) {
 /* Backward-compatible alias */
 const N = NumberInput;
 
-function Select({value, onChange, options, labels}) {
+function Select({value, onChange, options, labels, style: extraStyle, ...selectProps}) {
   return (
     <select
-      style={{...inputStyle, fontFamily: "var(--sans)", cursor: "pointer"}}
+      style={{...inputStyle, fontFamily: "var(--sans)", cursor: "pointer", ...extraStyle}}
       value={value}
       onChange={event => onChange(event.target.value)}
+      {...selectProps}
     >
       {options.map((option, index) => (
         <option key={option} value={option}>{labels ? labels[index] : option}</option>
@@ -92,13 +129,24 @@ function Select({value, onChange, options, labels}) {
 /* Backward-compatible alias */
 const Sel = Select;
 
-function Checkbox({checked, onChange, label, disabled}) {
+function Checkbox({checked, onChange, label, disabled, id, describedBy}) {
+  const generatedId = useId().replace(/:/g, "");
+  const controlId = id || `checkbox-${generatedId}`;
   return (
     <label
-      onClick={event => { event.preventDefault(); if (!disabled) onChange(!checked); }}
+      htmlFor={controlId}
       style={{display: "flex", alignItems: "center", gap: 7, cursor: disabled ? "default" : "pointer", fontSize: 13, color: disabled ? "var(--muted)" : "var(--text)", fontFamily: "var(--sans)", opacity: disabled ? .6 : 1}}
     >
-      <span style={{width: 17, height: 17, borderRadius: 5, flexShrink: 0, border: `2px solid ${checked ? "var(--accent)" : "var(--border)"}`, background: checked ? "var(--accent)" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all .12s"}}>
+      <input
+        className="accessible-check-input"
+        id={controlId}
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        aria-describedby={describedBy}
+        onChange={event => onChange(event.target.checked)}
+      />
+      <span className="accessible-check-box" aria-hidden="true" style={{width: 17, height: 17, borderRadius: 5, flexShrink: 0, border: `2px solid ${checked ? "var(--accent)" : "var(--border)"}`, background: checked ? "var(--accent)" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all .12s"}}>
         {checked && <span style={{color: "#fff", fontSize: 10, fontWeight: 700}}>✓</span>}
       </span>
       {label}
@@ -110,16 +158,20 @@ const Check = Checkbox;
 
 function Slider({label, value, onChange, min, max, step, fmt}) {
   const numericValue = Number(value) || 0;
+  const generatedId = useId().replace(/:/g, "");
+  const controlId = `slider-${generatedId}`;
   return (
     <div style={{marginTop: 10}}>
       <div style={{display: "flex", justifyContent: "space-between", marginBottom: 5}}>
-        <span style={{fontSize: 12, color: "var(--dim)"}}>{label}</span>
-        <span style={{fontSize: 12, color: "var(--accent)", fontFamily: "var(--mono)", fontWeight: 600}}>
+        <label htmlFor={controlId} style={{fontSize: 12, color: "var(--dim)"}}>{label}</label>
+        <span id={`${controlId}-value`} style={{fontSize: 12, color: "var(--accent)", fontFamily: "var(--mono)", fontWeight: 600}}>
           {fmt ? fmt(numericValue) : numericValue.toFixed(2)}
         </span>
       </div>
       <input
+        id={controlId}
         type="range"
+        aria-describedby={`${controlId}-value`}
         min={min}
         max={max}
         step={step}
@@ -181,8 +233,10 @@ function ThemeToggle() {
   }, []);
   return (
     <button
+      type="button"
       onClick={toggle}
       title={dark ? "Switch to light mode" : "Switch to dark mode"}
+      aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
       style={{width: 32, height: 32, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--dim)", fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all .15s", flexShrink: 0}}
       onMouseOver={event => { event.currentTarget.style.borderColor = "var(--accent)"; event.currentTarget.style.color = "var(--accent)"; }}
       onMouseOut={event => { event.currentTarget.style.borderColor = "var(--border)"; event.currentTarget.style.color = "var(--dim)"; }}

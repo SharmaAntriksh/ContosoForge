@@ -20,6 +20,22 @@ Load a CSV-format generated dataset into PostgreSQL in one step. The import scri
 
 ---
 
+## Web UI wizard
+
+Launch the web interface, open **Database Import**, and choose
+**PostgreSQL**. The wizard asks for:
+
+- host, port, database, username, and password;
+- `snake_case` (recommended) or the packaged `PascalCase` identifiers;
+- one or more load connections for chunked fact tables; and
+- optional row-count verification, enabled by default.
+
+The password is passed to the importer through `PGPASSWORD`; it is not included
+in the subprocess command or import log. The wizard only lists CSV datasets and
+will not overwrite an existing database.
+
+---
+
 ## Quick recipes
 
 ### Local Postgres with interactive password prompt

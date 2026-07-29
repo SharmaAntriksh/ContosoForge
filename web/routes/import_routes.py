@@ -1,32 +1,38 @@
 """
-web/routes/import_routes.py -- SQL Server import endpoints.
+web/routes/import_routes.py -- database import endpoints.
 
-Runs the import script as a subprocess with SSE log streaming,
+Runs the SQL Server or PostgreSQL importer with SSE log streaming,
 mirroring the generation_routes.py pattern.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json as _json
 import logging
 import os
 import re
-import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.tools.sql.sql_server_import import validate_tabular_login_name
 from src.utils.config_helpers import int_or
+from web.process_control import (
+    attach_process_tree,
+    process_group_popen_kwargs,
+    release_process_tree,
+    request_process_tree_stop,
+)
 from web.shared_state import REPO_ROOT, _ANSI_RE
 
 # Spinner lines from sql_server_import.py use \r to overwrite in-place.
@@ -41,35 +47,26 @@ _IMPORT_TIMEOUT = int_or(os.environ.get("IMPORT_TIMEOUT_SECONDS"), 4 * 3600)
 _KILL_GRACE = int_or(os.environ.get("IMPORT_KILL_GRACE_SECONDS"), 30)
 _DATASETS_DIR = REPO_ROOT / "generated_datasets"
 _DATASETS_DIR_RESOLVED = _DATASETS_DIR.resolve()
-_IMPORT_SCRIPT = REPO_ROOT / "scripts" / "sql" / "run_sql_server_import.py"
+_IMPORT_SCRIPTS = {
+    "sqlserver": REPO_ROOT / "scripts" / "sql" / "run_sql_server_import.py",
+    "postgres": REPO_ROOT / "scripts" / "sql" / "run_postgres_import.py",
+}
 
 # Appended to the job log whenever an import is interrupted (timeout/cancel),
 # because a hard stop can leave the target DB half-populated and (on SQL Server)
 # in BULK_LOGGED recovery with a broken log-backup chain.
-_INTERRUPT_HINT = (
+_SQLSERVER_INTERRUPT_HINT = (
     "NOTE: an interrupted import can leave the target database partially "
     "populated — drop it before retrying (the importer refuses to reuse an "
     "existing database). On SQL Server it may also be left in BULK_LOGGED "
     "recovery; re-run sql/sqlserver/load/99_*_finish_load.sql against it to restore the "
     "recovery model and then BACKUP LOG to restart the log-backup chain."
 )
-
-
-def _signal_graceful(proc: subprocess.Popen) -> None:
-    """Ask the child to stop cleanly so its `finally` blocks run.
-
-    On Windows the child is launched in its own process group (see
-    ``_run_import_thread``) and installs a SIGBREAK handler, so CTRL_BREAK
-    reaches it as a KeyboardInterrupt rather than an OS-default terminate.
-    Elsewhere SIGTERM does the same. Best-effort — never raises.
-    """
-    try:
-        if sys.platform == "win32":
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            proc.terminate()
-    except (OSError, ValueError):
-        pass
+_POSTGRES_INTERRUPT_HINT = (
+    "NOTE: an interrupted import can leave the target PostgreSQL database "
+    "partially populated. Drop it before retrying because the importer refuses "
+    "to reuse an existing database."
+)
 
 
 def _stop_child(job: dict, proc: subprocess.Popen, *, grace: int = _KILL_GRACE) -> None:
@@ -81,16 +78,9 @@ def _stop_child(job: dict, proc: subprocess.Popen, *, grace: int = _KILL_GRACE) 
     """
     if proc.poll() is not None:
         return
-    _signal_graceful(proc)
-
-    def _force_kill():
-        if proc.poll() is None:
-            proc.kill()
-
-    kt = threading.Timer(max(1, grace), _force_kill)
-    kt.daemon = True
-    kt.start()
-    job.setdefault("_kill_timers", []).append(kt)
+    timer = request_process_tree_stop(proc, grace=grace)
+    if timer is not None:
+        job.setdefault("_kill_timers", []).append(timer)
 
 
 def _safe_dataset_path(name: str) -> Path:
@@ -113,7 +103,9 @@ _current_import: dict | None = None
 # ---------------------------------------------------------------------------
 
 class ImportRequest(BaseModel):
+    engine: Literal["sqlserver", "postgres"] = "sqlserver"
     server: str
+    port: int = Field(default=5432, ge=1, le=65535)
     database: str
     dataset: str                          # folder name in generated_datasets/
     trusted: bool = True
@@ -127,6 +119,8 @@ class ImportRequest(BaseModel):
     provision_tabular_user: bool = False
     tabular_login: Optional[str] = None
     tabular_password: Optional[str] = None
+    identifier_case: Literal["pascal", "snake"] = "pascal"
+    load_workers: int = Field(default=1, ge=1, le=64)
 
 
 # ---------------------------------------------------------------------------
@@ -227,68 +221,123 @@ def list_odbc_drivers():
         return {"available": False, "drivers": [], "error": str(exc)}
 
 
+def _postgres_available() -> bool:
+    """Return whether the optional PostgreSQL driver is installed."""
+    return importlib.util.find_spec("psycopg") is not None
+
+
+@router.get("/import/capabilities")
+def import_capabilities():
+    """Report local client dependencies used by each import engine."""
+    postgres_available = _postgres_available()
+    return {
+        "sqlserver": {
+            "driver": "pyodbc",
+        },
+        "postgres": {
+            "available": postgres_available,
+            "driver": "psycopg",
+            "error": None if postgres_available else (
+                "PostgreSQL support is not installed. Run "
+                "`uv sync --extra postgres` and restart the web UI."
+            ),
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Import execution
 # ---------------------------------------------------------------------------
 
-def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
-    """Run the SQL Server import script as a subprocess."""
-    global _current_import
-    try:
+def _build_import_command(
+    req: ImportRequest,
+    dataset_path: Path,
+) -> tuple[list[str], dict[str, str]]:
+    """Build an engine-specific importer command and password-safe environment."""
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
 
+    if req.engine == "postgres":
         cmd = [
-            sys.executable, "-u", str(_IMPORT_SCRIPT),
-            "--server", req.server,
-            "--database", req.database,
-            "--run-path", str(dataset_path),
+            sys.executable,
+            "-u",
+            str(_IMPORT_SCRIPTS["postgres"]),
+            "--host",
+            req.server,
+            "--port",
+            str(req.port),
+            "--database",
+            req.database,
+            "--user",
+            req.user or "postgres",
+            "--run-path",
+            str(dataset_path),
+            "--identifier-case",
+            req.identifier_case,
+            "--load-workers",
+            str(req.load_workers),
         ]
-
-        if req.trusted:
-            cmd.append("--trusted")
-        else:
-            if req.user:
-                cmd.extend(["--user", req.user])
-            # Password passed via env var to avoid exposure in process listings
-            if req.password:
-                cmd.append("--password-env")
-
-        if req.apply_cci:
-            cmd.append("--apply-cci")
-
-        if req.drop_pk:
-            cmd.append("--drop-pk")
-
-        if req.verify:
-            cmd.append("--verify")
-
-        # Recovery-model tuning is on by default; only forward the opt-out.
-        if not req.manage_recovery:
-            cmd.append("--no-recovery-management")
-
-        if req.provision_tabular_user:
-            cmd.append("--provision-tabular-user")
-            if req.tabular_login:
-                cmd.extend(["--tabular-login", req.tabular_login])
-
-        if req.odbc_driver:
-            cmd.extend(["--odbc-driver", req.odbc_driver])
-
-        job["command"] = " ".join(cmd)
-        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        if not req.verify:
+            cmd.append("--no-verify")
         if req.password:
-            env["SYNDATA_DB_PASSWORD"] = req.password
-        if req.provision_tabular_user and req.tabular_password:
-            env["SYNDATA_TABULAR_PASSWORD"] = req.tabular_password
-        # New process group on Windows so we can deliver CTRL_BREAK to just the
-        # child (and its descendants) for a graceful stop; no-op elsewhere.
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            env["PGPASSWORD"] = req.password
+        return cmd, env
+
+    cmd = [
+        sys.executable,
+        "-u",
+        str(_IMPORT_SCRIPTS["sqlserver"]),
+        "--server",
+        req.server,
+        "--database",
+        req.database,
+        "--run-path",
+        str(dataset_path),
+    ]
+
+    if req.trusted:
+        cmd.append("--trusted")
+    else:
+        if req.user:
+            cmd.extend(["--user", req.user])
+        # Password passed via env var to avoid exposure in process listings.
+        if req.password:
+            cmd.append("--password-env")
+
+    if req.apply_cci:
+        cmd.append("--apply-cci")
+    if req.drop_pk:
+        cmd.append("--drop-pk")
+    if req.verify:
+        cmd.append("--verify")
+    if not req.manage_recovery:
+        cmd.append("--no-recovery-management")
+    if req.provision_tabular_user:
+        cmd.append("--provision-tabular-user")
+        if req.tabular_login:
+            cmd.extend(["--tabular-login", req.tabular_login])
+    if req.odbc_driver:
+        cmd.extend(["--odbc-driver", req.odbc_driver])
+
+    if req.password:
+        env["SYNDATA_DB_PASSWORD"] = req.password
+    if req.provision_tabular_user and req.tabular_password:
+        env["SYNDATA_TABULAR_PASSWORD"] = req.tabular_password
+    return cmd, env
+
+
+def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
+    """Run the selected database importer as a subprocess."""
+    global _current_import
+    proc = None
+    try:
+        cmd, env = _build_import_command(req, dataset_path)
+        job["command"] = " ".join(cmd)
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, env=env, cwd=str(REPO_ROOT),
-            creationflags=creationflags,
+            **process_group_popen_kwargs(),
         )
+        attach_process_tree(proc)
         job["process"] = proc
 
         # Timer fires while the stdout loop is still blocking — the
@@ -321,7 +370,12 @@ def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
         # Any interruption (timeout or user cancel) can orphan the DB / leave
         # BULK_LOGGED recovery — spell out the recovery steps once the run ends.
         if timed_out.is_set() or job.get("status") == "cancelled":
-            job["logs"].append(_INTERRUPT_HINT)
+            hint = (
+                _POSTGRES_INTERRUPT_HINT
+                if req.engine == "postgres"
+                else _SQLSERVER_INTERRUPT_HINT
+            )
+            job["logs"].append(hint)
         job["exit_code"] = proc.returncode
         # Preserve a user-initiated cancel: terminate() makes the process exit
         # non-zero, which would otherwise be reported as "failed".
@@ -333,13 +387,15 @@ def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
         job["status"] = "failed"
         job["exit_code"] = -1
     finally:
+        if proc is not None:
+            release_process_tree(proc)
         job["ended"] = time.time()
         job["elapsed"] = job["ended"] - job["started"]
 
 
 @router.post("/import/start")
 def start_import(req: ImportRequest):
-    """Start a SQL Server import job."""
+    """Start a SQL Server or PostgreSQL import job."""
     global _current_import
 
     # Validate inputs
@@ -349,9 +405,9 @@ def start_import(req: ImportRequest):
         raise HTTPException(400, "Database name is required.")
     if not req.dataset or not req.dataset.strip():
         raise HTTPException(400, "Dataset must be selected.")
-    if not req.trusted and not req.user:
+    if req.engine == "sqlserver" and not req.trusted and not req.user:
         raise HTTPException(400, "Username is required when not using Windows Authentication.")
-    if req.provision_tabular_user:
+    if req.engine == "sqlserver" and req.provision_tabular_user:
         if not req.tabular_password:
             raise HTTPException(400, "Tabular user password is required when provisioning is enabled.")
         if req.tabular_login:
@@ -359,6 +415,15 @@ def start_import(req: ImportRequest):
                 validate_tabular_login_name(req.tabular_login)
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
+    if req.engine == "postgres":
+        if not req.user or not req.user.strip():
+            raise HTTPException(400, "PostgreSQL username is required.")
+        if not _postgres_available():
+            raise HTTPException(
+                400,
+                "PostgreSQL support is not installed. Run "
+                "`uv sync --extra postgres` and restart the web UI.",
+            )
 
     # Validate dataset exists and has SQL scripts (CSV format only)
     try:
@@ -367,9 +432,13 @@ def start_import(req: ImportRequest):
         raise HTTPException(400, "Invalid dataset name.")
     if not dataset_path.is_dir():
         raise HTTPException(404, f"Dataset not found: {req.dataset}")
-    sql_dir = dataset_path / "sql" / "sqlserver"
+    sql_dir = dataset_path / "sql" / req.engine
     if not sql_dir.is_dir():
-        raise HTTPException(400, "Dataset has no SQL scripts. SQL import requires CSV format output.")
+        engine_name = "PostgreSQL" if req.engine == "postgres" else "SQL Server"
+        raise HTTPException(
+            400,
+            f"Dataset has no {engine_name} SQL scripts. Database import requires CSV format output.",
+        )
 
     with _import_lock:
         if _current_import and _current_import["status"] == "running":
@@ -387,6 +456,7 @@ def start_import(req: ImportRequest):
             "dataset": req.dataset,
             "database": req.database,
             "server": req.server,
+            "engine": req.engine,
         }
         _current_import = job
 
@@ -454,4 +524,5 @@ def import_status():
         "dataset": job.get("dataset"),
         "database": job.get("database"),
         "server": job.get("server"),
+        "engine": job.get("engine", "sqlserver"),
     }

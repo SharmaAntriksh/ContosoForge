@@ -1,306 +1,595 @@
 # ContosoForge
 
-Generate a complete, **analytics-ready retail dataset** inspired by the **ContosoRetailDW** schema - with configurable dimensions, realistic sales behavior, budget forecasts, inventory snapshots, wishlists, and complaints. Designed for BI, analytics, data engineering, and data modeling scenarios.
+Create realistic, analytics-ready retail data for Power BI, SQL, notebooks,
+lakehouses, demos, training, and benchmarking.
 
-Every run is **deterministic**, **schema-stable**, and **idempotent**, making the generator ideal for repeatable demos, training environments, and benchmarking.
+ContosoForge generates a complete dimensional model inspired by
+ContosoRetailDW: customers, products, stores, employees, dates, sales, returns,
+budgets, inventory, wishlists, complaints, and more. Every run is deterministic,
+schema-stable, and repeatable.
 
----
+You can start with the web interface and never touch YAML, or use the full CLI
+and configuration system when you need precise control.
 
-## What Gets Generated
+![ContosoForge generator web interface](docs/assets/web-interface.png)
 
-The generator produces a full dimensional model across dimension and fact tables (lightly snowflaked, with multiple fact tables, like ContosoRetailDW).
+## Choose how you want to use it
 
-**Dimension tables:**
-
-| Group | Tables |
+| I want to... | Recommended path |
 |---|---|
-| Customers & accounts | Customers, CustomerProfile, OrganizationProfile, Plans, CustomerSubscriptions, LoyaltyTiers, CustomerAcquisitionChannels |
-| Products & catalog | Products, ProductProfile, ProductCategory, ProductSubcategory, Suppliers, Promotions |
-| Locations & org | Stores, Employees, EmployeeStoreAssignments, Geography |
-| Time | Dates (calendar + fiscal + weekly fiscal), Time |
-| Currency | Currency, ExchangeRates |
-| Other lookups | Channels, ReturnReason |
+| Generate a dataset without editing files | [Use the web interface](#option-a-use-the-web-interface-recommended-for-new-users) |
+| Run a ready-made dataset from PowerShell | [Use the one-command generator](#option-b-generate-from-powershell) |
+| Automate or precisely tune generation | [Use the CLI and YAML configuration](#customize-your-dataset) |
+| Import the result into a database | Generate CSV, then use the [SQL import tools](#database-imports) |
 
-**Fact tables:** Sales (flat or split into OrderHeader + OrderDetail), Returns, BudgetYearly, BudgetMonthly, InventorySnapshot, CustomerWishlists, Complaints
+If this is your first visit, use the web interface. It exposes the same
+generator through a friendlier workflow and includes configuration editors,
+presets, validation, progress, and logs.
 
-### Output formats
+## Quick start on Windows
 
-| Format | Description |
-|---|---|
-| `csv` | CSV files + auto-generated SQL Server and PostgreSQL bootstrap scripts (CREATE TABLE, load, constraints, views, indexes) |
-| `parquet` | Merged Apache Parquet with configurable compression, row groups, and dictionary encoding |
-| `deltaparquet` | Delta Lake tables partitioned by Year/Month |
+Windows PowerShell is the project's primary and best-supported environment.
 
-Each run produces a self-contained output folder under `generated_datasets/` with all tables, SQL scripts (for CSV), and a Power BI Project template ready to open.
+### 1. Install Git and uv
 
----
+You need:
 
-## Prerequisites
+- [Git](https://git-scm.com/downloads)
+- [uv](https://docs.astral.sh/uv/), which installs the correct Python version
+  and the project's locked dependencies
 
-- **Python 3.13** (pinned via `.python-version` for reproducible builds; uv will auto-install it if missing)
-- Git
+Install uv from PowerShell:
 
-Optional:
-- [uv](https://docs.astral.sh/uv/) - recommended for fast, locked dependency installs (`pip install uv`)
-- Power BI Desktop (to explore the included `.pbip` project template)
-
-Verify Python:
-
-```bash
-python --version
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
 ```
 
----
+If uv was just installed, fully close and reopen Windows Terminal, PowerShell,
+or VS Code so the updated `PATH` is available.
 
-## Getting Started
+### 2. Download and set up ContosoForge
 
-### 1. Clone and set up
-
-```bash
+```powershell
 git clone https://github.com/SharmaAntriksh/ContosoForge.git
 cd ContosoForge
-```
-
-This project uses [uv](https://docs.astral.sh/uv/) for locked, reproducible
-installs. Install it once if you don't have it:
-
-- **With Python:** `pip install uv`
-- **Without Python (Windows):** `irm https://astral.sh/uv/install.ps1 | iex`
-- **Without Python (macOS / Linux):** `curl -LsSf https://astral.sh/uv/install.sh | sh`
-
-uv then provisions the correct Python itself - no separate Python install needed.
-
-> **Just installed uv and still see "uv is required but was not found on PATH"?**
-> The installer adds uv to your PATH, but already-running shells don't pick that
-> up. Opening a *new tab* isn't enough; Windows Terminal / VS Code give new tabs
-> the old environment. Fully quit and reopen the terminal app, or just set it in
-> the current session and re-run:
->
-> ```powershell
-> $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
-> .\scripts\create_venv.ps1
-> ```
-
-**Windows (PowerShell), first-time setup:**
-
-**Step 1: allow local scripts (one time only).** Windows blocks unsigned `.ps1`
-files by default, so the setup scripts won't run until you permit them for your
-user account. This needs no admin rights and you only ever do it once:
-
-```powershell
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+.\scripts\create_venv.ps1
 ```
 
-(If you'd rather not change the policy, skip this step and prefix each script
-with a one-off bypass, e.g. `powershell -ExecutionPolicy Bypass -File .\scripts\create_venv.ps1`.)
+The setup script creates `.venv`, provisions Python 3.13, and installs the
+locked dependencies. Administrator rights are not required.
 
-**Step 2: create the environment and activate it:**
+If you prefer not to change your PowerShell execution policy, run scripts with
+a one-time bypass:
 
 ```powershell
-.\scripts\create_venv.ps1        # creates .venv + installs locked deps via uv
-. .\scripts\activate_venv.ps1    # activate it
+powershell -ExecutionPolicy Bypass -File .\scripts\create_venv.ps1
 ```
 
-To update dependencies later: `.\scripts\sync_venv.ps1`
+### 3. Generate your first dataset
 
-**macOS / Linux:**
+Choose either option below.
 
-```bash
-# Locked, reproducible - includes SQL Server + Postgres import drivers
-uv sync --extra sql --extra postgres
-
-# Core only (no database import drivers)
-uv sync
-```
-
-> **Importing CSV output into SQL Server / Postgres?** The `pyodbc` and `psycopg`
-> drivers are optional extras. The `create_venv.ps1` / `sync_venv.ps1` scripts
-> install them by default; with bare `uv sync` add `--extra sql --extra postgres`.
-> A plain `uv sync` (no extras) will *remove* them from an existing venv.
-
-### 2. Generate data
-
-> **Activate the venv first** (your prompt should show `(.venv)`), otherwise
-> `python main.py ...` runs against your system Python and fails with
-> `ModuleNotFoundError: No module named 'pyarrow'`. The dependencies live in the
-> venv, not globally. Use `. .\scripts\activate_venv.ps1`, or skip activation
-> entirely with `uv run python main.py ...` (uv picks the right interpreter).
-> Note: if VS Code's terminal was already open when you created the venv, reopen
-> the window so its Python extension auto-activates `.venv`.
-
-> **First run feels slow (~10-20s to start)?** That's a one-time cold start, not
-> a hang: Windows Defender scans the freshly installed package DLLs, Python
-> compiles bytecode (`.pyc`) for the large libraries (pyarrow, pandas, numpy,
-> deltalake), and the OS warms its file cache. Subsequent runs start in ~1-2s.
-
-The fastest way to get started - run with default settings from `config.yaml`:
-
-```powershell
-.\scripts\run_generator.ps1
-```
-
-Or run directly via CLI with overrides:
-
-```bash
-python main.py \
-  --format parquet \
-  --sales-rows 100000 \
-  --customers 5000 \
-  --stores 50 \
-  --products 500 \
-  --start-date 2022-01-01 \
-  --end-date 2025-12-31 \
-  --workers 8 \
-  --clean
-```
-
-The 5 most-used flags are `--format`, `--sales-rows`, `--customers`, `--workers`, and `--clean`. For the full CLI surface (every flag, common patterns, override precedence), see the [CLI reference](docs/cli-reference.md).
-
-### 3. Explore the output
-
-Generated datasets land in `generated_datasets/` with a timestamped folder name like:
-
-```
-generated_datasets/
-  └── 2026-03-07 02_30_45 PM Customers 5K Sales 100K CSV/
-      ├── Sales PBIP/
-      │   └── Sales.pbip    ← open directly in Power BI
-      ├── config/
-      │   ├── config.yaml
-      │   └── models.yaml
-      ├── dimensions/
-      │   ├── customers.csv
-      │   ├── products.csv
-      │   ├── stores.csv
-      │   ├── dates.csv
-      │   └── ... (22 dimension tables total)
-      ├── facts/
-      │   ├── sales/
-      │   ├── returns/                         ← if returns enabled
-      │   ├── budget/                          ← if budget enabled
-      │   ├── inventory/                       ← if inventory enabled
-      │   ├── customer_wishlists/              ← if wishlists enabled
-      │   └── complaints/                      ← if complaints enabled
-      └── sql/                                 ← CSV mode only - one folder per dialect
-          ├── sqlserver/                       ← SQL Server bootstrap
-          │   ├── schema/                      ← CREATE TABLE, constraints, views, verify
-          │   ├── load/                        ← BULK INSERT scripts
-          │   └── indexes/                     ← columnstore (CCI) helper
-          └── postgres/                        ← PostgreSQL bootstrap
-              ├── schema/                      ← CREATE TABLE, constraints, views (DDL)
-              ├── load/                        ← COPY scripts
-              ├── admin/                       ← manage_primary_keys procedure
-              └── indexes/                     ← btree + BRIN indexes
-```
-
-The generated SQL is always PascalCase. Identifier casing is chosen **at import**:
-the SQL Server / PostgreSQL import scripts take `-IdentifierCase pascal|snake` and
-re-render the SQL in that case (`snake` gives quote-free PostgreSQL querying). Only
-the emitted scripts change, never the CSV/parquet data.
-
----
-
-## Configuration
-
-The generator is driven by two YAML files at the project root.
-
-- **`config.yaml`** - controls the **shape and scale** of the dataset: row counts, entity counts, date ranges, output format, parallelism, and feature toggles. Full reference: [CONFIG_GUIDE](docs/CONFIG_GUIDE.md).
-
-- **`models.yaml`** - controls **how sales behave**: demand curves, pricing dynamics, basket sizes, brand popularity, return patterns, and the overall business shape via [trend presets](docs/MODELS_GUIDE.md#available-presets). Not overridable via CLI - edit directly or via the web UI. Full reference: [MODELS_GUIDE](docs/MODELS_GUIDE.md).
-
-CLI flags override `config.yaml` values for the current run only - they are not persisted.
-
-For tuning the customer/row/date balance to get visually interesting charts, see [Scaling tips](docs/CONFIG_GUIDE.md#scaling-tips).
-
----
-
-## Operations
-
-Post-generation utilities for tuning, repartitioning, and importing generated datasets. Each script has its own reference doc with full flag coverage, recipes, and troubleshooting.
-
-| Task | Script | Docs |
-|---|---|---|
-| Re-compress / re-row-group Parquet output | `scripts/optimize_parquet.py` | [parquet-optimization](docs/operations/parquet-optimization.md) |
-| Compact small Delta Lake files | `scripts/optimize_delta.py` | [delta-optimization](docs/operations/delta-optimization.md) |
-| Change Delta Lake partition layout | `scripts/repartition_delta.py` | [delta-repartitioning](docs/operations/delta-repartitioning.md) |
-| Import CSV output to SQL Server | `scripts/run_sql_server_import.ps1` | [sql-server-import](docs/operations/sql-server-import.md) |
-| Import CSV output to PostgreSQL | `scripts/run_postgres_import.ps1` | [postgres-import](docs/operations/postgres-import.md) |
-| Provision a SQL login for SSAS / Power BI | (same import script) | [tabular-user](docs/operations/tabular-user.md) |
-| Post-import admin & verify procedures | (generated SQL) | [post-import-procedures](docs/operations/post-import-procedures.md) |
-
----
-
-## Web Interface
-
-A web UI (FastAPI + React) is also available for interactive generation:
+### Option A: Use the web interface (recommended for new users)
 
 ```powershell
 .\scripts\run_web.ps1
 ```
 
-### Generator Web UI
+Your browser opens to `http://127.0.0.1:8502` in **Quick Start**. Work through
+the six short steps:
 
-<img src="docs/assets/web-interface.png" alt="Generator Web UI" width="700" />
+1. Pick a dataset size. Start with **Quick sample**.
+2. Choose the date range.
+3. Choose the business story you want the charts to show.
+4. Choose Parquet, CSV, or Delta Lake and a product catalog.
+5. Choose how many extra business tables you want.
+6. Review the estimate, select **Apply these settings**, then
+   **Generate dataset**.
 
-### Pipeline Run Status
+The choices are kept in server memory for this browser session; Quick Start
+does not overwrite `config.yaml` or `models.yaml`. Progress and bounded live
+logs appear below the review while generation is running.
 
-<img src="docs/assets/web-pipeline-run.png" alt="Pipeline run status" width="700" />
+![ContosoForge pipeline run status](docs/assets/web-pipeline-run.png)
 
-### SQL Server Import
+Press `Ctrl+C` in PowerShell when you want to stop the web server.
 
-<img src="docs/assets/web-sqlserver-import.png" alt="SQL Server import UI" width="700" />
+The web interface is self-contained: its production JavaScript and styles are
+included in the repository, so launching it does not require Node.js or access
+to public CDNs.
 
----
+Use **Advanced Setup** when you need every scale, model, YAML, or performance
+control. After a run, open **Data Preview** to browse any generated CSV,
+Parquet, or Delta table without leaving the web interface. CSV runs also expose
+the SQL Server and PostgreSQL wizard under **Database Import**.
 
-## Generated Dataset Folder
+### Option B: Generate from PowerShell
 
-<img src="docs/assets/output.png" alt="Output folder structure" width="700" />
+Run the checked-in `config.yaml` and `models.yaml`:
 
----
-
-## Power BI Data Model
-
-Each output includes a Power BI Project (`.pbip`) template with pre-configured folder paths. Open the `.pbip` file directly in Power BI Desktop - no manual path setup required.
-
-<img src="docs/assets/data-model-diagram-view.png" alt="Power BI model collapsed" width="600" />
-
----
-
-## Testing
-
-The project includes an extensive test suite covering config validation, pricing pipeline, quantity model, geography, trend presets, version store, state management, determinism guarantees, edge-case guards, web API, packaging, sales logic, schema validation, product dimensions, sales writer, SQL tools, and date dimension edge cases.
-
-```bash
-# Run all tests
-pytest
-
-# Run a specific file or class
-pytest tests/test_geography.py
-pytest tests/test_config_loader.py::TestParseDate
-
-# Stop on first failure
-pytest -x
-
-# Rerun only previously failed tests
-pytest --lf
+```powershell
+.\scripts\run_generator.ps1
 ```
 
----
+The checked-in defaults showcase most of the available facts and dimensions.
+For a smaller, easier-to-explore first dataset:
 
-## Documentation map
+```powershell
+.\scripts\run_generator.ps1 `
+  -Format parquet `
+  -SalesRows 100000 `
+  -Customers 1500 `
+  -Stores 25 `
+  -Products 500
+```
 
-| Topic | Doc |
+CLI overrides affect only that run; they do not modify `config.yaml`.
+
+Before a large or unfamiliar run, validate the resolved configuration without
+generating data:
+
+```powershell
+.\scripts\run_generator.ps1 -DryRun
+```
+
+Runtime and disk usage depend on row count, date range, enabled facts, output
+format, and hardware. Start small before generating millions of sales rows.
+
+## Find and open the result
+
+Completed runs appear in a timestamped folder under `generated_datasets/`.
+
+```text
+generated_datasets/
+`-- <timestamped run>/
+    |-- Sales PBIP/            # CSV and Parquet only
+    |   `-- Sales.pbip
+    |-- config/
+    |   |-- config.yaml
+    |   `-- models.yaml
+    |-- dimensions/
+    |-- facts/
+    `-- sql/                  # CSV output only
+```
+
+For CSV and Parquet output, open `Sales PBIP/Sales.pbip` in Power BI Desktop.
+The generated project already points to the files in its dataset folder.
+
+Delta Lake output intentionally does not include a Power BI Project.
+
+![Generated ContosoForge dataset folder](docs/assets/output.png)
+
+## What gets generated
+
+Each run can produce a complete retail analytics model rather than an isolated
+sales table.
+
+| Area | Examples |
 |---|---|
-| Full CLI flag reference | [cli-reference](docs/cli-reference.md) |
-| `config.yaml` reference | [CONFIG_GUIDE](docs/CONFIG_GUIDE.md) |
-| `models.yaml` reference + trend presets | [MODELS_GUIDE](docs/MODELS_GUIDE.md) |
-| Pipeline architecture | [PIPELINE_FLOWCHART](docs/PIPELINE_FLOWCHART.md) |
-| Operations (parquet, delta, SQL Server / PostgreSQL import) | [operations/](docs/operations/) |
+| Customers | Customers, profiles, organizations, loyalty tiers, acquisition channels, subscriptions |
+| Products | Products, product profiles, categories, subcategories, suppliers, promotions |
+| Retail operations | Stores, employees, store assignments, warehouses, geography |
+| Time and currency | Calendar, fiscal and weekly-fiscal dates, time, currencies, exchange rates |
+| Business facts | Sales, returns, budgets, inventory, wishlists, complaints |
 
----
+Optional facts can be enabled or disabled independently. The full table list is
+available in [Complete generated model](#complete-generated-model).
+
+## Pick an output format
+
+If you are unsure, choose **Parquet**.
+
+| Format | Choose it when... | Included extras |
+|---|---|---|
+| `parquet` | You use Power BI, Python, notebooks, DuckDB, or general analytics | Merged Parquet files and a Power BI Project |
+| `csv` | You want plain-text files or plan to import into SQL Server/PostgreSQL | CSV chunks, database bootstrap scripts, and a Power BI Project |
+| `deltaparquet` | You are testing Delta Lake or lakehouse workflows | Partitioned Delta tables; no Power BI Project |
+
+`delta` is accepted as an alias for `deltaparquet`.
+
+## Customize your dataset
+
+There are three levels of control. Start at the top and go deeper only when you
+need to.
+
+### Level 1: One-run CLI overrides
+
+These are the most useful controls for everyday runs:
+
+```powershell
+.\scripts\run_generator.ps1 `
+  -Format parquet `
+  -SalesRows 1000000 `
+  -Customers 12000 `
+  -Stores 100 `
+  -Products 2000 `
+  -StartDate 2022-01-01 `
+  -EndDate 2025-12-31 `
+  -Workers 8
+```
+
+The equivalent direct Python command is useful for automation and non-Windows
+systems:
+
+```bash
+uv run python main.py \
+  --format parquet \
+  --sales-rows 1000000 \
+  --customers 12000 \
+  --stores 100 \
+  --products 2000 \
+  --start-date 2022-01-01 \
+  --end-date 2025-12-31 \
+  --workers 8
+```
+
+See the [CLI reference](docs/cli-reference.md) for every flag and precedence
+rule.
+
+> `--clean` deletes previous final output folders before generation. Use it only
+> when you intentionally want to remove those generated datasets.
+
+### Level 2: Shape and scale in `config.yaml`
+
+`config.yaml` controls what is generated and how large it is:
+
+- Sales rows, customers, products, stores, and promotions
+- Date range and output location
+- CSV, Parquet, or Delta output
+- Optional facts such as returns, budgets, inventory, wishlists, and complaints
+- Product/customer history tracking
+- Fiscal calendars, exchange rates, staffing, warehouses, and subscriptions
+- Performance settings such as workers, chunk size, compression, and partitions
+
+The first `scale` block is the safest place to begin. Most users should leave
+the lower-level performance and modeling settings unchanged until they have run
+the defaults successfully.
+
+See the complete [`config.yaml` guide](docs/CONFIG_GUIDE.md).
+
+### Level 3: Business behavior in `models.yaml`
+
+`models.yaml` controls how the generated business behaves:
+
+- Overall growth or decline
+- Seasonality, shocks, and volatility
+- Customer acquisition, participation, and churn
+- Product demand and brand popularity
+- Basket quantity and pricing behavior
+- Discounts, markdowns, and returns
+
+The most important setting is:
+
+```yaml
+models:
+  macro_demand:
+    trend: gradual-growth
+```
+
+Useful trend presets include:
+
+| Desired story | Preset |
+|---|---|
+| Stable retail growth | `steady-growth` |
+| Strong accelerating growth | `strong-growth` |
+| Growth that eventually levels off | `gradual-growth` |
+| Explosive late growth | `hockey-stick` |
+| Strong retail seasonality plus growth | `seasonal-with-growth` |
+| Mostly seasonal with little long-term growth | `seasonal-dominant` |
+| Recession followed by recovery | `recession-recovery` |
+| Rapid rise followed by a crash | `boom-and-bust` |
+| Unpredictable year-to-year movement | `volatile` |
+| Long-term erosion | `decline` or `slow-decline` |
+
+The trend preset is not currently a CLI override. Change it in `models.yaml` or
+through the web interface. See the [models and trend preset guide](docs/MODELS_GUIDE.md).
+
+### Keep customers, rows, and dates in balance
+
+The ratio between customers, sales rows, and months affects how convincing the
+result feels.
+
+- Too many customers for the number of sales rows creates sparse purchase
+  histories.
+- Too few customers creates frequent repeat purchases and can make aggregate
+  patterns appear overly smooth.
+- Longer date ranges spread the same number of sales rows across more months.
+
+A useful starting target for detailed customer analysis is approximately:
+
+```text
+customers = sales rows / months / 1.5
+```
+
+This is guidance, not a validation rule. A broad customer dimension with sparse
+sales can be appropriate for acquisition or segmentation scenarios. See
+[Scaling tips](docs/CONFIG_GUIDE.md#scaling-tips) for examples.
+
+### Choose a product catalog
+
+Set the catalog in `config.yaml`:
+
+```yaml
+scale:
+  products:
+    catalog: all
+    rows: 7930
+```
+
+| Catalog | Base products | Description |
+|---|---:|---|
+| `contoso` | 2,517 | Original ContosoRetailDW products |
+| `synthetic` | 5,633 | Expanded retail, electronics, audio, and media catalog |
+| `all` | About 7,930 | Combined catalog |
+
+The generator can stratified-trim a catalog or create variants to reach the
+requested row count.
+
+## Advanced generation workflows
+
+### Generate dimensions and sales separately
+
+Dimensions are generated sequentially; sales facts use parallel workers. When
+iterating, you can build dimensions once and reuse them:
+
+```powershell
+.\scripts\run_generator.ps1 -Only dimensions
+.\scripts\run_generator.ps1 -Only sales
+```
+
+Sales-only generation requires existing dimensions.
+
+### Force a dimension to regenerate
+
+Dimensions use configuration hashes to avoid unnecessary work. If you need to
+force a rebuild:
+
+```powershell
+.\scripts\run_generator.ps1 -RegenDimensions products
+.\scripts\run_generator.ps1 -RegenDimensions customers,products,stores
+.\scripts\run_generator.ps1 -RegenDimensions all
+```
+
+If you change pricing bands in `models.yaml`, regenerate the product dimension
+so dimension pricing and sales-time pricing remain synchronized.
+
+### Refresh foreign-exchange history
+
+```powershell
+uv run python main.py --refresh-fx-master
+```
+
+Exchange-rate dates follow the global dataset date range.
+
+### Performance controls
+
+- `workers` controls parallel sales workers. Do not set it higher than your
+  available CPU count.
+- `chunk_size` is a performance and memory setting; it does not change the
+  generated business shape.
+- Small chunks add overhead. Very large chunks increase memory pressure.
+- The default chunk size of one million rows is a sensible starting point.
+
+## Complete generated model
+
+The model is lightly snowflaked and designed for BI, analytics engineering,
+data modeling, and database exercises.
+
+### Dimension and bridge tables
+
+| Group | Tables |
+|---|---|
+| Customers and accounts | Customers, CustomerProfile, OrganizationProfile, Plans, CustomerSubscriptions, LoyaltyTiers, CustomerAcquisitionChannels |
+| Products and catalog | Products, ProductProfile, ProductCategory, ProductSubcategory, Suppliers, Promotions |
+| Locations and organization | Stores, Warehouses, Employees, EmployeeStoreAssignments, Geography |
+| Time | Dates with calendar/fiscal/weekly-fiscal attributes, Time |
+| Currency | Currency, ExchangeRates, monthly exchange rates |
+| Other lookups | Channels, ReturnReason |
+
+### Fact tables
+
+- Sales, or split OrderHeader and OrderDetail output
+- Returns
+- BudgetYearly and BudgetMonthly
+- InventorySnapshot
+- CustomerWishlists
+- Complaints
+
+### Output folder structure
+
+```text
+generated_datasets/
+`-- <timestamped run>/
+    |-- Sales PBIP/                 # CSV and Parquet only
+    |-- config/                     # effective config.yaml and models.yaml
+    |-- dimensions/
+    |-- facts/
+    |   |-- sales/
+    |   |-- returns/
+    |   |-- budget/
+    |   |-- inventory/
+    |   |-- customer_wishlists/
+    |   `-- complaints/
+    `-- sql/                        # CSV only
+        |-- sqlserver/
+        `-- postgres/
+```
+
+The packaged configuration records the settings used for that run.
+
+## Database imports
+
+CSV output includes generated SQL Server and PostgreSQL bundles with table DDL,
+load scripts, constraints, views, verification procedures, and indexes.
+
+| Task | Command or documentation |
+|---|---|
+| Import from the web UI | Open **Database Import**, choose SQL Server or PostgreSQL, then select a CSV run |
+| Import into SQL Server | [`scripts/run_sql_server_import.ps1`](docs/operations/sql-server-import.md) |
+| Import into PostgreSQL | [`scripts/run_postgres_import.ps1`](docs/operations/postgres-import.md) |
+| Provision a SQL login for SSAS/Power BI | [Tabular user guide](docs/operations/tabular-user.md) |
+| Manage keys and verify an import | [Post-import procedures](docs/operations/post-import-procedures.md) |
+
+Generated identifiers are PascalCase. At import time you can choose
+`pascal` or `snake`; the import tool regenerates the SQL bundle without changing
+the CSV or Parquet data. The PostgreSQL wizard recommends `snake` so ordinary
+queries do not need quoted identifiers.
+
+![Database import wizard showing SQL Server settings](docs/assets/web-sqlserver-import.png)
+
+## Post-generation utilities
+
+| Task | Script | Guide |
+|---|---|---|
+| Recompress or change row groups in Parquet | `scripts/optimize_parquet.py` | [Parquet optimization](docs/operations/parquet-optimization.md) |
+| Compact small Delta Lake files | `scripts/optimize_delta.py` | [Delta optimization](docs/operations/delta-optimization.md) |
+| Change Delta Lake partition layout | `scripts/repartition_delta.py` | [Delta repartitioning](docs/operations/delta-repartitioning.md) |
+
+## macOS and Linux setup
+
+Install [uv](https://docs.astral.sh/uv/), clone the repository, and synchronize
+the locked environment:
+
+```bash
+git clone https://github.com/SharmaAntriksh/ContosoForge.git
+cd ContosoForge
+uv sync --extra sql --extra postgres
+```
+
+Generate data:
+
+```bash
+uv run python main.py --format parquet --sales-rows 100000
+```
+
+Launch the web interface:
+
+```bash
+uv run python -m uvicorn web.api:app --port 8502
+```
+
+Then open `http://127.0.0.1:8502`.
+
+The database drivers are optional. For a smaller core-only environment, use:
+
+```bash
+uv sync
+```
+
+## Troubleshooting
+
+### `uv` was installed but is not found
+
+Fully close and reopen the terminal application. A new tab may inherit the old
+environment from Windows Terminal or VS Code.
+
+For the current PowerShell session, you can also use:
+
+```powershell
+$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+```
+
+### PowerShell blocks the project scripts
+
+Allow locally created scripts for your user:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+Or use a one-time bypass:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_generator.ps1
+```
+
+### Python reports a missing package
+
+Use `.\scripts\run_generator.ps1` or `uv run python main.py` so the project
+environment is selected. A bare `python main.py` may use an unrelated system
+Python.
+
+### The first command appears slow
+
+The first Python start on Windows can take approximately 10–20 seconds while
+Windows Defender scans new package files, Python creates bytecode caches, and
+the operating system warms its file cache. Later starts are usually faster.
+
+### A configuration edit did not rebuild a dimension
+
+Dimension files are versioned by configuration hash. Force regeneration:
+
+```powershell
+.\scripts\run_generator.ps1 -RegenDimensions products
+```
+
+### An interrupted run left files behind
+
+Workers use `data/` for scratch output. Completed, self-contained datasets are
+the timestamped folders under `generated_datasets/`.
+
+## Power BI model
+
+CSV and Parquet runs include a Power BI Project with preconfigured file paths.
+Open the `.pbip` file directly in Power BI Desktop.
+
+![Power BI model diagram](docs/assets/data-model-diagram-view.png)
+
+## Testing and contributing
+
+The project includes tests for configuration, dimensions, facts, determinism,
+pricing, SQL generation, PostgreSQL behavior, packaging, the web API, and
+end-to-end integration.
+
+On Windows, use the project interpreter directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest tests/test_geography.py
+.\.venv\Scripts\python.exe -m pytest -k "deterministic"
+```
+
+On macOS or Linux:
+
+```bash
+uv run pytest
+```
+
+### Frontend development
+
+Node.js is needed only when changing files under `web/frontend/`. The checked-in
+production assets are already used by `run_web.ps1`.
+
+```powershell
+cd web\frontend
+npm ci
+npm run build
+npm run build:check
+```
+
+The build produces content-hashed assets under `web/frontend/dist/`. Commit
+those generated files with the frontend source change. Use `npm run dev` to
+rebuild automatically while working; see the
+[frontend development guide](web/frontend/README.md).
+
+## Documentation
+
+| Topic | Guide |
+|---|---|
+| Full CLI flag reference | [CLI reference](docs/cli-reference.md) |
+| Every `config.yaml` setting | [Configuration guide](docs/CONFIG_GUIDE.md) |
+| Business models and trend presets | [Models guide](docs/MODELS_GUIDE.md) |
+| Pipeline architecture | [Pipeline flowchart](docs/PIPELINE_FLOWCHART.md) |
+| Parquet, Delta, and database operations | [Operations guides](docs/operations/) |
+| Web log retention and preview performance | [Web UI performance](docs/WEB_UI_PERFORMANCE.md) |
 
 ## License
 
-This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+ContosoForge is licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE.md).
 
-You are free to use, modify, and share it for any **noncommercial** purpose. Commercial use, including selling it, is not permitted. You must keep the attribution notice (`Copyright (c) 2026 Antriksh Sharma`). See [LICENSE.md](LICENSE.md) for the full terms.
+You may use, modify, and share it for noncommercial purposes. Commercial use,
+including selling it, is not permitted. Keep the attribution notice
+`Copyright (c) 2026 Antriksh Sharma`. See [LICENSE.md](LICENSE.md) for the full
+terms.

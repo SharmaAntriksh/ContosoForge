@@ -10,3 +10,4 @@ cache.abf
 .vscode
 htmlcov/
 .coverage
+web/frontend/node_modules/

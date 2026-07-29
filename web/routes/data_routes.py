@@ -6,14 +6,18 @@ Supports CSV, Parquet, and Delta Lake formats with paginated row preview.
 
 from __future__ import annotations
 
+from datetime import date, datetime
+from decimal import Decimal
 import logging
+import math
+from numbers import Integral, Real
 import os
 import re
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
@@ -30,6 +34,17 @@ _DATASETS_DIR = REPO_ROOT / "generated_datasets"
 
 _csv_row_cache: Dict[str, tuple[float, int]] = {}
 _csv_row_cache_lock = threading.Lock()
+_CURRENCY_COLUMN_HINTS = (
+    "amount",
+    "price",
+    "cost",
+    "revenue",
+    "profit",
+    "discount",
+    "tax",
+    "income",
+    "salary",
+)
 
 
 def _csv_row_count(path: Path) -> int:
@@ -45,6 +60,51 @@ def _csv_row_count(path: Path) -> int:
     with _csv_row_cache_lock:
         _csv_row_cache[key] = (mtime, count)
     return count
+
+
+def _preview_batch_size(limit: int) -> int:
+    """Keep decoded Arrow batches small while avoiding tiny-batch overhead."""
+    return max(256, min(4_096, limit * 4))
+
+
+def _display_value(column: str, value: Any) -> Optional[str]:
+    """Format a preview cell without mutating its source table."""
+    if value is None:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (bool, np.bool_)):
+        return "true" if value else "false"
+    if isinstance(value, Integral):
+        # Strings preserve integers beyond JavaScript's safe numeric range.
+        return str(int(value))
+    if isinstance(value, Decimal):
+        if any(hint in column.lower() for hint in _CURRENCY_COLUMN_HINTS):
+            return f"{value:.2f}"
+        return format(value, "f")
+    if isinstance(value, Real):
+        number = float(value)
+        if not math.isfinite(number):
+            return None
+        if any(hint in column.lower() for hint in _CURRENCY_COLUMN_HINTS):
+            return f"{number:.2f}"
+        return format(number, ".12g")
+    return str(value)
+
+
+def _format_preview_rows(
+    columns: List[str],
+    rows: List[List[Any]],
+) -> List[List[Optional[str]]]:
+    return [
+        [_display_value(column, value) for column, value in zip(columns, row)]
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +252,7 @@ def _read_preview(dataset_path: Path, table: Dict[str, Any],
         # Read the requested slice
         rows_skipped = 0
         collected = []
+        collected_rows = 0
         for f, chunk_rows in zip(csv_files, chunk_counts):
 
             if rows_skipped + chunk_rows <= offset:
@@ -199,18 +260,20 @@ def _read_preview(dataset_path: Path, table: Dict[str, Any],
                 continue
 
             skip_in_file = max(0, offset - rows_skipped)
-            need = limit - len(collected)
+            need = limit - collected_rows
             df = pd.read_csv(f, skiprows=range(1, skip_in_file + 1), nrows=need)
             collected.append(df)
+            collected_rows += len(df)
             rows_skipped += chunk_rows
 
-            if len(collected) > 0 and sum(len(d) for d in collected) >= limit:
+            if collected_rows >= limit:
                 break
 
         if collected:
             result_df = pd.concat(collected, ignore_index=True).head(limit)
         else:
             result_df = pd.DataFrame(columns=columns)
+        raw_rows = result_df.values.tolist()
 
     elif fmt == "parquet":
         import pyarrow.parquet as pq
@@ -218,74 +281,87 @@ def _read_preview(dataset_path: Path, table: Dict[str, Any],
         total_rows = pf.metadata.num_rows
         columns = pf.schema_arrow.names
 
-        # Read only the needed row groups
+        # Decode bounded record batches and slice before converting values.
         rows_seen = 0
-        collected = []
+        raw_rows = []
+        batch_size = _preview_batch_size(limit)
         for rg_idx in range(pf.metadata.num_row_groups):
             rg_rows = pf.metadata.row_group(rg_idx).num_rows
             if rows_seen + rg_rows <= offset:
                 rows_seen += rg_rows
                 continue
 
-            rg_table = pf.read_row_group(rg_idx)
-            rg_df = rg_table.to_pandas()
             skip_in_rg = max(0, offset - rows_seen)
-            rg_df = rg_df.iloc[skip_in_rg:]
-            collected.append(rg_df)
+            for batch in pf.iter_batches(
+                batch_size=batch_size,
+                row_groups=[rg_idx],
+                columns=columns,
+            ):
+                if skip_in_rg >= batch.num_rows:
+                    skip_in_rg -= batch.num_rows
+                    continue
+                remaining = limit - len(raw_rows)
+                sliced = batch.slice(skip_in_rg, remaining)
+                raw_rows.extend(
+                    [[record.get(column) for column in columns]
+                     for record in sliced.to_pylist()]
+                )
+                skip_in_rg = 0
+                if len(raw_rows) >= limit:
+                    break
             rows_seen += rg_rows
 
-            if sum(len(d) for d in collected) >= limit:
+            if len(raw_rows) >= limit:
                 break
-
-        if collected:
-            result_df = pd.concat(collected, ignore_index=True).head(limit)
-        else:
-            result_df = pd.DataFrame(columns=columns)
 
     elif fmt == "delta":
         from deltalake import DeltaTable
         dt = DeltaTable(str(full_path))
         ds = dt.to_pyarrow_dataset()
         columns = dt.schema().to_arrow().names
-        total_rows = ds.count_rows()
+        fragments = [
+            (fragment, fragment.count_rows())
+            for fragment in ds.get_fragments()
+        ]
+        total_rows = sum(row_count for _fragment, row_count in fragments)
 
-        # Read a slice via scanner
-        scanner = ds.scanner(columns=columns)
-        batches = scanner.to_batches()
+        # Skip whole Delta fragments, then decode only bounded record batches.
+        batch_size = _preview_batch_size(limit)
         rows_seen = 0
-        collected = []
-        for batch in batches:
-            batch_len = batch.num_rows
-            if rows_seen + batch_len <= offset:
-                rows_seen += batch_len
+        raw_rows = []
+        for fragment, fragment_rows in fragments:
+            if rows_seen + fragment_rows <= offset:
+                rows_seen += fragment_rows
                 continue
 
-            batch_df = batch.to_pandas()
-            skip_in_batch = max(0, offset - rows_seen)
-            batch_df = batch_df.iloc[skip_in_batch:]
-            collected.append(batch_df)
-            rows_seen += batch_len
-
-            if sum(len(d) for d in collected) >= limit:
+            skip_in_fragment = max(0, offset - rows_seen)
+            for batch in fragment.to_batches(
+                schema=ds.schema,
+                columns=columns,
+                batch_size=batch_size,
+            ):
+                if skip_in_fragment >= batch.num_rows:
+                    skip_in_fragment -= batch.num_rows
+                    continue
+                remaining = limit - len(raw_rows)
+                sliced = batch.slice(skip_in_fragment, remaining)
+                raw_rows.extend(
+                    [[record.get(column) for column in columns]
+                     for record in sliced.to_pylist()]
+                )
+                skip_in_fragment = 0
+                if len(raw_rows) >= limit:
+                    break
+            rows_seen += fragment_rows
+            if len(raw_rows) >= limit:
                 break
 
-        if collected:
-            result_df = pd.concat(collected, ignore_index=True).head(limit)
-        else:
-            result_df = pd.DataFrame(columns=columns)
     else:
         raise HTTPException(400, f"Unsupported format: {fmt}")
 
-    # Convert to JSON-safe types
-    for col in result_df.columns:
-        if result_df[col].dtype.kind in ("M",):  # datetime
-            result_df[col] = result_df[col].astype(str)
-        elif result_df[col].dtype.kind in ("m",):  # timedelta
-            result_df[col] = result_df[col].astype(str)
-
     return {
         "columns": columns,
-        "rows": result_df.fillna("").values.tolist(),
+        "rows": _format_preview_rows(columns, raw_rows),
         "total_rows": total_rows,
         "offset": offset,
         "limit": limit,

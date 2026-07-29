@@ -9,27 +9,100 @@ security headers, CORS, generation input validation, and edge cases.
 from __future__ import annotations
 
 import copy
+import hashlib
+import re
+import signal
+import subprocess
+import sys
 import threading
 import time
-from typing import Any, Dict
+from pathlib import Path
 
 import pytest
 import yaml
 
 httpx = pytest.importorskip("httpx", reason="httpx required for web route tests")
-from starlette.testclient import TestClient
+from starlette.testclient import TestClient  # noqa: E402
 
-from web.api import app
-import web.shared_state as _state
+from web.api import app  # noqa: E402
+from web import process_control as _process_control  # noqa: E402
+import web.shared_state as _state  # noqa: E402
+from web.routes import generation_routes as _generation  # noqa: E402
+
+_REAL_LAUNCH_PIPELINE = _generation._launch_pipeline
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
+def _git_output(*args: str) -> bytes:
+    return subprocess.run(
+        ["git", *args],
+        cwd=_state.REPO_ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+def _worktree_snapshot() -> tuple[bytes, tuple[tuple[str, str], ...]]:
+    """Fingerprint dirty and untracked files without assuming a clean checkout."""
+    status = _git_output(
+        "status", "--porcelain=v1", "-z", "--untracked-files=all",
+    )
+    changed = _git_output("diff", "--name-only", "-z", "HEAD", "--")
+    untracked = _git_output(
+        "ls-files", "--others", "--exclude-standard", "-z",
+    )
+    paths = {
+        raw.decode("utf-8", errors="surrogateescape")
+        for raw in (changed + untracked).split(b"\0")
+        if raw
+    }
+    fingerprints = []
+    for relative in sorted(paths):
+        path = _state.REPO_ROOT / relative
+        if path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            fingerprints.append((relative, digest))
+    return status, tuple(fingerprints)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _web_routes_preserve_worktree():
+    """Fail if this route suite changes the caller's existing worktree."""
+    before = _worktree_snapshot()
+    yield
+    after = _worktree_snapshot()
+    assert after == before, "Web route tests changed files in the working tree"
+
+
 @pytest.fixture()
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _prevent_real_generation(monkeypatch):
+    """Record pipeline launches without creating a thread or subprocess."""
+    launches = []
+
+    def fake_launch(job, cfg_snapshot, models_snapshot, req):
+        launches.append({
+            "job": job,
+            "cfg": cfg_snapshot,
+            "models": models_snapshot,
+            "request": req,
+        })
+        job["command"] = "<pipeline launch stubbed by test>"
+        job["exit_code"] = 0
+        job["status"] = "done"
+        job["ended"] = time.time()
+        job["elapsed"] = job["ended"] - job["started"]
+        return None
+
+    monkeypatch.setattr(_generation, "_launch_pipeline", fake_launch)
+    return launches
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +113,8 @@ def _reset_state():
         orig_disk_yaml = _state._cfg_disk_yaml
         orig_models = copy.deepcopy(_state._models_cfg)
         orig_models_text = _state._models_yaml_text
-    orig_job = _state._current_job
+    with _state._job_lock:
+        orig_job = _state._current_job
 
     yield
 
@@ -49,7 +123,14 @@ def _reset_state():
         _state._cfg_disk_yaml = orig_disk_yaml
         _state._models_cfg = orig_models
         _state._models_yaml_text = orig_models_text
-    _state._current_job = orig_job
+    with _state._job_lock:
+        current_job = _state._current_job
+        _state._current_job = orig_job
+
+    thread = current_job.get("thread") if current_job else None
+    if thread is not None:
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "Generation thread survived test cleanup"
 
 
 # ===================================================================
@@ -318,6 +399,508 @@ class TestModelsLockSafety:
 # Generation routes -- input validation
 # ===================================================================
 
+class TestPipelineCommandConstruction:
+    """The command builder is pure and never launches the generator."""
+
+    def test_default_request_builds_base_command(self, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        models_path = tmp_path / "models.yaml"
+
+        command = _generation._build_pipeline_command(
+            cfg_path,
+            models_path,
+            _generation.GenerateRequest(),
+        )
+
+        assert command == [
+            sys.executable,
+            "-u",
+            str(_state.REPO_ROOT / "main.py"),
+            "--config",
+            str(cfg_path),
+            "--models-config",
+            str(models_path),
+        ]
+
+    def test_all_request_options_are_forwarded_in_order(self, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        models_path = tmp_path / "models.yaml"
+        request = _generation.GenerateRequest(
+            clean=True,
+            only="dimensions",
+            regen_dimensions=["products", "customers"],
+        )
+
+        command = _generation._build_pipeline_command(
+            cfg_path,
+            models_path,
+            request,
+        )
+
+        assert command == [
+            sys.executable,
+            "-u",
+            str(_state.REPO_ROOT / "main.py"),
+            "--config",
+            str(cfg_path),
+            "--models-config",
+            str(models_path),
+            "--clean",
+            "--only",
+            "dimensions",
+            "--regen-dimensions",
+            "products",
+            "customers",
+        ]
+
+
+class _FakePipelineProcess:
+    def __init__(self, *, returncode=0, lines=(), running=False):
+        self.pid = 43210
+        self.returncode = returncode
+        self.stdout = iter(lines)
+        self.running = running
+        self.kill_called = False
+        self.terminate_called = False
+        self.signals = []
+
+    def poll(self):
+        return None if self.running else self.returncode
+
+    def wait(self):
+        return self.returncode
+
+    def kill(self):
+        self.kill_called = True
+        self.running = False
+        self.returncode = -9
+
+    def terminate(self):
+        self.terminate_called = True
+        self.running = False
+        self.returncode = -15
+
+    def send_signal(self, sent_signal):
+        self.signals.append(sent_signal)
+
+
+def _pipeline_job(*, status="running"):
+    return {
+        "id": "test-job",
+        "status": status,
+        "logs": [],
+        "process": None,
+        "exit_code": None,
+        "started": time.time(),
+        "ended": None,
+        "elapsed": 0,
+        "command": "",
+    }
+
+
+def _config_snapshots():
+    with _state._cfg_lock:
+        return copy.deepcopy(_state._cfg), copy.deepcopy(_state._models_cfg)
+
+
+class TestPipelineRunnerIsolation:
+    """Exercise runner state transitions with no real process or repository writes."""
+
+    def test_launcher_retains_a_joinable_named_thread(self, monkeypatch):
+        completed = threading.Event()
+
+        def fake_runner(job, cfg_snapshot, models_snapshot, req):
+            completed.set()
+
+        monkeypatch.setattr(_generation, "_run_pipeline_thread", fake_runner)
+        job = _pipeline_job()
+        cfg_snapshot, models_snapshot = _config_snapshots()
+
+        thread = _REAL_LAUNCH_PIPELINE(
+            job,
+            cfg_snapshot,
+            models_snapshot,
+            _generation.GenerateRequest(),
+        )
+        thread.join(timeout=5)
+
+        assert completed.is_set()
+        assert not thread.is_alive()
+        assert job["thread"] is thread
+        assert thread.name == "contosoforge-generation-test-job"
+
+    def test_success_captures_command_logs_and_removes_temp_files(
+        self, monkeypatch,
+    ):
+        process = _FakePipelineProcess(
+            lines=["\x1b[31mstarting\x1b[0m\n", "finished\n"],
+        )
+        popen_calls = []
+
+        def fake_popen(command, **kwargs):
+            popen_calls.append((command, kwargs))
+            return process
+
+        monkeypatch.setattr(_generation.subprocess, "Popen", fake_popen)
+        job = _pipeline_job()
+        cfg_snapshot, models_snapshot = _config_snapshots()
+
+        _generation._run_pipeline_thread(
+            job,
+            cfg_snapshot,
+            models_snapshot,
+            _generation.GenerateRequest(clean=True, only="dimensions"),
+        )
+
+        command, kwargs = popen_calls[0]
+        assert command[0:3] == [
+            sys.executable,
+            "-u",
+            str(_state.REPO_ROOT / "main.py"),
+        ]
+        assert command[-3:] == ["--clean", "--only", "dimensions"]
+        assert kwargs["cwd"] == str(_state.REPO_ROOT)
+        assert kwargs.get("shell", False) is False
+        assert kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+        assert job["logs"] == ["starting", "finished"]
+        assert job["status"] == "done"
+        assert job["exit_code"] == 0
+        assert job["process"] is process
+        assert job["ended"] is not None
+        assert job["elapsed"] >= 0
+
+        cfg_path = Path(command[command.index("--config") + 1])
+        models_path = Path(command[command.index("--models-config") + 1])
+        assert not cfg_path.exists()
+        assert not models_path.exists()
+        assert not cfg_path.parent.exists()
+
+    def test_nonzero_exit_is_failed(self, monkeypatch):
+        process = _FakePipelineProcess(returncode=7, lines=["bad input\n"])
+        monkeypatch.setattr(
+            _generation.subprocess,
+            "Popen",
+            lambda *args, **kwargs: process,
+        )
+        job = _pipeline_job()
+        cfg_snapshot, models_snapshot = _config_snapshots()
+
+        _generation._run_pipeline_thread(
+            job,
+            cfg_snapshot,
+            models_snapshot,
+            _generation.GenerateRequest(),
+        )
+
+        assert job["status"] == "failed"
+        assert job["exit_code"] == 7
+        assert job["logs"] == ["bad input"]
+
+    def test_cancelled_state_is_not_overwritten(self, monkeypatch):
+        job = _pipeline_job()
+
+        def cancellation_output():
+            with _state._job_lock:
+                job["status"] = "cancelled"
+            yield "cancelled\n"
+
+        process = _FakePipelineProcess(
+            returncode=-15,
+            lines=cancellation_output(),
+        )
+        monkeypatch.setattr(
+            _generation.subprocess,
+            "Popen",
+            lambda *args, **kwargs: process,
+        )
+        cfg_snapshot, models_snapshot = _config_snapshots()
+
+        _generation._run_pipeline_thread(
+            job,
+            cfg_snapshot,
+            models_snapshot,
+            _generation.GenerateRequest(),
+        )
+
+        assert job["status"] == "cancelled"
+        assert job["exit_code"] == -15
+
+    def test_timeout_kills_fake_process_and_records_error(self, monkeypatch):
+        process = _FakePipelineProcess(running=True)
+
+        class ImmediateTimer:
+            def __init__(self, interval, callback):
+                self.callback = callback
+
+            def start(self):
+                self.callback()
+
+            def cancel(self):
+                return None
+
+        monkeypatch.setattr(
+            _generation.subprocess,
+            "Popen",
+            lambda *args, **kwargs: process,
+        )
+        monkeypatch.setattr(_generation.threading, "Timer", ImmediateTimer)
+        monkeypatch.setattr(
+            _generation,
+            "request_process_tree_stop",
+            lambda proc, grace: proc.kill(),
+        )
+        job = _pipeline_job()
+        cfg_snapshot, models_snapshot = _config_snapshots()
+
+        _generation._run_pipeline_thread(
+            job,
+            cfg_snapshot,
+            models_snapshot,
+            _generation.GenerateRequest(),
+        )
+
+        assert process.kill_called
+        assert job["status"] == "timed_out"
+        assert job["exit_code"] == -9
+        assert job["logs"] == [
+            f"ERROR: Pipeline timed out after {_generation._PIPELINE_TIMEOUT}s",
+        ]
+
+    def test_popen_error_fails_cleanly_and_removes_temp_files(
+        self, monkeypatch,
+    ):
+        command_seen = []
+
+        def failing_popen(command, **kwargs):
+            command_seen.extend(command)
+            raise OSError("simulated process creation failure")
+
+        monkeypatch.setattr(_generation.subprocess, "Popen", failing_popen)
+        job = _pipeline_job()
+        cfg_snapshot, models_snapshot = _config_snapshots()
+
+        _generation._run_pipeline_thread(
+            job,
+            cfg_snapshot,
+            models_snapshot,
+            _generation.GenerateRequest(),
+        )
+
+        assert job["status"] == "failed"
+        assert job["exit_code"] == -1
+        assert job["logs"] == [
+            "ERROR: Pipeline failed unexpectedly. Check server logs for details.",
+        ]
+        cfg_path = Path(command_seen[command_seen.index("--config") + 1])
+        assert not cfg_path.exists()
+        assert not cfg_path.parent.exists()
+
+    def test_cancelled_before_launch_never_starts_popen(self, monkeypatch):
+        popen_called = False
+
+        def forbidden_popen(*args, **kwargs):
+            nonlocal popen_called
+            popen_called = True
+            raise AssertionError("Popen must not run for a cancelled job")
+
+        monkeypatch.setattr(
+            _generation.subprocess,
+            "Popen",
+            forbidden_popen,
+        )
+        job = _pipeline_job(status="cancelled")
+        cfg_snapshot, models_snapshot = _config_snapshots()
+
+        _generation._run_pipeline_thread(
+            job,
+            cfg_snapshot,
+            models_snapshot,
+            _generation.GenerateRequest(),
+        )
+
+        assert not popen_called
+        assert job["status"] == "cancelled"
+        assert job["ended"] is not None
+
+
+class TestProcessTreeControl:
+    def test_windows_launch_uses_a_new_process_group(self):
+        assert _process_control.process_group_popen_kwargs() == {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+        }
+
+    def test_graceful_windows_stop_sends_ctrl_break(self):
+        process = _FakePipelineProcess(running=True)
+
+        assert _process_control.signal_process_tree(process)
+        assert process.signals == [signal.CTRL_BREAK_EVENT]
+        assert not process.terminate_called
+
+    def test_stop_request_arms_daemon_force_kill_timer(self, monkeypatch):
+        process = _FakePipelineProcess(running=True)
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, interval, callback):
+                self.interval = interval
+                self.callback = callback
+                self.daemon = False
+                self.started = False
+                self.cancelled = False
+                timers.append(self)
+
+            def start(self):
+                self.started = True
+
+            def cancel(self):
+                self.cancelled = True
+
+        monkeypatch.setattr(_process_control.threading, "Timer", FakeTimer)
+        hard_kills = []
+        monkeypatch.setattr(
+            _process_control,
+            "force_kill_process_tree",
+            lambda proc: hard_kills.append(proc),
+        )
+
+        timer = _process_control.request_process_tree_stop(process, grace=2.5)
+
+        assert process.signals == [signal.CTRL_BREAK_EVENT]
+        assert timer is timers[0]
+        assert timer.interval == 2.5
+        assert timer.daemon
+        assert timer.started
+        timer.callback()
+        assert hard_kills == [process]
+
+    def test_windows_hard_stop_uses_taskkill_tree(self, monkeypatch):
+        process = _FakePipelineProcess(running=True)
+        calls = []
+
+        class Result:
+            returncode = 0
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            process.running = False
+            process.returncode = -9
+            return Result()
+
+        monkeypatch.setattr(_process_control.subprocess, "run", fake_run)
+
+        assert _process_control.force_kill_process_tree(process)
+        command, kwargs = calls[0]
+        assert command == [
+            "taskkill", "/PID", str(process.pid), "/T", "/F",
+        ]
+        assert kwargs["check"] is False
+        assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW
+
+    def test_windows_job_object_is_attached_terminated_and_released(
+        self, monkeypatch,
+    ):
+        process = _FakePipelineProcess(running=True)
+        process._handle = 24680
+
+        class FakeKernel:
+            def __init__(self):
+                self.assigned = []
+                self.terminated = []
+                self.closed = []
+
+            def CreateJobObjectW(self, security, name):
+                return 13579
+
+            def SetInformationJobObject(
+                self, handle, info_class, info, size,
+            ):
+                return True
+
+            def AssignProcessToJobObject(self, job_handle, process_handle):
+                self.assigned.append((job_handle, process_handle.value))
+                return True
+
+            def TerminateJobObject(self, job_handle, exit_code):
+                self.terminated.append((job_handle, exit_code))
+                process.running = False
+                process.returncode = exit_code
+                return True
+
+            def CloseHandle(self, handle):
+                self.closed.append(handle)
+                return True
+
+        kernel = FakeKernel()
+        monkeypatch.setattr(_process_control, "_kernel32", kernel)
+
+        assert _process_control.attach_process_tree(process)
+        assert process._contosoforge_job_handle == 13579
+        assert kernel.assigned == [(13579, process._handle)]
+
+        assert _process_control.force_kill_process_tree(process)
+        assert kernel.terminated == [(13579, 1)]
+
+        _process_control.release_process_tree(process)
+        assert kernel.closed == [13579]
+        assert process._contosoforge_job_handle is None
+
+
+class TestGenerationShutdown:
+    def test_shutdown_cancels_stops_and_joins_running_job(self, monkeypatch):
+        process = _FakePipelineProcess(running=True)
+
+        class FakeStopTimer:
+            def __init__(self):
+                self.cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+        class FakeJobThread:
+            def __init__(self):
+                self.alive = True
+                self.join_timeouts = []
+
+            def join(self, timeout):
+                self.join_timeouts.append(timeout)
+                self.alive = False
+
+            def is_alive(self):
+                return self.alive
+
+        stop_timer = FakeStopTimer()
+        thread = FakeJobThread()
+        job = _pipeline_job()
+        job["process"] = process
+        job["thread"] = thread
+        with _state._job_lock:
+            _state._current_job = job
+        stop_requests = []
+
+        def fake_stop(proc, *, grace):
+            stop_requests.append((proc, grace))
+            return stop_timer
+
+        monkeypatch.setattr(
+            _generation,
+            "request_process_tree_stop",
+            fake_stop,
+        )
+
+        _generation.shutdown_generation()
+
+        assert stop_requests == [
+            (process, _generation._PIPELINE_KILL_GRACE),
+        ]
+        assert thread.join_timeouts == [
+            _generation._PIPELINE_KILL_GRACE + 2,
+        ]
+        assert stop_timer.cancelled
+        with _state._job_lock:
+            assert job["status"] == "cancelled"
+            assert "web server is shutting down" in job["logs"][-1]
+
+
 class TestValidateEndpointExtended:
     """Extended validation tests beyond test_web_api.py."""
 
@@ -394,29 +977,26 @@ class TestValidateEndpointExtended:
 class TestGenerateInputValidation:
     """POST /api/generate -- validation of only and regen_dimensions fields."""
 
-    def test_generate_invalid_only_value(self, client):
+    def test_generate_invalid_only_value(self, client, _prevent_real_generation):
         """The 'only' parameter must be 'dimensions' or 'sales'."""
         resp = client.post("/api/generate", json={"only": "invalid_stage"})
-        # The validation happens inside the background thread, but the endpoint
-        # should still accept the request (validation is deferred).
-        # At minimum, the request itself should be valid pydantic.
-        assert resp.status_code in (200, 400, 409)
+        assert resp.status_code == 400
+        assert _prevent_real_generation == []
 
-    def test_generate_valid_only_dimensions(self, client):
-        # Clear any running job first
-        _state._current_job = None
+    def test_generate_valid_only_dimensions(self, client, _prevent_real_generation):
         resp = client.post("/api/generate", json={"only": "dimensions"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is True
         assert "job_id" in body
-        # Clean up - cancel or wait for it
-        time.sleep(0.2)
+        assert len(_prevent_real_generation) == 1
+        assert _prevent_real_generation[0]["request"].only == "dimensions"
 
-    def test_generate_valid_only_sales(self, client):
-        _state._current_job = None
+    def test_generate_valid_only_sales(self, client, _prevent_real_generation):
         resp = client.post("/api/generate", json={"only": "sales"})
         assert resp.status_code == 200
+        assert len(_prevent_real_generation) == 1
+        assert _prevent_real_generation[0]["request"].only == "sales"
 
     def test_generate_rejects_concurrent_run(self, client):
         """If a job is running, POST /api/generate should return 409."""
@@ -467,37 +1047,153 @@ class TestGenerateInputValidation:
         resp = client.post("/api/generate/cancel")
         assert resp.status_code == 400
 
+    def test_cancel_running_job_requests_process_tree_stop(
+        self, client, monkeypatch,
+    ):
+        process = _FakePipelineProcess(running=True)
+        job = _pipeline_job()
+        job["process"] = process
+        with _state._job_lock:
+            _state._current_job = job
+        stop_requests = []
+
+        def fake_stop(proc, *, grace):
+            stop_requests.append((proc, grace))
+            return None
+
+        monkeypatch.setattr(
+            _generation,
+            "request_process_tree_stop",
+            fake_stop,
+        )
+
+        resp = client.post("/api/generate/cancel")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert stop_requests == [
+            (process, _generation._PIPELINE_KILL_GRACE),
+        ]
+        with _state._job_lock:
+            assert job["status"] == "cancelled"
+            assert job["logs"][-1] == "Pipeline cancelled by user."
+
+        second = client.post("/api/generate/cancel")
+        assert second.status_code == 400
+        assert second.json()["detail"] == "No running job to cancel."
+
+    def test_timed_out_job_streams_one_terminal_event(self, client):
+        job = _pipeline_job(status="timed_out")
+        job["logs"] = ["before timeout", "timeout reached"]
+        job["exit_code"] = -9
+        job["elapsed"] = 12.5
+        with _state._job_lock:
+            _state._current_job = job
+
+        resp = client.get("/api/generate/stream")
+
+        assert resp.status_code == 200
+        assert resp.text.count('"type": "end"') == 1
+        assert '"status": "timed_out"' in resp.text
+        assert '"exit_code": -9' in resp.text
+
+    def test_four_hour_simulated_log_window_stays_bounded(self):
+        retention = 500
+        logs = _generation._new_log_buffer(retention)
+        for second in range(4 * 60 * 60):
+            logs.append(f"second {second}")
+
+        assert len(logs) == retention
+        assert logs.dropped == (4 * 60 * 60) - retention
+        assert logs.first_sequence == (4 * 60 * 60) - retention + 1
+        assert logs.last_sequence == 4 * 60 * 60
+        assert logs[0] == f"second {(4 * 60 * 60) - retention}"
+        assert logs[-1] == f"second {(4 * 60 * 60) - 1}"
+
+    def test_log_snapshot_copies_only_entries_after_cursor(self):
+        job = _pipeline_job(status="done")
+        job["logs"] = _generation._new_log_buffer(100)
+        for index in range(1_000):
+            job["logs"].append(f"line {index}")
+
+        snapshot = _generation._log_snapshot_after(job, 998)
+
+        assert snapshot["entries"] == [
+            (999, "line 998"),
+            (1000, "line 999"),
+        ]
+        assert snapshot["retained"] == 100
+        assert snapshot["dropped"] == 900
+
+    def test_stream_resume_cursor_returns_only_newer_logs(self, client):
+        job = _pipeline_job(status="done")
+        job["logs"] = _generation._new_log_buffer(3)
+        for line in ("one", "two", "three", "four", "five"):
+            job["logs"].append(line)
+        job["exit_code"] = 0
+        with _state._job_lock:
+            _state._current_job = job
+
+        resp = client.get("/api/generate/stream?after=4")
+
+        assert resp.status_code == 200
+        assert "id: 5" in resp.text
+        assert '"sequence": 5' in resp.text
+        assert '"line": "five"' in resp.text
+        assert '"line": "four"' not in resp.text
+        assert '"type": "truncated"' not in resp.text
+
+    def test_stream_reports_cursor_that_fell_behind_retention(self, client):
+        job = _pipeline_job(status="done")
+        job["logs"] = _generation._new_log_buffer(3)
+        for line in ("one", "two", "three", "four", "five"):
+            job["logs"].append(line)
+        job["exit_code"] = 0
+        with _state._job_lock:
+            _state._current_job = job
+
+        resp = client.get("/api/generate/stream?after=0")
+
+        assert resp.status_code == 200
+        assert '"type": "truncated"' in resp.text
+        assert '"dropped": 2' in resp.text
+        assert '"first_sequence": 3' in resp.text
+        assert "id: 3" in resp.text
+        assert '"line": "three"' in resp.text
+
+    def test_stream_rejects_negative_resume_cursor(self, client):
+        resp = client.get("/api/generate/stream?after=-1")
+        assert resp.status_code == 422
+
 
 class TestGenerateRequestModel:
     """Test pydantic validation of GenerateRequest."""
 
-    @pytest.fixture(autouse=True)
-    def _isolate_final_output(self, tmp_path):
-        """Redirect final_output to a temp dir so --clean / --regen don't
-        delete the real generated_datasets/ folder."""
-        with _state._cfg_lock:
-            orig = _state._cfg.defaults.final_output
-            _state._cfg.defaults.final_output = str(tmp_path / "generated_datasets")
-        yield
-        with _state._cfg_lock:
-            _state._cfg.defaults.final_output = orig
-
-    def test_empty_body_accepted(self, client):
-        _state._current_job = None
+    def test_empty_body_accepted(self, client, _prevent_real_generation):
         resp = client.post("/api/generate", json={})
         assert resp.status_code == 200
+        assert len(_prevent_real_generation) == 1
+        assert _prevent_real_generation[0]["request"].model_dump() == {
+            "clean": False,
+            "only": None,
+            "regen_dimensions": None,
+        }
 
-    def test_clean_flag_accepted(self, client):
-        _state._current_job = None
+    def test_clean_flag_accepted(self, client, _prevent_real_generation):
         resp = client.post("/api/generate", json={"clean": True})
         assert resp.status_code == 200
+        assert len(_prevent_real_generation) == 1
+        assert _prevent_real_generation[0]["request"].clean is True
 
-    def test_regen_dimensions_list_accepted(self, client):
-        _state._current_job = None
+    def test_regen_dimensions_list_accepted(self, client, _prevent_real_generation):
         resp = client.post("/api/generate", json={
             "regen_dimensions": ["products", "customers"]
         })
         assert resp.status_code == 200
+        assert len(_prevent_real_generation) == 1
+        assert _prevent_real_generation[0]["request"].regen_dimensions == [
+            "products", "customers",
+        ]
 
     def test_invalid_field_type_returns_422(self, client):
         resp = client.post("/api/generate", json={"clean": "not_a_bool_string"})
@@ -549,6 +1245,130 @@ class TestPresetsExtended:
         """Empty string for preset name should return 404 (not in PRESETS)."""
         resp = client.post("/api/presets/apply", json={"name": ""})
         assert resp.status_code in (400, 404)
+
+
+class TestGuidedSetup:
+    """Beginner workflow applies config and models as one transaction."""
+
+    @staticmethod
+    def payload(**overrides):
+        values = {
+            "size": "quick-sample",
+            "start_date": "2024-01-01",
+            "end_date": "2025-12-31",
+            "format": "parquet",
+            "catalog": "all",
+            "trend": "seasonal-with-growth",
+            "feature_bundle": "analytics",
+        }
+        values.update(overrides)
+        return values
+
+    def test_guided_setup_applies_all_five_decisions(self, client):
+        resp = client.post(
+            "/api/presets/guided",
+            json=self.payload(),
+        )
+
+        assert resp.status_code == 200
+        summary = resp.json()["summary"]
+        assert summary["sales_rows"] == 100_000
+        assert summary["trend"] == "seasonal-with-growth"
+
+        cfg = client.get("/api/config").json()
+        assert cfg["salesRows"] == 100_000
+        assert cfg["startDate"] == "2024-01-01"
+        assert cfg["endDate"] == "2025-12-31"
+        assert cfg["format"] == "parquet"
+        assert cfg["productCatalog"] == "all"
+        assert cfg["returnsEnabled"] is True
+        assert cfg["budgetEnabled"] is True
+        assert cfg["inventoryEnabled"] is True
+        assert cfg["subEnabled"] is False
+        assert cfg["customers"] == 2_778
+
+        models = client.get("/api/models/form").json()
+        assert models["trendPreset"] == "seasonal-with-growth"
+
+    def test_full_bundle_enables_extended_facts(self, client):
+        resp = client.post(
+            "/api/presets/guided",
+            json=self.payload(feature_bundle="full", catalog="synthetic"),
+        )
+
+        assert resp.status_code == 200
+        cfg = client.get("/api/config").json()
+        assert cfg["productCatalog"] == "synthetic"
+        assert cfg["subEnabled"] is True
+        assert cfg["subGenerateBridge"] is True
+        assert cfg["wlEnabled"] is True
+        assert cfg["ccEnabled"] is True
+        assert cfg["skipOrderCols"] is False
+
+    def test_trend_change_clears_manual_year_factors(self, client):
+        manual = client.post(
+            "/api/models/form",
+            json={
+                "values": {
+                    "demandMode": "once",
+                    "demandFactors": [0.8, 1.0, 1.2],
+                },
+            },
+        )
+        assert manual.status_code == 200
+        assert client.get("/api/models/form").json()[
+            "hasManualDemandFactors"
+        ] is True
+
+        resp = client.post(
+            "/api/presets/guided",
+            json=self.payload(trend="hockey-stick"),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["summary"]["manual_factors_cleared"] is True
+        form = client.get("/api/models/form").json()
+        assert form["trendPreset"] == "hockey-stick"
+        assert form["hasManualDemandFactors"] is False
+        assert form["demandFactors"] == []
+
+    def test_invalid_date_range_is_structured_and_atomic(self, client):
+        before = client.get("/api/config").json()
+
+        resp = client.post(
+            "/api/presets/guided",
+            json=self.payload(
+                start_date="2025-01-01",
+                end_date="2024-01-01",
+            ),
+        )
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["field"] == "dateRange"
+        after = client.get("/api/config").json()
+        assert after["salesRows"] == before["salesRows"]
+        assert after["startDate"] == before["startDate"]
+
+    def test_invalid_trend_is_structured_and_atomic(self, client):
+        before = client.get("/api/models/form").json()["trendPreset"]
+
+        resp = client.post(
+            "/api/presets/guided",
+            json=self.payload(trend="always-up-somehow"),
+        )
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["field"] == "trend"
+        assert client.get("/api/models/form").json()["trendPreset"] == before
+
+    def test_guided_setup_is_dual_mounted(self, client):
+        resp = client.post(
+            "/v1/api/presets/guided",
+            json=self.payload(size="power-bi-demo"),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["summary"]["sales_rows"] == 2_000_000
 
 
 # ===================================================================
@@ -675,6 +1495,32 @@ class TestSecurityHeaders:
     def test_referrer_policy(self, client):
         resp = client.get("/api/config")
         assert resp.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
+
+    def test_content_security_policy_blocks_unexpected_scripts(self, client):
+        resp = client.get("/")
+        policy = resp.headers.get("Content-Security-Policy", "")
+
+        assert "default-src 'self'" in policy
+        assert "script-src 'self'" in policy
+        assert "connect-src 'self'" in policy
+        assert "object-src 'none'" in policy
+        assert "frame-ancestors 'none'" in policy
+        assert "unsafe-eval" not in policy
+        assert "https:" not in policy
+
+    def test_production_assets_use_fingerprinted_cache_policy(self, client):
+        index = client.get("/")
+        assert index.status_code == 200
+        assert index.headers["Cache-Control"] == "no-cache"
+
+        match = re.search(r'src="(/static/assets/app-[A-Z0-9]+\.js)"', index.text)
+        assert match is not None
+        asset = client.get(match.group(1))
+        assert asset.status_code == 200
+        assert asset.headers["Cache-Control"] == (
+            "public, max-age=31536000, immutable"
+        )
+        assert asset.headers["Content-Security-Policy"]
 
     def test_security_headers_on_post(self, client):
         resp = client.post("/api/config", json={"values": {}})
@@ -803,6 +1649,39 @@ class TestInputValidationEdgeCases:
         assert resp.status_code == 200
         data = client.get("/api/config").json()
         assert isinstance(data["salesRows"], int)
+
+    def test_invalid_numeric_config_is_structured_422_and_atomic(self, client):
+        before = client.get("/api/config").json()["salesRows"]
+
+        resp = client.post(
+            "/api/config",
+            json={"values": {"salesRows": "many"}},
+        )
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == {
+            "field": "salesRows",
+            "message": "Expected an integer value.",
+        }
+        assert client.get("/api/config").json()["salesRows"] == before
+
+    def test_invalid_numeric_models_value_is_structured_422_and_atomic(
+        self,
+        client,
+    ):
+        before = client.get("/api/models/form").json()["qtyMin"]
+
+        resp = client.post(
+            "/api/models/form",
+            json={"values": {"qtyMin": "several"}},
+        )
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == {
+            "field": "qtyMin",
+            "message": "Expected an integer value.",
+        }
+        assert client.get("/api/models/form").json()["qtyMin"] == before
 
     def test_er_to_currencies_non_list_ignored(self, client):
         """erToCurrencies must be a list; non-list should be ignored."""

@@ -17,6 +17,21 @@ import web.shared_state as _state
 router = APIRouter(prefix="/api/models", tags=["models"])
 
 
+def _form_number(values: dict, field: str, converter):
+    """Coerce one numeric form field and return a structured client error."""
+    try:
+        return converter(values[field])
+    except (ValueError, TypeError, OverflowError) as exc:
+        expected = "integer" if converter is int else "number"
+        raise HTTPException(
+            422,
+            detail={
+                "field": field,
+                "message": f"Expected an {expected} value.",
+            },
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -110,8 +125,12 @@ def get_models_form():
 
     return {
         # Macro demand
+        "trendPreset": str(md.get("trend") or ""),
         "demandMode": str(ylf.get("mode", "once")),
-        "demandFactors": list(ylf.get("factor_values", None) or ylf.get("values", [1.0])),
+        "demandFactors": list(ylf.get("factor_values", None) or ylf.get("values", [])),
+        "hasManualDemandFactors": bool(
+            ylf.get("factor_values", None) or ylf.get("values", [])
+        ),
         # Quantity
         "qtyLambda": float(qty.get("base_poisson_lambda", 1.7)),
         "qtyMin": int(qty.get("min_qty", 1)),
@@ -155,7 +174,7 @@ def update_models_form(body: ConfigUpdate):
         if not isinstance(m, dict):
             m = models_cfg
 
-        m.setdefault("macro_demand", {}).setdefault("year_level_factors", {})
+        m.setdefault("macro_demand", {})
         m.setdefault("quantity", {})
         m.setdefault("pricing", {}).setdefault("inflation", {})
         m["pricing"].setdefault("markdown", {})
@@ -166,45 +185,72 @@ def update_models_form(body: ConfigUpdate):
         # Coerce/apply form values. A bad value (e.g. a non-numeric in a
         # float field) is a client error -> 400, not a 500. Because we mutate
         # the deep copy above, a failure here leaves live state untouched.
+        trend_changed = False
         try:
             # Macro demand
-            if "demandMode" in v: m["macro_demand"]["year_level_factors"]["mode"] = v["demandMode"]
-            if "demandFactors" in v and isinstance(v["demandFactors"], list):
-                m["macro_demand"]["year_level_factors"]["values"] = [float(x) for x in v["demandFactors"]]
+            if "trendPreset" in v:
+                from src.utils.trend_presets import VALID_TRENDS
+
+                trend = str(v["trendPreset"]).strip().lower()
+                if trend not in VALID_TRENDS:
+                    raise HTTPException(
+                        422,
+                        detail={
+                            "field": "trendPreset",
+                            "message": "Choose a supported business trend.",
+                        },
+                    )
+                previous_trend = m["macro_demand"].get("trend")
+                m["macro_demand"]["trend"] = trend
+                if trend != previous_trend:
+                    trend_changed = True
+                    m["macro_demand"].pop("year_level_factors", None)
+            if not trend_changed:
+                factors = v.get("demandFactors")
+                if isinstance(factors, list) and factors:
+                    year_factors = m["macro_demand"].setdefault(
+                        "year_level_factors",
+                        {},
+                    )
+                    if "demandMode" in v:
+                        year_factors["mode"] = v["demandMode"]
+                    year_factors["values"] = [float(x) for x in factors]
+                if v.get("clearManualDemandFactors"):
+                    m["macro_demand"].pop("year_level_factors", None)
 
             # Quantity
-            if "qtyLambda" in v: m["quantity"]["base_poisson_lambda"] = float(v["qtyLambda"])
-            if "qtyMin" in v: m["quantity"]["min_qty"] = int(v["qtyMin"])
-            if "qtyMax" in v: m["quantity"]["max_qty"] = int(v["qtyMax"])
+            if "qtyLambda" in v: m["quantity"]["base_poisson_lambda"] = _form_number(v, "qtyLambda", float)
+            if "qtyMin" in v: m["quantity"]["min_qty"] = _form_number(v, "qtyMin", int)
+            if "qtyMax" in v: m["quantity"]["max_qty"] = _form_number(v, "qtyMax", int)
             if "qtyMonthly" in v and isinstance(v["qtyMonthly"], list):
                 m["quantity"]["monthly_factors"] = [float(x) for x in v["qtyMonthly"]]
-            if "qtyNoise" in v: m["quantity"]["noise_sigma"] = float(v["qtyNoise"])
+            if "qtyNoise" in v: m["quantity"]["noise_sigma"] = _form_number(v, "qtyNoise", float)
 
             # Pricing -- inflation
-            if "inflationRate" in v: m["pricing"]["inflation"]["annual_rate"] = float(v["inflationRate"])
-            if "inflationVolatility" in v: m["pricing"]["inflation"]["month_volatility_sigma"] = float(v["inflationVolatility"])
+            if "inflationRate" in v: m["pricing"]["inflation"]["annual_rate"] = _form_number(v, "inflationRate", float)
+            if "inflationVolatility" in v: m["pricing"]["inflation"]["month_volatility_sigma"] = _form_number(v, "inflationVolatility", float)
             if "inflationClipMin" in v or "inflationClipMax" in v:
                 clip = m["pricing"]["inflation"].get("factor_clip", [1.0, 1.3])
-                if "inflationClipMin" in v: clip[0] = float(v["inflationClipMin"])
-                if "inflationClipMax" in v: clip[1] = float(v["inflationClipMax"])
+                if "inflationClipMin" in v: clip[0] = _form_number(v, "inflationClipMin", float)
+                if "inflationClipMax" in v: clip[1] = _form_number(v, "inflationClipMax", float)
                 m["pricing"]["inflation"]["factor_clip"] = clip
 
             # Pricing -- markdown
             if "markdownEnabled" in v: m["pricing"]["markdown"]["enabled"] = bool(v["markdownEnabled"])
-            if "markdownMaxPct" in v: m["pricing"]["markdown"]["max_pct_of_price"] = float(v["markdownMaxPct"])
-            if "markdownMinNet" in v: m["pricing"]["markdown"]["min_net_price"] = float(v["markdownMinNet"])
+            if "markdownMaxPct" in v: m["pricing"]["markdown"]["max_pct_of_price"] = _form_number(v, "markdownMaxPct", float)
+            if "markdownMinNet" in v: m["pricing"]["markdown"]["min_net_price"] = _form_number(v, "markdownMinNet", float)
             if "markdownAllowNeg" in v: m["pricing"]["markdown"]["allow_negative_margin"] = bool(v["markdownAllowNeg"])
 
             # Brand popularity
             if "brandEnabled" in v: m["brand_popularity"]["enabled"] = bool(v["brandEnabled"])
-            if "brandSeed" in v: m["brand_popularity"]["seed"] = int(v["brandSeed"])
-            if "brandWinnerBoost" in v: m["brand_popularity"]["winner_boost"] = float(v["brandWinnerBoost"])
+            if "brandSeed" in v: m["brand_popularity"]["seed"] = _form_number(v, "brandSeed", int)
+            if "brandWinnerBoost" in v: m["brand_popularity"]["winner_boost"] = _form_number(v, "brandWinnerBoost", float)
             # brand_weights deprecated — ignore if sent by frontend
 
             # Returns (on/off lives in config.yaml -> returns.enabled, not here)
             if "retLagDist" in v: m["returns"]["lag_days"]["distribution"] = v["retLagDist"]
-            if "retLagMode" in v: m["returns"]["lag_days"]["mode"] = int(v["retLagMode"])
-            if "retFullLinePct" in v: m["returns"]["quantity"]["full_line_probability"] = float(v["retFullLinePct"])
+            if "retLagMode" in v: m["returns"]["lag_days"]["mode"] = _form_number(v, "retLagMode", int)
+            if "retFullLinePct" in v: m["returns"]["quantity"]["full_line_probability"] = _form_number(v, "retFullLinePct", float)
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, f"Invalid models form value: {exc}")
 

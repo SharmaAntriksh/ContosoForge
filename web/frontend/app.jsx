@@ -27,6 +27,16 @@ function validate(config) {
   return {errors, warnings};
 }
 
+function validationTarget(message) {
+  if (message.startsWith("End date")) return "config-end-date";
+  if (message.startsWith("Total rows")) return "config-sales-rows";
+  if (message.startsWith("Max unit price")) return "config-max-price";
+  if (message.startsWith("Return rate")) return "config-return-rate";
+  if (message.startsWith("Subscriptions max")) return "config-sub-max";
+  if (message.startsWith("Subscription participation")) return "config-sub-participation";
+  return null;
+}
+
 /* Debounced sync */
 function useDebounce(fn, ms) {
   const timerRef = useRef(null);
@@ -34,6 +44,22 @@ function useDebounce(fn, ms) {
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => fn(...args), ms);
   }, [fn, ms]);
+}
+
+const BROWSER_LOG_LIMIT = 2000;
+const BROWSER_LOG_TRUNCATION_NOTICE =
+  `Earlier browser log output was trimmed to the latest ${BROWSER_LOG_LIMIT.toLocaleString()} lines.`;
+
+function appendBoundedLogs(previous, additions) {
+  const retained = previous[0] === BROWSER_LOG_TRUNCATION_NOTICE
+    ? previous.slice(1)
+    : previous;
+  const next = [...retained, ...additions];
+  if (next.length <= BROWSER_LOG_LIMIT) return next;
+  return [
+    BROWSER_LOG_TRUNCATION_NOTICE,
+    ...next.slice(-(BROWSER_LOG_LIMIT - 1)),
+  ];
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -46,10 +72,19 @@ function App() {
   const [selectedPreset, setSelectedPreset] = useState(null);
   const [toast, setToast] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [syncError, setSyncError] = useState(null);
+  const [configSynced, setConfigSynced] = useState(false);
   const [logs, setLogs] = useState([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [runStatus, setRunStatus] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef(null);
+  const eventSourceRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const logCursorRef = useRef(0);
+  const syncSequenceRef = useRef(0);
+  const mainContentRef = useRef(null);
+  const sidebarToggleRef = useRef(null);
 
   /* Run history */
   const [runHistory, setRunHistory] = useState([]);
@@ -58,7 +93,7 @@ function App() {
   const [dimTab, setDimTab] = useState("customers");
 
   /* Sidebar collapse */
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 900);
   const [validationOpen, setValidationOpen] = useState(false);
   const [regenOpen, setRegenOpen] = useState(false);
 
@@ -77,6 +112,11 @@ function App() {
   const [modelsTab, setModelsTab] = useState("visual");
   const [modelsForm, setModelsForm] = useState(null);
 
+  /* Beginner workflow */
+  const [setupMode, setSetupMode] = useState("quick");
+  const [quickDraft, setQuickDraft] = useState(null);
+  const [guidedSummary, setGuidedSummary] = useState(null);
+
   /* Config YAML state */
   const [cfgYaml, setCfgYaml] = useState("");
   const [cfgYamlOrig, setCfgYamlOrig] = useState("");
@@ -85,109 +125,355 @@ function App() {
 
   /* Page navigation */
   const [page, setPage_] = useState("main");
+  const flash = (message) => { setToast(message); setTimeout(() => setToast(null), 2400); };
+  const appendLogLines = useCallback((...lines) => {
+    setLogs(previous => appendBoundedLogs(previous, lines));
+  }, []);
+
+  const prepareConfig = (data, previous) => ({
+    ...data,
+    regenAll: previous?.regenAll || false,
+    regenDims: previous?.regenDims || {},
+    autoWorkers: !data.workers,
+  });
+
+  const loadConfig = async () => {
+    setLoadError(null);
+    try {
+      const data = await window.apiRequest(API + "/config");
+      setCfg(previous => prepareConfig(data, previous));
+      setConfigSynced(true);
+      setSyncError(null);
+    } catch (error) {
+      setCfg(null);
+      setConfigSynced(false);
+      setLoadError(error.message);
+    }
+  };
+
   const setPage = useCallback((targetPage) => {
     document.activeElement?.blur();
     setPage_(targetPage);
+    if (window.matchMedia("(max-width: 900px)").matches) setSidebarOpen(false);
     if (targetPage === "config") loadCfgYaml();
     if (targetPage === "models") {
-      fetch(API + "/models").then(r => r.text()).then(text => { setModelsYaml(text); setModelsOrig(text); }).catch(() => {});
-      fetch(API + "/models/form").then(r => r.json()).then(data => setModelsForm(data)).catch(() => {});
+      window.apiRequest(API + "/models").then(text => { setModelsYaml(text); setModelsOrig(text); }).catch(error => setModelsErr(error.message));
+      window.apiRequest(API + "/models/form").then(data => setModelsForm(data)).catch(error => setModelsErr(error.message));
     }
   }, []);
 
-  /* ─── Initial load ─── */
   useEffect(() => {
-    fetch(API + "/config").then(r => r.json()).then(data => {
-      data.regenAll = false;
-      data.regenDims = {};
-      data.autoWorkers = !data.workers;
-      setCfg(data);
-    }).catch(() => {
-      setLoadError("Failed to load config from server");
-      setCfg({seed: 42, format: "parquet", salesOutput: "sales", skipOrderCols: false, compression: "snappy", rowGroupSize: 2000000, mergeParquet: true, partitionEnabled: true, maxLinesPerOrder: 5, salesOptimize: true, qualityReport: true, startDate: "2020-01-01", endDate: "2025-12-31", fiscalMonthOffset: 0, asOfDate: "", includeCalendar: true, includeIso: false, includeFiscal: true, includeWeeklyFiscal: false, wfFirstDay: 0, wfWeeklyType: "Last", wfQuarterType: "445", wfTypeStartFiscalYear: 1, salesRows: 103285, chunkSize: 1000000, autoWorkers: false, workers: 8, customers: 48837, stores: 10, products: 2581, promotions: 20, pctIndia: 10, pctUs: 51, pctEu: 39, pctAsia: 0, pctOrg: 1, customerActiveRatio: .98, firstYearPct: .27, householdPct: .35, valueScale: 1, minPrice: 10, maxPrice: 3000, productActiveRatio: .98, marginMin: .20, marginMax: .35, brandNormalize: false, brandNormalizeAlpha: .35, returnsEnabled: true, returnRate: .03, returnMinDays: 1, returnMaxDays: 60, promoNewCustWindow: 3, subEnabled: false, subGenerateBridge: false, subParticipationRate: .65, subAvgSubscriptions: 1.5, subMaxSubscriptions: 5, subChurnRate: .25, subTrialRate: .30, subTrialConversionRate: .85, subTrialDays: 14, subSeed: 700, storeEnsureIsoCoverage: true, storeStaffingRanges: {Supermarket: [8, 20], Hypermarket: [15, 40], Convenience: [2, 6]}, storeRegionWeights: {}, storeOpeningStart: "1995-01-01", storeOpeningEnd: "2023-12-31", storeClosingEnd: "2028-12-31", storeAssortmentEnabled: true, storeOnlineStores: 5, storeClosingEnabled: true, storeCloseShare: .10, employeeEmailDomain: "contoso.com", transfersEnabled: false, transfersAnnualRate: .05, transfersMinTenureMonths: 6, transfersSameRegionPref: .70, erFromCurrencies: ["USD"], erToCurrencies: ["CAD", "GBP", "EUR", "INR", "AUD", "CNY", "JPY"], erBaseCurrency: "USD", erFutureDrift: .02, erIncludeMonthly: true, budgetEnabled: true, budgetDefaultGrowth: .05, inventoryEnabled: true, inventoryGrain: "monthly", inventoryShrinkageEnabled: true, inventoryShrinkageRate: .02, regenAll: false, regenDims: {}});
-    });
-    fetch(API + "/presets").then(r => r.json()).then(data => { setPresets(data); setPresetBucket(Object.keys(data)[0] || ""); }).catch(() => {});
-    fetch(API + "/models").then(r => r.text()).then(text => { setModelsYaml(text); setModelsOrig(text); setModelsDisk(text); }).catch(() => {});
-    fetch(API + "/models/form").then(r => r.json()).then(data => setModelsForm(data)).catch(() => {});
+    const mobileQuery = window.matchMedia("(max-width: 900px)");
+    const closeForMobile = event => {
+      if (event.matches) setSidebarOpen(false);
+    };
+    mobileQuery.addEventListener?.("change", closeForMobile);
+    return () => mobileQuery.removeEventListener?.("change", closeForMobile);
   }, []);
 
+  const closeSidebar = useCallback(() => {
+    setSidebarOpen(false);
+    requestAnimationFrame(() => sidebarToggleRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!sidebarOpen) return undefined;
+    const closeOnEscape = event => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeSidebar();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [sidebarOpen, closeSidebar]);
+
+  useEffect(() => {
+    requestAnimationFrame(() => mainContentRef.current?.focus());
+  }, [page]);
+
+  /* ─── Initial load ─── */
+  useEffect(() => {
+    loadConfig();
+    window.apiRequest(API + "/presets").then(data => { setPresets(data); setPresetBucket(Object.keys(data)[0] || ""); }).catch(error => setLoadError(previous => previous || `Presets unavailable: ${error.message}`));
+    window.apiRequest(API + "/models").then(text => { setModelsYaml(text); setModelsOrig(text); setModelsDisk(text); }).catch(error => setModelsErr(error.message));
+    window.apiRequest(API + "/models/form").then(data => setModelsForm(data)).catch(error => setModelsErr(error.message));
+    window.apiRequest(API + "/generate/status").then(status => {
+      setRunStatus(status.status);
+      if (status.status === "running") {
+        setIsRunning(true);
+        setElapsed(status.elapsed || 0);
+        connectGenerationStream(status.elapsed || 0);
+      }
+    }).catch(error => appendLogLines(`Could not restore generation status: ${error.message}`));
+    return () => {
+      clearInterval(timerRef.current);
+      clearTimeout(reconnectTimerRef.current);
+      if (eventSourceRef.current) eventSourceRef.current.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!cfg || !modelsForm || quickDraft) return;
+    const inferredSize = cfg.salesRows <= 500000
+      ? "quick-sample"
+      : cfg.salesRows <= 5000000
+        ? "power-bi-demo"
+        : cfg.salesRows <= 50000000
+          ? "medium-analytics"
+          : "large-stress-test";
+    const inferredFeatures = cfg.subEnabled || cfg.wlEnabled || cfg.ccEnabled
+      ? "full"
+      : cfg.returnsEnabled || cfg.budgetEnabled || cfg.inventoryEnabled
+        ? "analytics"
+        : "core";
+    setQuickDraft({
+      size: inferredSize,
+      startDate: cfg.startDate,
+      endDate: cfg.endDate,
+      format: cfg.format,
+      catalog: cfg.productCatalog || "all",
+      trend: modelsForm.trendPreset || "gradual-growth",
+      featureBundle: inferredFeatures,
+    });
+  }, [cfg, modelsForm, quickDraft]);
+
   /* ─── Debounced config sync ─── */
-  const syncToBackend = useDebounce((vals) => {
-    fetch(API + "/config", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({values: vals})}).then(r => { if (!r.ok) console.warn("Config sync failed", r.status) }).catch(() => {});
+  const syncToBackend = useDebounce((vals, sequence) => {
+    if (sequence !== syncSequenceRef.current) return;
+    window.apiRequest(API + "/config", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({values: vals})})
+      .then(() => {
+        if (sequence === syncSequenceRef.current) {
+          setConfigSynced(true);
+          setSyncError(null);
+        }
+      })
+      .catch(error => {
+        if (sequence === syncSequenceRef.current) {
+          setConfigSynced(false);
+          setSyncError(`Settings were not saved: ${error.message}`);
+        }
+      });
   }, 400);
 
   const setConfigField = useCallback((key, value) => {
+    const sequence = ++syncSequenceRef.current;
+    setConfigSynced(false);
     setCfg(prev => {
       const next = {...prev, [key]: value};
-      syncToBackend(next);
+      syncToBackend(next, sequence);
       return next;
     });
   }, [syncToBackend]);
 
   const reloadFormFromServer = useCallback(() => {
-    fetch(API + "/config").then(r => r.json()).then(data => {
-      data.regenAll = cfg?.regenAll || false;
-      data.regenDims = cfg?.regenDims || {};
-      data.autoWorkers = !data.workers;
-      setCfg(data);
-    }).catch(() => {});
+    window.apiRequest(API + "/config").then(data => {
+      setCfg(previous => prepareConfig(data, previous));
+      setConfigSynced(true);
+      setSyncError(null);
+    }).catch(error => setSyncError(`Could not reload settings: ${error.message}`));
   }, []);
 
   const loadCfgYaml = useCallback(() => {
-    fetch(API + "/config/yaml/disk").then(r => r.text()).then(text => {
+    window.apiRequest(API + "/config/yaml/disk").then(text => {
       setCfgYaml(text); setCfgYamlOrig(text); setCfgYamlErr(null);
-    }).catch(() => {});
+    }).catch(error => setCfgYamlErr(error.message));
   }, []);
 
-  const flash = (message) => { setToast(message); setTimeout(() => setToast(null), 2400); };
+  const applyPreset = async (name) => {
+    ++syncSequenceRef.current;
+    setConfigSynced(false);
+    try {
+      await window.apiRequest(API + "/presets/apply", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name})});
+      const data = await window.apiRequest(API + "/config");
+      setCfg(previous => prepareConfig(data, previous));
+      setConfigSynced(true);
+      setSyncError(null);
+      setSelectedPreset(name);
+      flash(`Applied: ${name}`);
+    } catch (error) {
+      setSyncError(`Preset was not applied: ${error.message}`);
+    }
+  };
 
-  const applyPreset = (name) => {
-    fetch(API + "/presets/apply", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name})})
-      .then(() => fetch(API + "/config").then(r => r.json()).then(data => {
-        data.regenAll = cfg.regenAll;
-        data.regenDims = cfg.regenDims;
-        data.autoWorkers = !data.workers;
-        setCfg(data);
-      }))
-      .catch(() => {});
-    setSelectedPreset(name);
-    flash(`Applied: ${name}`);
+  const applyGuidedSetup = async (draft) => {
+    ++syncSequenceRef.current;
+    setConfigSynced(false);
+    setSyncError(null);
+    try {
+      const result = await window.apiRequest(API + "/presets/guided", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          size: draft.size,
+          start_date: draft.startDate,
+          end_date: draft.endDate,
+          format: draft.format,
+          catalog: draft.catalog,
+          trend: draft.trend,
+          feature_bundle: draft.featureBundle,
+        }),
+      });
+      const [configData, formData, yamlText] = await Promise.all([
+        window.apiRequest(API + "/config"),
+        window.apiRequest(API + "/models/form"),
+        window.apiRequest(API + "/models"),
+      ]);
+      setCfg(previous => prepareConfig(configData, previous));
+      setModelsForm(formData);
+      setModelsYaml(yamlText);
+      setModelsOrig(yamlText);
+      setConfigSynced(true);
+      setGuidedSummary(result.summary);
+      flash("Guided setup applied in memory");
+      return result.summary;
+    } catch (error) {
+      setConfigSynced(false);
+      setSyncError(`Guided setup was not applied: ${error.message}`);
+      throw error;
+    }
   };
 
   /* ─── Generate ─── */
-  const runGenerate = () => {
-    if (errors.length > 0 || isRunning) return;
-    const regenDims = cfg.regenAll ? DIMS : Object.keys(cfg.regenDims).filter(key => cfg.regenDims[key]);
-    fetch(API + "/generate", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({regen_dimensions: regenDims.length ? regenDims : null})})
-      .then(r => r.json()).then(() => {
-        setLogs([]); setIsRunning(true); setElapsed(0);
-        const start = Date.now();
-        timerRef.current = setInterval(() => setElapsed((Date.now() - start) / 1000), 100);
-        const eventSource = new EventSource(API + "/generate/stream");
-        const cleanup = () => {
-          clearInterval(timerRef.current);
-          timerRef.current = null;
-          setIsRunning(false);
-          eventSource.close();
-        };
-        eventSource.onmessage = (event) => {
-          const data = JSON.parse(event.data);
-          if (data.type === "log") setLogs(prev => [...prev, data.line]);
-          if (data.type === "status") setElapsed(data.elapsed);
-          if (data.type === "end") {
-            cleanup(); setElapsed(data.elapsed);
-            const formattedElapsed = data.elapsed < 60 ? `${data.elapsed.toFixed(1)}s` : `${Math.floor(data.elapsed / 60)}m ${Math.floor(data.elapsed % 60)}s`;
-            flash(data.status === "done" ? `Pipeline completed in ${formattedElapsed}` : `Pipeline failed after ${formattedElapsed}`);
-            setRunHistory(prev => [{status: data.status, elapsed: data.elapsed, rows: cfg.salesRows, time: new Date().toLocaleTimeString()}, ...prev].slice(0, 10));
+  function connectGenerationStream(initialElapsed = 0) {
+    if (eventSourceRef.current) eventSourceRef.current.close();
+    clearTimeout(reconnectTimerRef.current);
+    clearInterval(timerRef.current);
+
+    setIsRunning(true);
+    setRunStatus("running");
+    setElapsed(initialElapsed);
+    const start = Date.now() - initialElapsed * 1000;
+    timerRef.current = setInterval(() => setElapsed((Date.now() - start) / 1000), 100);
+
+    const eventSource = new EventSource(
+      `${API}/generate/stream?after=${encodeURIComponent(logCursorRef.current)}`,
+    );
+    eventSourceRef.current = eventSource;
+    let intentionallyClosed = false;
+
+    const cleanup = (markStopped = true) => {
+      intentionallyClosed = true;
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+      if (markStopped) setIsRunning(false);
+      eventSource.close();
+      if (eventSourceRef.current === eventSource) eventSourceRef.current = null;
+    };
+
+    eventSource.onmessage = (event) => {
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (_error) {
+        appendLogLines("Live log stream returned an unreadable message.");
+        return;
+      }
+      if (data.type === "truncated") {
+        appendLogLines(
+          `Earlier server log output is no longer retained (${data.dropped.toLocaleString()} lines skipped).`,
+        );
+      }
+      if (data.type === "log") {
+        const sequence = Number(data.sequence || event.lastEventId || 0);
+        if (Number.isFinite(sequence) && sequence > logCursorRef.current) {
+          logCursorRef.current = sequence;
+        }
+        appendLogLines(data.line);
+      }
+      if (data.type === "status") setElapsed(data.elapsed);
+      if (data.type === "end") {
+        cleanup();
+        setRunStatus(data.status);
+        setElapsed(data.elapsed);
+        const formattedElapsed = data.elapsed < 60 ? `${data.elapsed.toFixed(1)}s` : `${Math.floor(data.elapsed / 60)}m ${Math.floor(data.elapsed % 60)}s`;
+        const statusMessage = data.status === "done"
+          ? `Pipeline completed in ${formattedElapsed}`
+          : data.status === "cancelled"
+            ? `Pipeline cancelled after ${formattedElapsed}`
+            : data.status === "timed_out"
+              ? `Pipeline timed out after ${formattedElapsed}`
+              : `Pipeline failed after ${formattedElapsed}`;
+        flash(statusMessage);
+        setRunHistory(previous => [{
+          status: data.status,
+          elapsed: data.elapsed,
+          rows: cfg?.salesRows || null,
+          time: new Date().toLocaleTimeString(),
+        }, ...previous].slice(0, 10));
+      }
+      if (data.type === "idle") {
+        setRunStatus(null);
+        cleanup();
+      }
+    };
+    eventSource.onerror = () => {
+      if (intentionallyClosed) return;
+      cleanup(false);
+      window.apiRequest(API + "/generate/status")
+        .then(status => {
+          setRunStatus(status.status);
+          if (status.status === "running") {
+            setIsRunning(true);
+            setElapsed(status.elapsed || 0);
+            appendLogLines("Live log connection was interrupted. Reconnecting...");
+            reconnectTimerRef.current = setTimeout(() => connectGenerationStream(status.elapsed || 0), 1200);
+          } else {
+            setIsRunning(false);
+            appendLogLines(`Live log connection ended; server reports job status '${status.status}'.`);
           }
-          if (data.type === "idle") { cleanup(); }
-        };
-        eventSource.onerror = () => { cleanup(); };
-      }).catch(err => { setLogs(["Failed to start pipeline: " + err.message]); });
+        })
+        .catch(error => {
+          setIsRunning(false);
+          setRunStatus("unknown");
+          appendLogLines(`Lost the live log connection: ${error.message}`);
+        });
+    };
+  }
+
+  const revealAndFocus = (targetId) => {
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    const sectionPanel = target.closest("[data-section-panel]");
+    if (sectionPanel?.hidden) {
+      document.getElementById(sectionPanel.getAttribute("aria-labelledby"))?.click();
+    }
+    requestAnimationFrame(() => target.focus());
   };
 
-  const cancelGenerate = () => {
-    fetch(API + "/generate/cancel", {method: "POST"}).then(() => { clearInterval(timerRef.current); setIsRunning(false); }).catch(() => {});
+  const runGenerate = async () => {
+    if (errors.length > 0) {
+      setValidationOpen(true);
+      requestAnimationFrame(() => document.getElementById("validation-summary")?.focus());
+      return;
+    }
+    if (isRunning || !configSynced) return;
+    const regenDims = cfg.regenAll ? DIMS : Object.keys(cfg.regenDims).filter(key => cfg.regenDims[key]);
+    try {
+      await window.apiRequest(API + "/generate", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({regen_dimensions: regenDims.length ? regenDims : null}),
+      });
+      setLogs([]);
+      logCursorRef.current = 0;
+      setElapsed(0);
+      connectGenerationStream(0);
+    } catch (error) {
+      setIsRunning(false);
+      setRunStatus("failed");
+      setLogs([`Failed to start pipeline: ${error.message}`]);
+      flash(`Could not start: ${error.message}`);
+    }
+  };
+
+  const cancelGenerate = async () => {
+    try {
+      await window.apiRequest(API + "/generate/cancel", {method: "POST"});
+      appendLogLines("Cancellation requested. Waiting for the pipeline to stop...");
+    } catch (error) {
+      appendLogLines(`Could not cancel pipeline: ${error.message}`);
+      flash(`Cancellation failed: ${error.message}`);
+    }
   };
 
   /* ─── Ctrl+Enter to generate ─── */
@@ -202,27 +488,39 @@ function App() {
   /* ─── Models YAML ─── */
   const saveModels = () => {
     setModelsErr(null);
-    fetch(API + "/models", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({yaml_text: modelsYaml})})
-      .then(r => { if (!r.ok) return r.json().then(data => { throw new Error(data.detail || "Save failed") }); return r.json(); })
-      .then(data => {
+    window.apiRequest(API + "/models", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({yaml_text: modelsYaml})})
+      .then(() => {
         setModelsOrig(modelsYaml); setModelsErr(null); flash("Models saved (in memory)");
       })
       .catch(err => setModelsErr(err.message));
   };
 
   const resetModels = () => {
-    fetch(API + "/models/reset", {method: "POST"})
-      .then(r => r.json())
-      .then(data => {
-        fetch(API + "/models").then(r => r.text()).then(text => { setModelsYaml(text); setModelsOrig(text); setModelsDisk(text); setModelsErr(null); flash("Models reset to disk version"); });
-        fetch(API + "/models/form").then(r => r.json()).then(formData => setModelsForm(formData)).catch(() => {});
-      }).catch(() => {});
+    window.apiRequest(API + "/models/reset", {method: "POST"})
+      .then(() => Promise.all([
+        window.apiRequest(API + "/models"),
+        window.apiRequest(API + "/models/form"),
+      ]))
+      .then(([text, formData]) => {
+        setModelsYaml(text); setModelsOrig(text); setModelsDisk(text); setModelsForm(formData);
+        setModelsErr(null); flash("Models reset to disk version");
+      })
+      .catch(error => setModelsErr(`Reset failed: ${error.message}`));
   };
 
   /* ─── Models form sync ─── */
   const syncModelsForm = useDebounce((vals) => {
-    fetch(API + "/models/form", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({values: vals})})
-      .then(r => r.json()).then(data => { if (data.yaml_text) { setModelsYaml(data.yaml_text); setModelsOrig(data.yaml_text); } }).catch(() => {});
+    window.apiRequest(API + "/models/form", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({values: vals})})
+      .then(data => Promise.all([
+        data,
+        window.apiRequest(API + "/models/form"),
+      ]))
+      .then(([data, refreshedForm]) => {
+        if (data.yaml_text) { setModelsYaml(data.yaml_text); setModelsOrig(data.yaml_text); }
+        setModelsForm(refreshedForm);
+        setModelsErr(null);
+      })
+      .catch(error => setModelsErr(`Visual editor sync failed: ${error.message}`));
   }, 400);
 
   const setModelField = useCallback((key, value) => {
@@ -232,25 +530,39 @@ function App() {
   /* ─── Config YAML ─── */
   const saveCfgYaml = () => {
     setCfgYamlErr(null);
-    fetch(API + "/config/yaml", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({yaml_text: cfgYaml})})
-      .then(r => { if (!r.ok) return r.json().then(data => { throw new Error(data.detail || "Save failed") }); return r.json(); })
+    ++syncSequenceRef.current;
+    setConfigSynced(false);
+    window.apiRequest(API + "/config/yaml", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({yaml_text: cfgYaml})})
       .then(() => { setCfgYamlOrig(cfgYaml); setCfgYamlErr(null); flash("Config applied (in memory)"); reloadFormFromServer(); })
       .catch(err => setCfgYamlErr(err.message));
   };
 
   const resetCfgYaml = () => {
-    fetch(API + "/config/yaml/reset", {method: "POST"})
-      .then(r => r.json())
+    ++syncSequenceRef.current;
+    setConfigSynced(false);
+    window.apiRequest(API + "/config/yaml/reset", {method: "POST"})
       .then(() => { loadCfgYaml(); reloadFormFromServer(); flash("Config reset to disk version"); })
-      .catch(() => {});
+      .catch(error => setCfgYamlErr(`Reset failed: ${error.message}`));
   };
 
   const refreshCfgYamlFromUI = () => {
-    fetch(API + "/config/yaml").then(r => r.text()).then(text => { setCfgYaml(text); setCfgYamlOrig(text); setCfgYamlErr(null); flash("Loaded current UI settings"); }).catch(() => {});
+    window.apiRequest(API + "/config/yaml").then(text => { setCfgYaml(text); setCfgYamlOrig(text); setCfgYamlErr(null); flash("Loaded current UI settings"); }).catch(error => setCfgYamlErr(error.message));
   };
 
   /* ─── Render ─── */
-  if (!cfg) return <div style={{padding: 40, textAlign: "center", color: "var(--muted)"}}>{loadError ? <div style={{color: "#e74c3c"}}>{loadError}</div> : "Loading configuration..."}</div>;
+  if (!cfg) return (
+    <div style={{maxWidth: 560, margin: "80px auto", padding: 28, textAlign: "center", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12}}>
+      {loadError ? <>
+        <div style={{fontSize: 18, fontWeight: 700, color: "var(--err)", marginBottom: 8}}>Configuration unavailable</div>
+        <div style={{fontSize: 13, lineHeight: 1.6, color: "var(--dim)", marginBottom: 18}}>
+          The editor cannot safely generate data because it could not load the server configuration.
+          No fallback settings have been substituted.
+        </div>
+        <div style={{fontSize: 12, color: "var(--err)", background: "var(--errBg)", borderRadius: 7, padding: 10, marginBottom: 18}}>{loadError}</div>
+        <button onClick={loadConfig} style={{padding: "9px 18px", border: "none", borderRadius: 8, background: "var(--accent)", color: "#fff", fontWeight: 700, cursor: "pointer"}}>Retry</button>
+      </> : <div style={{color: "var(--muted)"}}>Loading configuration...</div>}
+    </div>
+  );
   const {errors, warnings} = validate(cfg);
   const showParquet = cfg.format === "parquet" || cfg.format === "deltaparquet";
   const showDelta = cfg.format === "deltaparquet";
@@ -279,7 +591,7 @@ function App() {
         <Section num="2" title="Dates">
           <R3>
             <F label="Start date"><input type="date" style={iS} value={cfg.startDate} onChange={e => s("startDate", e.target.value)} /></F>
-            <F label="End date"><input type="date" style={iS} value={cfg.endDate} onChange={e => s("endDate", e.target.value)} /></F>
+            <F id="config-end-date" label="End date"><input type="date" style={iS} value={cfg.endDate} onChange={e => s("endDate", e.target.value)} /></F>
             <F label="As-of date" help="Optional override for 'today' in lifecycle logic. Leave blank for system date."><input type="date" style={iS} value={cfg.asOfDate || ""} onChange={e => s("asOfDate", e.target.value)} /></F>
           </R3>
           <Box title="Calendar modes">
@@ -299,7 +611,7 @@ function App() {
 
         {/* 3 SCALE */}
         <Section num="3" title="Scale">
-          <F label="Sales rows" help="Total rows to generate in the Sales fact table."><N value={cfg.salesRows} onChange={v => s("salesRows", v)} min={1} step={10000} /></F>
+          <F id="config-sales-rows" label="Sales rows" help="Total rows to generate in the Sales fact table."><N value={cfg.salesRows} onChange={v => s("salesRows", v)} min={1} step={10000} /></F>
           <R4>
             <F label="Customers"><N value={cfg.customers} onChange={v => s("customers", v)} min={1} step={1000} /></F>
             <F label="Products"><N value={cfg.products} onChange={v => s("products", v)} min={1} step={500} /></F>
@@ -320,7 +632,7 @@ function App() {
             ].map(([tabKey, label, flag]) => {
               const active = dimTab === tabKey;
               return (
-                <button key={tabKey} onClick={() => setDimTab(tabKey)}
+                <button type="button" key={tabKey} aria-pressed={active} onClick={() => setDimTab(tabKey)}
                   style={{padding: "5px 0", borderRadius: 6, fontSize: 11.5, fontWeight: active ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .12s", whiteSpace: "nowrap", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, border: active ? "1px solid var(--accent)" : "1px solid var(--border)", background: active ? "var(--glow)" : "transparent", color: active ? "var(--accent)" : "var(--dim)"}}
                   onMouseOver={event => { if (!active) { event.currentTarget.style.background = "var(--alt)"; event.currentTarget.style.color = "var(--text)"; } }}
                   onMouseOut={event => { if (!active) { event.currentTarget.style.background = "transparent"; event.currentTarget.style.color = "var(--dim)"; } }}
@@ -363,7 +675,7 @@ function App() {
               <R3>
                 <F label="Value scale" help="Multiplier on base product prices."><N value={cfg.valueScale} onChange={v => s("valueScale", v)} min={.01} max={10} step={.05} /></F>
                 <F label="Min unit price"><N value={cfg.minPrice} onChange={v => s("minPrice", v)} min={0} step={10} /></F>
-                <F label="Max unit price"><N value={cfg.maxPrice} onChange={v => s("maxPrice", v)} min={1} step={50} /></F>
+                <F id="config-max-price" label="Max unit price"><N value={cfg.maxPrice} onChange={v => s("maxPrice", v)} min={1} step={50} /></F>
               </R3>
               {cfg.maxPrice > cfg.minPrice && <Hint accent>Scaled range: ~{((cfg.minPrice || 0) * (cfg.valueScale || 1)).toLocaleString()} {"\u2192"} {((cfg.maxPrice || 0) * (cfg.valueScale || 1)).toLocaleString()}</Hint>}
             </Box>
@@ -399,9 +711,9 @@ function App() {
                 return <R3 key={type}>
                   <F label={type}>
                     <div style={{display: "flex", gap: 8, alignItems: "center"}}>
-                      <N value={lo} onChange={v => setRange([v, hi])} min={1} step={1} />
+                      <N aria-label={`${type} minimum staff`} value={lo} onChange={v => setRange([v, hi])} min={1} step={1} />
                       <span style={{color: "var(--dim)"}}>to</span>
-                      <N value={hi} onChange={v => setRange([lo, v])} min={1} step={1} />
+                      <N aria-label={`${type} maximum staff`} value={hi} onChange={v => setRange([lo, v])} min={1} step={1} />
                     </div>
                   </F>
                 </R3>;
@@ -451,7 +763,7 @@ function App() {
           {dimTab === "returns" && <div style={{marginTop: 8}}>
             <div style={{marginTop: 4}}><Check checked={cfg.returnsEnabled} onChange={v => s("returnsEnabled", v)} label="Enable returns generation" /></div>
             {cfg.returnsEnabled && <R3>
-              <F label="Return rate" help="Fraction of sales rows returned."><N value={cfg.returnRate} onChange={v => s("returnRate", v)} min={0} max={1} step={.005} /></F>
+              <F id="config-return-rate" label="Return rate" help="Fraction of sales rows returned."><N value={cfg.returnRate} onChange={v => s("returnRate", v)} min={0} max={1} step={.005} /></F>
               <F label="Min days after sale"><N value={cfg.returnMinDays} onChange={v => s("returnMinDays", v)} min={1} step={1} /></F>
               <F label="Max days after sale"><N value={cfg.returnMaxDays} onChange={v => s("returnMaxDays", v)} min={1} step={5} /></F>
             </R3>}
@@ -483,9 +795,9 @@ function App() {
             {cfg.subEnabled && <>
               <div style={{marginTop: 8}}><Check checked={cfg.subGenerateBridge} onChange={v => s("subGenerateBridge", v)} label="Generate bridge table" /></div>
               <R3>
-                <F label="Participation rate"><N value={cfg.subParticipationRate} onChange={v => s("subParticipationRate", v)} min={0} max={1} step={0.05} /></F>
+                <F id="config-sub-participation" label="Participation rate"><N value={cfg.subParticipationRate} onChange={v => s("subParticipationRate", v)} min={0} max={1} step={0.05} /></F>
                 <F label="Avg subscriptions"><N value={cfg.subAvgSubscriptions} onChange={v => s("subAvgSubscriptions", v)} min={1} step={0.5} /></F>
-                <F label="Max subscriptions"><N value={cfg.subMaxSubscriptions} onChange={v => s("subMaxSubscriptions", v)} min={1} step={1} /></F>
+                <F id="config-sub-max" label="Max subscriptions"><N value={cfg.subMaxSubscriptions} onChange={v => s("subMaxSubscriptions", v)} min={1} step={1} /></F>
               </R3>
               <R4>
                 <F label="Churn rate" help="Probability of cancellation."><N value={cfg.subChurnRate} onChange={v => s("subChurnRate", v)} min={0} max={1} step={0.05} /></F>
@@ -580,7 +892,7 @@ function App() {
           <Box title="Pipeline tuning">
             <R3>
               <F label="Chunk size" help="Rows per parallel chunk."><N value={cfg.chunkSize} onChange={v => s("chunkSize", v)} min={10000} step={100000} /></F>
-              <F label="Workers"><div style={{display: "flex", alignItems: "center", gap: 10}}><Check checked={cfg.autoWorkers} onChange={v => { s("autoWorkers", v); if (v) s("workers", 0); }} label="Auto" />{!cfg.autoWorkers && <N value={cfg.workers} onChange={v => s("workers", v)} min={1} max={32} style={{width: 100}} />}</div></F>
+              <F label="Workers"><div style={{display: "flex", alignItems: "center", gap: 10}}><Check checked={cfg.autoWorkers} onChange={v => { s("autoWorkers", v); if (v) s("workers", 0); }} label="Auto" />{!cfg.autoWorkers && <N aria-label="Worker count" value={cfg.workers} onChange={v => s("workers", v)} min={1} max={32} style={{width: 100}} />}</div></F>
               <F label=" " />
             </R3>
           </Box>
@@ -599,17 +911,18 @@ function App() {
 
   return (
     <div className="app-layout" style={{display: "flex", height: "100vh", overflow: "hidden"}}>
-      {toast && <div style={{position: "fixed", top: 16, right: 16, zIndex: 999, background: toast.includes("failed") ? "var(--err)" : "var(--accent)", color: "#fff", padding: "9px 20px", borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: "0 6px 24px var(--shadow)", animation: "slideIn .28s ease"}}>{toast}</div>}
+      <a className="skip-link" href="#main-content">Skip to main content</a>
+      {toast && <div role="status" aria-live="polite" style={{position: "fixed", top: 16, right: 16, zIndex: 999, background: toast.includes("failed") ? "var(--err)" : "var(--accent)", color: "#fff", padding: "9px 20px", borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: "0 6px 24px var(--shadow)", animation: "slideIn .28s ease"}}>{toast}</div>}
 
       {/* ═══ SIDEBAR ═══ */}
-      <div className="app-sidebar" style={{width: sidebarWidth, flexShrink: 0, height: "100vh", background: "var(--surface)", borderRight: sidebarOpen ? "1px solid var(--border)" : "none", overflowY: "auto", overflowX: "hidden", transition: "width .2s", position: "sticky", top: 0}}>
+      <nav id="application-navigation" aria-label="Application navigation" className={`app-sidebar ${sidebarOpen ? "is-open" : "is-closed"}`} aria-hidden={!sidebarOpen} style={{width: sidebarWidth, flexShrink: 0, height: "100vh", background: "var(--surface)", borderRight: sidebarOpen ? "1px solid var(--border)" : "none", overflowY: "auto", overflowX: "hidden", transition: "width .2s", position: "sticky", top: 0}}>
         {sidebarOpen && <div style={{padding: 20, width: 360}}>
         <div style={{display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10}}>
           <div style={{fontSize: 10.5, fontWeight: 700, color: "var(--muted)", letterSpacing: ".09em", textTransform: "uppercase"}}>Presets</div>
-          <div style={{display: "flex", gap: 6}}><ThemeToggle /><button onClick={() => setSidebarOpen(false)} title="Collapse sidebar" style={{width: 32, height: 32, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--dim)", fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center"}} onMouseOver={event => { event.currentTarget.style.borderColor = "var(--accent)"; }} onMouseOut={event => { event.currentTarget.style.borderColor = "var(--border)"; }}>{"\u2039"}</button></div>
+          <div style={{display: "flex", gap: 6}}><ThemeToggle /><button type="button" onClick={closeSidebar} title="Close navigation" aria-label="Close navigation" style={{width: 32, height: 32, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--dim)", fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center"}} onMouseOver={event => { event.currentTarget.style.borderColor = "var(--accent)"; }} onMouseOut={event => { event.currentTarget.style.borderColor = "var(--border)"; }}>{"\u2039"}</button></div>
         </div>
         {Object.keys(presets).length > 0 ? (<>
-          <Sel value={presetBucket} onChange={setPresetBucket} options={Object.keys(presets)} />
+          <Sel aria-label="Sales-row preset group" value={presetBucket} onChange={setPresetBucket} options={Object.keys(presets)} />
           <div style={{marginTop: 8, display: "flex", flexDirection: "column", gap: 4}}>{Object.entries(presets[presetBucket] || {}).map(([name, presetData]) => {
             const isSelected = selectedPreset === name;
             const preset = presetData || {};
@@ -657,11 +970,11 @@ function App() {
         <div style={{borderTop: "1px solid var(--border)", margin: "20px 0"}} />
         <div style={{fontSize: 10.5, fontWeight: 700, color: "var(--muted)", letterSpacing: ".09em", textTransform: "uppercase", marginBottom: 10}}>Configuration</div>
         <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6}}>
-          <button onClick={() => setPage(page === "models" ? "main" : "models")} style={{padding: "9px 10px", borderRadius: 8, border: `1px solid ${page === "models" ? "var(--accent)" : "var(--border)"}`, background: page === "models" ? "var(--glow)" : "var(--surface)", color: page === "models" ? "var(--accent)" : "var(--dim)", fontSize: 12, fontWeight: page === "models" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6}}>
+          <button type="button" aria-pressed={page === "models"} onClick={() => setPage(page === "models" ? "main" : "models")} style={{padding: "9px 10px", borderRadius: 8, border: `1px solid ${page === "models" ? "var(--accent)" : "var(--border)"}`, background: page === "models" ? "var(--glow)" : "var(--surface)", color: page === "models" ? "var(--accent)" : "var(--dim)", fontSize: 12, fontWeight: page === "models" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6}}>
             <span>Models</span>
             {(modelsDirty || modelsApplied) && <span style={{width: 7, height: 7, borderRadius: "50%", background: modelsDirty ? "var(--warn)" : "var(--accent)", flexShrink: 0}} />}
           </button>
-          <button onClick={() => setPage(page === "config" ? "main" : "config")} style={{padding: "9px 10px", borderRadius: 8, border: `1px solid ${page === "config" ? "var(--accent)" : "var(--border)"}`, background: page === "config" ? "var(--glow)" : "var(--surface)", color: page === "config" ? "var(--accent)" : "var(--dim)", fontSize: 12, fontWeight: page === "config" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6}}>
+          <button type="button" aria-pressed={page === "config"} onClick={() => setPage(page === "config" ? "main" : "config")} style={{padding: "9px 10px", borderRadius: 8, border: `1px solid ${page === "config" ? "var(--accent)" : "var(--border)"}`, background: page === "config" ? "var(--glow)" : "var(--surface)", color: page === "config" ? "var(--accent)" : "var(--dim)", fontSize: 12, fontWeight: page === "config" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6}}>
             <span>Config</span>
             {cfgYamlDirty && <span style={{width: 7, height: 7, borderRadius: "50%", background: "var(--warn)", flexShrink: 0}} />}
           </button>
@@ -670,39 +983,43 @@ function App() {
         {page === "config" && <div style={{fontSize: 11, color: "var(--muted)", marginBottom: 4}}>Editing config.yaml in memory</div>}
         <button onClick={() => {
           Promise.all([
-            fetch(API + "/config/yaml").then(r => r.text()),
-            fetch(API + "/models").then(r => r.text()),
+            window.apiRequest(API + "/config/yaml"),
+            window.apiRequest(API + "/models"),
           ]).then(([cfgText, modelsText]) => {
             const downloadFile = (content, name, type) => { const blob = new Blob([content], {type}); const anchor = document.createElement("a"); anchor.href = URL.createObjectURL(blob); anchor.download = name; anchor.click(); URL.revokeObjectURL(anchor.href); };
             downloadFile(cfgText, "config.yaml", "text/yaml");
             setTimeout(() => downloadFile(modelsText, "models.yaml", "text/yaml"), 100);
-          }).catch(() => {});
+          }).catch(error => flash(`Download failed: ${error.message}`));
         }} style={{width: "100%", padding: "7px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--dim)", fontSize: 11.5, cursor: "pointer", fontFamily: "var(--sans)"}}>Download configs</button>
 
         <div style={{borderTop: "1px solid var(--border)", margin: "20px 0"}} />
         <div style={{fontSize: 10.5, fontWeight: 700, color: "var(--muted)", letterSpacing: ".09em", textTransform: "uppercase", marginBottom: 10}}>Data</div>
-        <button onClick={() => setPage(page === "data" ? "main" : "data")} style={{width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${page === "data" ? "var(--accent)" : "var(--border)"}`, background: page === "data" ? "var(--glow)" : "var(--surface)", color: page === "data" ? "var(--accent)" : "var(--dim)", fontSize: 12.5, fontWeight: page === "data" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "space-between"}}>
+        <button type="button" aria-pressed={page === "main"} onClick={() => setPage("main")} style={{width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${page === "main" ? "var(--accent)" : "var(--border)"}`, background: page === "main" ? "var(--glow)" : "var(--surface)", color: page === "main" ? "var(--accent)" : "var(--dim)", fontSize: 12.5, fontWeight: page === "main" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "space-between"}}>
+          <span>Data Generator</span>
+        </button>
+        {page === "main" && <div style={{fontSize: 11, color: "var(--muted)", marginTop: 6}}>Configure and generate a retail dataset</div>}
+        <button type="button" aria-pressed={page === "data"} onClick={() => setPage(page === "data" ? "main" : "data")} style={{width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${page === "data" ? "var(--accent)" : "var(--border)"}`, background: page === "data" ? "var(--glow)" : "var(--surface)", color: page === "data" ? "var(--accent)" : "var(--dim)", fontSize: 12.5, fontWeight: page === "data" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6}}>
           <span>Data Preview</span>
         </button>
         {page === "data" && <div style={{fontSize: 11, color: "var(--muted)", marginTop: 6}}>Browse generated datasets</div>}
-        <button onClick={() => setPage(page === "import" ? "main" : "import")} style={{width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${page === "import" ? "var(--accent)" : "var(--border)"}`, background: page === "import" ? "var(--glow)" : "var(--surface)", color: page === "import" ? "var(--accent)" : "var(--dim)", fontSize: 12.5, fontWeight: page === "import" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6}}>
-          <span>SQL Server Import</span>
+        <button type="button" aria-pressed={page === "import"} onClick={() => setPage(page === "import" ? "main" : "import")} style={{width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${page === "import" ? "var(--accent)" : "var(--border)"}`, background: page === "import" ? "var(--glow)" : "var(--surface)", color: page === "import" ? "var(--accent)" : "var(--dim)", fontSize: 12.5, fontWeight: page === "import" ? 600 : 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .15s", display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6}}>
+          <span>Database Import</span>
         </button>
-        {page === "import" && <div style={{fontSize: 11, color: "var(--muted)", marginTop: 6}}>Import CSV data into SQL Server</div>}
+        {page === "import" && <div style={{fontSize: 11, color: "var(--muted)", marginTop: 6}}>Import CSV data into SQL Server or PostgreSQL</div>}
 
         {/* Regenerate Dimensions */}
         {cfg && (() => {
           const regenCount = cfg.regenAll ? DIMS.length : DIMS.filter(d => cfg.regenDims[d]).length;
           return <>
           <div style={{borderTop: "1px solid var(--border)", margin: "20px 0"}} />
-          <button onClick={() => setRegenOpen(!regenOpen)} style={{width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--dim)", fontSize: 12.5, fontWeight: 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .12s"}}>
+          <button type="button" aria-expanded={regenOpen} aria-controls="regenerate-options" onClick={() => setRegenOpen(!regenOpen)} style={{width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--dim)", fontSize: 12.5, fontWeight: 500, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .12s"}}>
             <span style={{display: "flex", alignItems: "center", gap: 8}}>
               <span style={{fontSize: 10.5, fontWeight: 700, color: "var(--muted)", letterSpacing: ".09em", textTransform: "uppercase"}}>Regenerate</span>
               {regenCount > 0 && <span style={{padding: "1px 7px", borderRadius: 10, background: "var(--accent)", color: "#fff", fontSize: 10, fontWeight: 600}}>{cfg.regenAll ? "all" : regenCount}</span>}
             </span>
             <span style={{fontSize: 11, color: "var(--muted)", transition: "transform .15s", transform: regenOpen ? "rotate(180deg)" : "none"}}>{"\u25BE"}</span>
           </button>
-          {regenOpen && <div style={{padding: "10px 12px", marginTop: 6, borderRadius: 8, border: "1px solid var(--border)", background: "var(--alt)"}}>
+          {regenOpen && <div id="regenerate-options" style={{padding: "10px 12px", marginTop: 6, borderRadius: 8, border: "1px solid var(--border)", background: "var(--alt)"}}>
             <div style={{marginBottom: 8}}><Check checked={cfg.regenAll} onChange={v => s("regenAll", v)} label="All dimensions" /></div>
             <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4}}>{DIMS.map(dim => <Check key={dim} checked={cfg.regenAll || !!cfg.regenDims[dim]} onChange={v => s("regenDims", {...cfg.regenDims, [dim]: v})} label={dim.replace("_", " ")} disabled={cfg.regenAll} />)}</div>
           </div>}
@@ -723,17 +1040,19 @@ function App() {
           ))}
         </>}
         </div>}
-      </div>
+      </nav>
+
+      {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Dismiss navigation overlay" onClick={closeSidebar} />}
 
       {/* Sidebar collapsed toggle */}
-      {!sidebarOpen && <div style={{position: "fixed", top: 12, left: 12, zIndex: 100, display: "flex", gap: 6}}>
-        <button onClick={() => setSidebarOpen(true)} title="Open sidebar" style={{width: 36, height: 36, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--dim)", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px var(--shadow)"}} onMouseOver={event => { event.currentTarget.style.borderColor = "var(--accent)"; }} onMouseOut={event => { event.currentTarget.style.borderColor = "var(--border)"; }}>{"\u203A"}</button>
+      {!sidebarOpen && <div className="sidebar-launcher" style={{position: "fixed", top: 12, left: 12, zIndex: 100, display: "flex", gap: 6}}>
+        <button ref={sidebarToggleRef} type="button" onClick={() => setSidebarOpen(true)} title="Open navigation" aria-label="Open navigation" aria-controls="application-navigation" aria-expanded="false" style={{width: 36, height: 36, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--dim)", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px var(--shadow)"}} onMouseOver={event => { event.currentTarget.style.borderColor = "var(--accent)"; }} onMouseOut={event => { event.currentTarget.style.borderColor = "var(--border)"; }}>{"\u203A"}</button>
         <ThemeToggle />
       </div>}
 
       {/* ═══ MAIN ═══ */}
-      <div className="main-content" style={{flex: 1, overflowY: "auto", display: "flex", flexDirection: "column"}}>
-      <div style={{flex: 1, padding: "28px 40px", paddingBottom: 28, maxWidth: (page === "data" || page === "import") ? "none" : 1120}}>
+      <main id="main-content" ref={mainContentRef} tabIndex="-1" className="main-content" style={{flex: 1, overflowY: "auto", display: "flex", flexDirection: "column"}}>
+      <div className="main-inner" style={{flex: 1, padding: "28px 40px", paddingBottom: 28, maxWidth: (page === "data" || page === "import") ? "none" : 1120}}>
 
         {page === "models" ? (
         /* ═══ MODELS EDITOR PAGE ═══ */
@@ -749,7 +1068,7 @@ function App() {
           {/* Tab bar */}
           <div style={{display: "flex", gap: 0, marginBottom: 18, borderBottom: "2px solid var(--border)"}}>
             {[["visual", "Visual"], ["yaml", "YAML"]].map(([tabKey, label]) => (
-              <button key={tabKey} onClick={() => setModelsTab(tabKey)} style={{padding: "9px 22px", fontSize: 13, fontWeight: modelsTab === tabKey ? 600 : 400, color: modelsTab === tabKey ? "var(--accent)" : "var(--dim)", background: "none", border: "none", borderBottom: modelsTab === tabKey ? "2px solid var(--accent)" : "2px solid transparent", marginBottom: -2, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .12s"}}>{label}</button>
+              <button type="button" key={tabKey} aria-pressed={modelsTab === tabKey} onClick={() => setModelsTab(tabKey)} style={{padding: "9px 22px", fontSize: 13, fontWeight: modelsTab === tabKey ? 600 : 400, color: modelsTab === tabKey ? "var(--accent)" : "var(--dim)", background: "none", border: "none", borderBottom: modelsTab === tabKey ? "2px solid var(--accent)" : "2px solid transparent", marginBottom: -2, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .12s"}}>{label}</button>
             ))}
           </div>
 
@@ -759,6 +1078,24 @@ function App() {
             <div>
             {/* ── Macro Demand ── */}
             <Section num="M" title="Macro Demand" defaultOpen={true}>
+              <F label="Business trend" help="The primary control for revenue shape, customer lifecycle, and seasonality.">
+                <Sel value={mf.trendPreset || "gradual-growth"} onChange={v => sm("trendPreset", v)}
+                  options={TREND_OPTIONS.map(option => option.value)}
+                  labels={TREND_OPTIONS.map(option => option.label)} />
+              </F>
+              <div style={{padding: "10px 12px", margin: "10px 0", borderRadius: 8, background: "var(--alt)", border: "1px solid var(--border)", fontSize: 12, color: "var(--dim)", lineHeight: 1.5}}>
+                <span style={{fontFamily: "var(--mono)", color: "var(--accent)", fontSize: 18, marginRight: 10}}>
+                  {(TREND_OPTIONS.find(option => option.value === (mf.trendPreset || "gradual-growth")) || TREND_OPTIONS[0]).preview}
+                </span>
+                {(TREND_OPTIONS.find(option => option.value === (mf.trendPreset || "gradual-growth")) || TREND_OPTIONS[0]).description}
+              </div>
+              {mf.hasManualDemandFactors && (
+                <div style={{padding: "10px 12px", marginBottom: 10, borderRadius: 8, background: "var(--warnBg)", color: "var(--warn)", fontSize: 11.5, lineHeight: 1.5}}>
+                  Manual year-level factors override the selected trend's default revenue curve.
+                  <button type="button" onClick={() => sm("clearManualDemandFactors", true)} style={{marginLeft: 8, border: "1px solid var(--warn)", borderRadius: 6, background: "transparent", color: "var(--warn)", cursor: "pointer", padding: "3px 7px"}}>Use trend defaults</button>
+                </div>
+              )}
+              <Box title="Advanced: manual year curve">
               <R2>
                 <F label="Mode" help="'once' plays factors once, 'repeat' loops them."><Sel value={mf.demandMode} onChange={v => sm("demandMode", v)} options={["once", "repeat"]} /></F>
                 <F label="Year-level factors" help="Comma-separated demand multipliers per year.">
@@ -773,6 +1110,7 @@ function App() {
                   </div>
                 ); })}
               </div>}
+              </Box>
             </Section>
 
             {/* ── Quantity (basket size) ── */}
@@ -788,7 +1126,7 @@ function App() {
                   {MONTHS.map((month, idx) => (
                     <div key={month} style={{textAlign: "center"}}>
                       <div style={{fontSize: 10, color: "var(--muted)", marginBottom: 3}}>{month}</div>
-                      <input type="number" style={{...iS, padding: "5px 3px", textAlign: "center", fontSize: 12}} value={(mf.qtyMonthly || [])[idx] || 1} min={.5} max={2} step={.01}
+                      <input type="number" aria-label={`${month} quantity seasonality factor`} style={{...iS, padding: "5px 3px", textAlign: "center", fontSize: 12}} value={(mf.qtyMonthly || [])[idx] || 1} min={.5} max={2} step={.01}
                         onChange={e => { const arr = [...(mf.qtyMonthly || Array(12).fill(1))]; arr[idx] = parseFloat(e.target.value) || 1; sm("qtyMonthly", arr); }} />
                     </div>
                   ))}
@@ -804,9 +1142,9 @@ function App() {
                   <F label="Month volatility"><N value={mf.inflationVolatility} onChange={v => sm("inflationVolatility", v)} min={0} max={.1} step={.001} /></F>
                   <F label="Factor clip range">
                     <div style={{display: "flex", gap: 6, alignItems: "center"}}>
-                      <N value={mf.inflationClipMin} onChange={v => sm("inflationClipMin", v)} min={.5} max={2} step={.01} style={{width: 80}} />
+                      <N aria-label="Minimum inflation factor" value={mf.inflationClipMin} onChange={v => sm("inflationClipMin", v)} min={.5} max={2} step={.01} style={{width: 80}} />
                       <span style={{color: "var(--muted)"}}>–</span>
-                      <N value={mf.inflationClipMax} onChange={v => sm("inflationClipMax", v)} min={.5} max={3} step={.01} style={{width: 80}} />
+                      <N aria-label="Maximum inflation factor" value={mf.inflationClipMax} onChange={v => sm("inflationClipMax", v)} min={.5} max={3} step={.01} style={{width: 80}} />
                     </div>
                   </F>
                 </R3>
@@ -850,7 +1188,7 @@ function App() {
                   {Object.entries(mf.brandWeights).map(([brand, weight]) => (
                     <div key={brand} style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 6}}>
                       <span style={{fontSize: 13, width: 160, color: "var(--text)"}}>{brand}</span>
-                      <input type="range" min={0} max={1} step={.01} value={weight} onChange={event => { const newWeights = {...mf.brandWeights, [brand]: parseFloat(event.target.value)}; sm("brandWeights", newWeights); }} style={{flex: 1, accentColor: "var(--accent)"}} />
+                      <input type="range" aria-label={`${brand} popularity weight`} min={0} max={1} step={.01} value={weight} onChange={event => { const newWeights = {...mf.brandWeights, [brand]: parseFloat(event.target.value)}; sm("brandWeights", newWeights); }} style={{flex: 1, accentColor: "var(--accent)"}} />
                       <span style={{fontSize: 12, fontFamily: "var(--mono)", color: "var(--accent)", width: 42, textAlign: "right"}}>{(weight * 100).toFixed(0)}%</span>
                     </div>
                   ))}
@@ -917,8 +1255,44 @@ function App() {
         /* ═══ MAIN CONFIG PAGE ═══ */
         <div>
         <h1 style={{fontSize: 22, fontWeight: 700, letterSpacing: "-.02em"}}>Retail Data Generator</h1>
-        <p style={{fontSize: 13, color: "var(--dim)", marginTop: 3, marginBottom: 22}}>Configure and generate large, realistic retail datasets</p>
+        <p style={{fontSize: 13, color: "var(--dim)", marginTop: 3, marginBottom: 14}}>
+          {setupMode === "quick" ? "Build a useful dataset in five plain-language decisions" : "Configure every available dataset control"}
+        </p>
 
+        <div style={{display: "inline-flex", padding: 3, borderRadius: 9, background: "var(--alt)", border: "1px solid var(--border)", marginBottom: 20}}>
+          {[["quick", "Quick Start"], ["advanced", "Advanced Setup"]].map(([mode, label]) => (
+            <button key={mode} type="button" aria-pressed={setupMode === mode} onClick={() => setSetupMode(mode)} style={{
+              padding: "7px 14px", borderRadius: 7, border: "none",
+              background: setupMode === mode ? "var(--surface)" : "transparent",
+              color: setupMode === mode ? "var(--accent)" : "var(--dim)",
+              fontWeight: setupMode === mode ? 700 : 500, cursor: "pointer",
+              fontFamily: "var(--sans)", boxShadow: setupMode === mode ? "0 1px 4px var(--shadow)" : "none",
+            }}>{label}</button>
+          ))}
+        </div>
+
+        {syncError && (
+          <div role="alert" style={{padding: "10px 14px", marginBottom: 16, borderRadius: 8, background: "var(--errBg)", border: "1px solid rgba(239,68,68,.2)", color: "var(--err)", fontSize: 12.5}}>
+            <strong>Generation paused.</strong> {syncError}
+          </div>
+        )}
+
+        {setupMode === "quick" ? (
+          quickDraft ? <QuickStart
+            draft={quickDraft}
+            onDraftChange={next => { setQuickDraft(next); setGuidedSummary(null); }}
+            onApply={applyGuidedSetup}
+            onGenerate={runGenerate}
+            onCancel={cancelGenerate}
+            appliedSummary={guidedSummary}
+            configSynced={configSynced}
+            syncError={syncError}
+            isRunning={isRunning}
+            runStatus={runStatus}
+            elapsed={elapsed}
+            logs={logs}
+          /> : <div style={{padding: 30, color: "var(--muted)", textAlign: "center"}}>Preparing Quick Start...</div>
+        ) : (<>
         {renderConfigForm()}
 
         {/* 6 GENERATE */}
@@ -933,54 +1307,64 @@ function App() {
             {cfg.wlEnabled && <>{" · "}<Badge>Wishlists</Badge></>}
             {cfg.ccEnabled && <>{" · "}<Badge>Complaints</Badge></>}
           </div>
-          <LogViewer logs={logs} isRunning={isRunning} elapsed={elapsed} />
+          <LogViewer logs={logs} isRunning={isRunning} status={runStatus} elapsed={elapsed} />
         </Section>
+        </>)}
         </div>
         )}
       </div>{/* end inner content padding div */}
 
       {/* ═══ GENERATE BAR (main page only, sticky inside scroll) ═══ */}
-      {page === "main" && cfg && (
-        <div style={{position: "sticky", bottom: 0, zIndex: 90, marginTop: "auto", padding: "0 40px 12px", maxWidth: 1120}}>
+      {page === "main" && cfg && setupMode === "advanced" && (
+        <div className="generation-dock" style={{position: "sticky", bottom: 0, zIndex: 90, marginTop: "auto", padding: "0 40px 12px", maxWidth: 1120}}>
           {/* Validation panel (slides up) */}
           {validationOpen && (errors.length > 0 || warnings.length > 0) && (
-            <div style={{background: "var(--surface)", border: "1px solid var(--border)", borderBottom: "none", borderRadius: "10px 10px 0 0", padding: "12px 20px", maxHeight: 200, overflowY: "auto", animation: "fadeIn .15s ease"}}>
-              {errors.map((errorMsg, idx) => <div key={`e${idx}`} style={{padding: "6px 10px", borderRadius: 6, marginBottom: 4, fontSize: 11.5, display: "flex", alignItems: "flex-start", gap: 6, background: "var(--errBg)", color: "var(--err)"}}><span style={{fontWeight: 700, flexShrink: 0}}>&#10005;</span><span>{errorMsg}</span></div>)}
+            <div id="validation-summary" tabIndex="-1" role="region" aria-labelledby="validation-summary-title" style={{background: "var(--surface)", border: "1px solid var(--border)", borderBottom: "none", borderRadius: "10px 10px 0 0", padding: "12px 20px", maxHeight: 200, overflowY: "auto", animation: "fadeIn .15s ease"}}>
+              <div id="validation-summary-title" style={{fontSize: 12, fontWeight: 700, marginBottom: 7}}>Review configuration issues</div>
+              {errors.map((errorMsg, idx) => {
+                const targetId = validationTarget(errorMsg);
+                return <div key={`e${idx}`} style={{padding: "6px 10px", borderRadius: 6, marginBottom: 4, fontSize: 11.5, display: "flex", alignItems: "flex-start", gap: 6, background: "var(--errBg)", color: "var(--err)"}}>
+                  <span aria-hidden="true" style={{fontWeight: 700, flexShrink: 0}}>&#10005;</span>
+                  {targetId
+                    ? <a href={`#${targetId}`} onClick={event => { event.preventDefault(); revealAndFocus(targetId); }} style={{color: "inherit", textDecoration: "underline", textUnderlineOffset: 2}}>{errorMsg}</a>
+                    : <span>{errorMsg}</span>}
+                </div>;
+              })}
               {warnings.map((warnMsg, idx) => <div key={`w${idx}`} style={{padding: "6px 10px", borderRadius: 6, marginBottom: 4, fontSize: 11.5, display: "flex", alignItems: "flex-start", gap: 6, background: "var(--warnBg)", color: "var(--warn)"}}><span style={{fontWeight: 700, flexShrink: 0}}>&#9888;</span><span>{warnMsg}</span></div>)}
             </div>
           )}
           {/* Bar */}
-          <div style={{background: "var(--surface)", border: "1px solid var(--border)", borderRadius: validationOpen && (errors.length > 0 || warnings.length > 0) ? "0 0 10px 10px" : 10, padding: "10px 20px", display: "flex", alignItems: "center", gap: 14, boxShadow: "0 2px 12px var(--shadow)"}}>
-            <div style={{flex: 1, display: "flex", alignItems: "center", gap: 12, fontSize: 12, color: "var(--dim)", overflow: "hidden"}}>
+          <div className="generation-bar" style={{background: "var(--surface)", border: "1px solid var(--border)", borderRadius: validationOpen && (errors.length > 0 || warnings.length > 0) ? "0 0 10px 10px" : 10, padding: "10px 20px", display: "flex", alignItems: "center", gap: 14, boxShadow: "0 2px 12px var(--shadow)"}}>
+            <div className="generation-meta" style={{flex: 1, display: "flex", alignItems: "center", gap: 12, fontSize: 12, color: "var(--dim)", overflow: "hidden"}}>
               <strong style={{color: "var(--text)", flexShrink: 0}}>{cfg.salesRows.toLocaleString()} rows</strong>
               <span style={{color: "var(--muted)"}}>{cfg.startDate} {"\u2192"} {cfg.endDate}</span>
               {isRunning && <><span style={{width: 7, height: 7, borderRadius: "50%", background: "var(--ok)", animation: "pulse 1.5s infinite", flexShrink: 0}} /><span style={{color: "var(--ok)", fontFamily: "var(--mono)"}}>{elapsed < 60 ? elapsed.toFixed(1) + "s" : Math.floor(elapsed / 60) + "m " + Math.floor(elapsed % 60) + "s"}</span></>}
               {/* Validation badge — clickable */}
               {errors.length > 0 ? (
-                <button onClick={() => setValidationOpen(!validationOpen)} style={{background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4}}>
+                <button type="button" aria-expanded={validationOpen} aria-controls="validation-summary" aria-label={`${errors.length} configuration errors${warnings.length ? ` and ${warnings.length} warnings` : ""}`} onClick={() => setValidationOpen(!validationOpen)} style={{background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4}}>
                   <Badge variant="error">{errors.length} error{errors.length > 1 ? "s" : ""}</Badge>
                   {warnings.length > 0 && <Badge variant="warning">{warnings.length}</Badge>}
                   <span style={{fontSize: 9, color: "var(--muted)", transform: validationOpen ? "rotate(180deg)" : "none", transition: "transform .15s"}}>{"\u25B2"}</span>
                 </button>
               ) : warnings.length > 0 ? (
-                <button onClick={() => setValidationOpen(!validationOpen)} style={{background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4}}>
+                <button type="button" aria-expanded={validationOpen} aria-controls="validation-summary" aria-label={`${warnings.length} configuration warnings`} onClick={() => setValidationOpen(!validationOpen)} style={{background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 4}}>
                   <Badge variant="warning">{warnings.length} warning{warnings.length > 1 ? "s" : ""}</Badge>
                   <span style={{fontSize: 9, color: "var(--muted)", transform: validationOpen ? "rotate(180deg)" : "none", transition: "transform .15s"}}>{"\u25B2"}</span>
                 </button>
               ) : (
                 <span style={{display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--ok)"}}>{"\u2713"} Valid</span>
               )}
-              <span style={{fontSize: 10.5, color: "var(--muted)", marginLeft: "auto", flexShrink: 0}}>Ctrl+Enter</span>
+              <span className="keyboard-shortcut" style={{fontSize: 10.5, color: "var(--muted)", marginLeft: "auto", flexShrink: 0}}>Ctrl+Enter</span>
             </div>
             {isRunning ?
-              <button onClick={cancelGenerate} style={{padding: "8px 20px", borderRadius: 8, border: "1px solid var(--err)", background: "var(--errBg)", color: "var(--err)", fontWeight: 600, fontSize: 12.5, cursor: "pointer", fontFamily: "var(--sans)", whiteSpace: "nowrap"}}>Cancel</button>
+              <button type="button" className="generation-action" onClick={cancelGenerate} style={{padding: "8px 20px", borderRadius: 8, border: "1px solid var(--err)", background: "var(--errBg)", color: "var(--err)", fontWeight: 600, fontSize: 12.5, cursor: "pointer", fontFamily: "var(--sans)", whiteSpace: "nowrap"}}>Cancel generation</button>
             :
-              <button onClick={runGenerate} disabled={errors.length > 0} style={{padding: "8px 24px", borderRadius: 8, border: "none", fontSize: 13, fontWeight: 700, cursor: errors.length > 0 ? "not-allowed" : "pointer", fontFamily: "var(--sans)", background: errors.length > 0 ? "var(--alt)" : "var(--accent)", color: errors.length > 0 ? "var(--muted)" : "#fff", whiteSpace: "nowrap", boxShadow: errors.length === 0 ? "0 2px 8px rgba(79,91,213,.2)" : "none"}}>Generate</button>
+              <button type="button" className="generation-action" onClick={runGenerate} disabled={errors.length > 0 || !configSynced} title={!configSynced ? (syncError || "Waiting for settings to sync with the server") : ""} style={{padding: "8px 24px", borderRadius: 8, border: "none", fontSize: 13, fontWeight: 700, cursor: errors.length > 0 || !configSynced ? "not-allowed" : "pointer", fontFamily: "var(--sans)", background: errors.length > 0 || !configSynced ? "var(--alt)" : "var(--accent)", color: errors.length > 0 || !configSynced ? "var(--muted)" : "#fff", whiteSpace: "nowrap", boxShadow: errors.length === 0 && configSynced ? "0 2px 8px rgba(79,91,213,.2)" : "none"}}>{configSynced ? "Generate" : syncError ? "Sync failed" : "Syncing..."}</button>
             }
           </div>
         </div>
       )}
-      </div>{/* end main-content */}
+      </main>{/* end main-content */}
     </div>
   );
 }

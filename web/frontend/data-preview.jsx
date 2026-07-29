@@ -12,13 +12,13 @@ function DataPreview({ onBack }) {
   const [offset, setOffset] = useState(0);
   const [pageSize] = useState(100);
   const [datasetExpanded, setDatasetExpanded] = useState(true);
+  const [requestError, setRequestError] = useState(null);
 
   /* Load datasets on mount */
   useEffect(() => {
-    fetch(API + "/datasets")
-      .then(r => r.json())
-      .then(data => { setDatasets(data.datasets || []); setLoading(false); })
-      .catch(() => setLoading(false));
+    window.apiRequest(API + "/datasets")
+      .then(data => { setDatasets(data.datasets || []); setRequestError(null); setLoading(false); })
+      .catch(error => { setRequestError(error.message); setLoading(false); });
   }, []);
 
   /* Load tables when a dataset is selected */
@@ -27,20 +27,27 @@ function DataPreview({ onBack }) {
     setTablesLoading(true);
     setSelectedTable(null);
     setPreview(null);
-    fetch(API + "/datasets/" + encodeURIComponent(selectedDataset.name) + "/tables")
-      .then(r => r.json())
-      .then(data => { setTables(data.tables || []); setTablesLoading(false); })
-      .catch(() => setTablesLoading(false));
+    window.apiRequest(API + "/datasets/" + encodeURIComponent(selectedDataset.name) + "/tables")
+      .then(data => { setTables(data.tables || []); setRequestError(null); setTablesLoading(false); })
+      .catch(error => { setRequestError(error.message); setTablesLoading(false); });
   }, [selectedDataset]);
 
   /* Load preview when table or offset changes */
   useEffect(() => {
     if (!selectedDataset || !selectedTable) return;
+    const controller = new AbortController();
     setPreviewLoading(true);
-    fetch(API + "/datasets/" + encodeURIComponent(selectedDataset.name) + "/tables/" + encodeURIComponent(selectedTable.name) + "/preview?offset=" + offset + "&limit=" + pageSize)
-      .then(r => r.json())
-      .then(data => { setPreview(data); setPreviewLoading(false); })
-      .catch(() => setPreviewLoading(false));
+    window.apiRequest(
+      API + "/datasets/" + encodeURIComponent(selectedDataset.name) + "/tables/" + encodeURIComponent(selectedTable.name) + "/preview?offset=" + offset + "&limit=" + pageSize,
+      {signal: controller.signal},
+    )
+      .then(data => { setPreview(data); setRequestError(null); setPreviewLoading(false); })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        setRequestError(error.message);
+        setPreviewLoading(false);
+      });
+    return () => controller.abort();
   }, [selectedDataset, selectedTable, offset, pageSize]);
 
   const selectTable = (table) => {
@@ -84,6 +91,8 @@ function DataPreview({ onBack }) {
       <h1 style={{fontSize: 22, fontWeight: 700, letterSpacing: "-.02em", marginBottom: 4}}>Data Preview</h1>
       <p style={{fontSize: 13, color: "var(--dim)", marginTop: 3, marginBottom: 22}}>Browse generated datasets and preview table contents</p>
 
+      {requestError && <div role="alert" style={{padding: "10px 14px", marginBottom: 16, borderRadius: 8, background: "var(--errBg)", border: "1px solid rgba(239,68,68,.15)", fontSize: 12.5, color: "var(--err)"}}>{requestError}</div>}
+
       {loading ? (
         <div style={{padding: 40, textAlign: "center", color: "var(--muted)"}}>Loading datasets...</div>
       ) : datasets.length === 0 ? (
@@ -91,7 +100,7 @@ function DataPreview({ onBack }) {
       ) : (
         <>
           {/* ── Dataset selector ── */}
-          <div style={{marginBottom: 16}}>
+          <div className="dataset-scroll" style={{marginBottom: 16}}>
             <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 8}}>
               {selectedDataset && !datasetExpanded && (
                 <button onClick={() => setDatasetExpanded(true)} style={{padding: "4px 12px", borderRadius: 6, border: "1px solid var(--accent)", background: "var(--glow)", color: "var(--accent)", fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "var(--sans)", transition: "all .12s"}}
@@ -111,7 +120,7 @@ function DataPreview({ onBack }) {
             </div>
 
             {selectedDataset && !datasetExpanded ? (
-              <div style={{display: "grid", gridTemplateColumns: "90px 80px 1fr 90px 70px 70px", gap: 8, alignItems: "center", padding: "9px 14px", borderRadius: 8, border: "1px solid var(--accent)", background: "var(--glow)", fontFamily: "var(--sans)"}}>
+              <div className="dataset-grid" style={{display: "grid", gridTemplateColumns: "90px 80px 1fr 90px 70px 70px", gap: 8, alignItems: "center", padding: "9px 14px", borderRadius: 8, border: "1px solid var(--accent)", background: "var(--glow)", fontFamily: "var(--sans)"}}>
                 <span style={{fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)"}}>{selectedDataset.date}</span>
                 <span style={{fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--mono)"}}>{selectedDataset.time}</span>
                 <span style={{fontSize: 12.5, fontWeight: 600, color: "var(--accent)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{selectedDataset.description}</span>
@@ -121,14 +130,14 @@ function DataPreview({ onBack }) {
               </div>
             ) : (
               <>
-                <div style={{display: "grid", gridTemplateColumns: "90px 80px 1fr 90px 70px 70px", gap: 8, padding: "6px 14px", fontSize: 10, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em"}}>
+                <div className="dataset-grid" style={{display: "grid", gridTemplateColumns: "90px 80px 1fr 90px 70px 70px", gap: 8, padding: "6px 14px", fontSize: 10, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em"}}>
                   <span>Date</span><span>Time</span><span>Dataset</span><span>Format</span><span>Tables</span><span>Size</span>
                 </div>
-                <div style={{display: "flex", flexDirection: "column", gap: 4, maxHeight: 300, overflowY: "auto"}}>
+                <div className="dataset-list" style={{display: "flex", flexDirection: "column", gap: 4}}>
                   {datasets.map(ds => {
                     const isSelected = selectedDataset && selectedDataset.name === ds.name;
                     return (
-                      <button key={ds.name} onClick={() => { setSelectedDataset(ds); setDatasetExpanded(false); }} style={{
+                      <button type="button" className="dataset-grid" aria-pressed={Boolean(isSelected)} key={ds.name} onClick={() => { setSelectedDataset(ds); setDatasetExpanded(false); }} style={{
                         display: "grid", gridTemplateColumns: "90px 80px 1fr 90px 70px 70px", gap: 8, alignItems: "center",
                         width: "100%", padding: "9px 14px", borderRadius: 8,
                         cursor: "pointer", border: `1px solid ${isSelected ? "var(--accent)" : "var(--border)"}`,
@@ -150,7 +159,7 @@ function DataPreview({ onBack }) {
           </div>
 
           {/* ── Table pills ── */}
-          {selectedDataset && !tablesLoading && tables.length > 0 && (
+          {selectedDataset && !datasetExpanded && !tablesLoading && tables.length > 0 && (
             <div style={{marginBottom: 16}}>
               {dimTables.length > 0 && (
                 <div style={{marginBottom: 8}}>
@@ -182,10 +191,10 @@ function DataPreview({ onBack }) {
               )}
             </div>
           )}
-          {tablesLoading && <div style={{padding: 12, color: "var(--muted)", fontSize: 12}}>Loading tables...</div>}
+          {!datasetExpanded && tablesLoading && <div style={{padding: 12, color: "var(--muted)", fontSize: 12}}>Loading tables...</div>}
 
           {/* ── Preview pane (full width) ── */}
-          {selectedDataset && selectedTable && (
+          {selectedDataset && !datasetExpanded && selectedTable && (
             <div>
               {/* Table header */}
               <div style={{display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10}}>
@@ -240,7 +249,7 @@ function DataPreview({ onBack }) {
                         <button onClick={() => setOffset(Math.max(0, offset - pageSize))} disabled={offset === 0} style={pgBtn(offset === 0)}>Prev</button>
                       </div>
                       <span style={{fontSize: 12, color: "var(--dim)", fontFamily: "var(--mono)"}}>
-                        Page {currentPage} of {totalPages.toLocaleString()} {previewLoading && <span style={{color: "var(--muted)"}}>loading...</span>}
+                        Page {currentPage.toLocaleString()} of {totalPages.toLocaleString()} {previewLoading && <span style={{color: "var(--muted)"}}>loading...</span>}
                       </span>
                       <div style={{display: "flex", gap: 6}}>
                         <button onClick={() => setOffset(offset + pageSize)} disabled={atEnd} style={pgBtn(atEnd)}>Next</button>
@@ -253,7 +262,7 @@ function DataPreview({ onBack }) {
             </div>
           )}
 
-          {selectedDataset && !selectedTable && !tablesLoading && tables.length > 0 && (
+          {selectedDataset && !datasetExpanded && !selectedTable && !tablesLoading && tables.length > 0 && (
             <div style={{padding: 40, textAlign: "center", color: "var(--muted)", fontSize: 13}}>Select a table above to preview its data</div>
           )}
         </>

@@ -47,8 +47,12 @@ function prettyKey(k){
 }
 
 function YamlEditor({value,onChange,filename,dirty,applied=false,error,onApply,onReset,onRefresh}){
+  const generatedId=useId().replace(/:/g,"");
+  const editorLabelId=`yaml-editor-label-${generatedId}`;
+  const editorHelpId=`yaml-editor-help-${generatedId}`;
   const containerRef=useRef(null);
   const cmRef=useRef(null);
+  const editorExitRef=useRef(null);
   const onChangeRef=useRef(onChange);
   const onApplyRef=useRef(onApply);
   const suppressRef=useRef(false);
@@ -83,8 +87,13 @@ function YamlEditor({value,onChange,filename,dirty,applied=false,error,onApply,o
         "Cmd-S":(cm)=>{if(onApplyRef.current)onApplyRef.current();},
         "Ctrl-F":"findPersistent",
         "Cmd-F":"findPersistent",
+        "Esc":()=>editorExitRef.current?.focus(),
       },
     });
+    const inputField=cm.getInputField();
+    inputField.id=`yaml-editor-input-${generatedId}`;
+    inputField.setAttribute("aria-label",`${filename} YAML editor`);
+    inputField.setAttribute("aria-describedby",editorHelpId);
     cm.on("change",()=>{
       if(suppressRef.current)return;
       onChangeRef.current(cm.getValue());
@@ -166,20 +175,20 @@ function YamlEditor({value,onChange,filename,dirty,applied=false,error,onApply,o
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 4px 0 0",background:"var(--alt)",borderBottom:"1px solid var(--border)",flexWrap:"wrap",gap:6}}>
         <div style={{display:"flex",alignItems:"center",gap:0}}>
           {/* File tab */}
-          <div style={{display:"flex",alignItems:"center",gap:7,padding:"10px 16px",background:"var(--surface)",borderRight:"1px solid var(--border)",fontSize:12.5,fontWeight:600,color:"var(--text)",fontFamily:"var(--mono)"}}>
+          <div id={editorLabelId} style={{display:"flex",alignItems:"center",gap:7,padding:"10px 16px",background:"var(--surface)",borderRight:"1px solid var(--border)",fontSize:12.5,fontWeight:600,color:"var(--text)",fontFamily:"var(--mono)"}}>
             <span style={{width:14,height:14,borderRadius:3,background:"var(--accent)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:"#fff",fontWeight:700}}>Y</span>
             {filename}
           </div>
           {/* Status pill */}
-          <div style={{display:"flex",alignItems:"center",gap:5,padding:"0 14px",fontSize:11,fontWeight:600,color:statusColor}}>
+          <div role="status" aria-live="polite" style={{display:"flex",alignItems:"center",gap:5,padding:"0 14px",fontSize:11,fontWeight:600,color:statusColor}}>
             <span style={{width:6,height:6,borderRadius:"50%",background:statusColor}} />
             {statusText}
           </div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 8px"}}>
           {onRefresh&&<TBtn style={tBtn} onClick={onRefresh}>Refresh from UI</TBtn>}
-          <TBtn style={tBtn} onClick={onReset}>Reset to disk</TBtn>
-          <button onClick={onApply} disabled={!dirty}
+          <TBtn buttonRef={editorExitRef} style={tBtn} onClick={onReset}>Reset to disk</TBtn>
+          <button type="button" onClick={onApply} disabled={!dirty}
             style={{...tBtn,
               background:dirty?"var(--accent)":"transparent",
               color:dirty?"#fff":"var(--muted)",
@@ -198,7 +207,7 @@ function YamlEditor({value,onChange,filename,dirty,applied=false,error,onApply,o
           {sections.map(sec=>{
             const active=activeSection===sec.name;
             return(
-              <button key={sec.name} onClick={()=>jumpTo(sec)}
+              <button type="button" key={sec.name} aria-pressed={active} onClick={()=>jumpTo(sec)}
                 style={{
                   padding:"3px 10px",borderRadius:5,fontSize:11,fontWeight:active?600:500,
                   cursor:"pointer",fontFamily:"var(--sans)",transition:"all .12s",whiteSpace:"nowrap",
@@ -217,24 +226,24 @@ function YamlEditor({value,onChange,filename,dirty,applied=false,error,onApply,o
       )}
 
       {/* ─── CodeMirror container ─── */}
-      <div ref={containerRef} style={{minHeight:340,maxHeight:700,overflow:"auto"}} />
+      <div ref={containerRef} role="group" aria-labelledby={editorLabelId} style={{minHeight:340,maxHeight:700,overflow:"auto"}} />
 
       {/* ─── Footer ─── */}
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 16px",background:"var(--alt)",borderTop:"1px solid var(--border)",fontSize:11,color:"var(--muted)",fontFamily:"var(--mono)"}}>
-        <span>YAML{dirty?" \u2022 modified":""} {dirty&&"\u2014 Ctrl+S to apply"}</span>
+        <span id={editorHelpId}>YAML{dirty?" \u2022 modified":""} {"\u2014"} Esc exits editor {"\u00B7"} Ctrl+S applies</span>
         <span>{lineCount} lines</span>
       </div>
 
       {/* ─── Parse error banner ─── */}
-      {error&&<div style={{padding:"9px 14px",fontSize:12.5,background:"var(--errBg)",color:"var(--err)",borderTop:"1px solid rgba(220,38,38,.15)"}}><strong>Parse error:</strong> {error}</div>}
+      {error&&<div role="alert" style={{padding:"9px 14px",fontSize:12.5,background:"var(--errBg)",color:"var(--err)",borderTop:"1px solid rgba(220,38,38,.15)"}}><strong>Parse error:</strong> {error}</div>}
     </div>
   );
 }
 
 /* Toolbar button with hover */
-function TBtn({style:sx,onClick,children}){
+function TBtn({style:sx,onClick,children,buttonRef}){
   return(
-    <button onClick={onClick}
+    <button ref={buttonRef} type="button" onClick={onClick}
       style={{...sx,background:"transparent",color:"var(--dim)"}}
       onMouseOver={e=>{e.currentTarget.style.background="var(--alt)";e.currentTarget.style.color="var(--text)";}}
       onMouseOut={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color="var(--dim)";}}>
