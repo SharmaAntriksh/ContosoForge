@@ -112,10 +112,11 @@ def test_committed_production_frontend_is_self_contained_and_current():
         assert (DIST / asset).is_file()
         assert f"/static/{asset}" in index
 
-    current_hashes = {
-        name: hashlib.sha256((FRONTEND / name).read_bytes()).hexdigest()
-        for name in manifest["sources"]
-    }
+    current_hashes = {}
+    for name in manifest["sources"]:
+        source = (FRONTEND / name).read_text(encoding="utf-8")
+        normalized = source.replace("\r\n", "\n").encode("utf-8")
+        current_hashes[name] = hashlib.sha256(normalized).hexdigest()
     assert current_hashes == manifest["sources"]
 
     digest = hashlib.sha256()

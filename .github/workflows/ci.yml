@@ -27,18 +27,19 @@ jobs:
           # Matches .python-version and requires-python (>=3.13).
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: uv.lock
 
-      - name: Install package + dev dependencies
+      - name: Install locked package + dev dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install uv
+          uv sync --locked --extra dev
 
       - name: Lint (ruff) — advisory, non-blocking
         # The repo has a pre-existing ruff backlog, so this surfaces issues
         # without blocking merges. Remove continue-on-error once it's clean.
-        run: ruff check .
+        run: uv run --locked ruff check .
         continue-on-error: true
 
       - name: Run tests
-        run: pytest
+        run: uv run --locked pytest

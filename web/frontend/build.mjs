@@ -31,7 +31,7 @@ const trackedSources = [
 ];
 
 function read(relativePath) {
-  return readFileSync(join(frontendDir, relativePath), "utf8");
+  return readFileSync(join(frontendDir, relativePath), "utf8").replaceAll("\r\n", "\n");
 }
 
 function sourceHashes() {

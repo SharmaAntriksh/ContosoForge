@@ -561,7 +561,15 @@ class TestPipelineRunnerIsolation:
         assert command[-3:] == ["--clean", "--only", "dimensions"]
         assert kwargs["cwd"] == str(_state.REPO_ROOT)
         assert kwargs.get("shell", False) is False
-        assert kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+        if sys.platform == "win32":
+            assert (
+                kwargs["creationflags"]
+                == subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+            assert "start_new_session" not in kwargs
+        else:
+            assert kwargs["start_new_session"] is True
+            assert "creationflags" not in kwargs
         assert job["logs"] == ["starting", "finished"]
         assert job["status"] == "done"
         assert job["exit_code"] == 0
@@ -724,11 +732,19 @@ class TestPipelineRunnerIsolation:
 
 
 class TestProcessTreeControl:
-    def test_windows_launch_uses_a_new_process_group(self):
-        assert _process_control.process_group_popen_kwargs() == {
-            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-        }
+    def test_launch_isolates_the_child_in_a_platform_process_group(self):
+        kwargs = _process_control.process_group_popen_kwargs()
+        if sys.platform == "win32":
+            assert kwargs == {
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+            }
+        else:
+            assert kwargs == {"start_new_session": True}
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="CTRL_BREAK_EVENT is a Windows-only process-group signal",
+    )
     def test_graceful_windows_stop_sends_ctrl_break(self):
         process = _FakePipelineProcess(running=True)
 
@@ -736,9 +752,29 @@ class TestProcessTreeControl:
         assert process.signals == [signal.CTRL_BREAK_EVENT]
         assert not process.terminate_called
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process-group signaling is unavailable on Windows",
+    )
+    def test_graceful_posix_stop_sends_sigterm_to_process_group(
+        self, monkeypatch,
+    ):
+        process = _FakePipelineProcess(running=True)
+        calls = []
+        monkeypatch.setattr(
+            _process_control.os,
+            "killpg",
+            lambda pid, sent_signal: calls.append((pid, sent_signal)),
+        )
+
+        assert _process_control.signal_process_tree(process)
+        assert calls == [(process.pid, signal.SIGTERM)]
+        assert not process.terminate_called
+
     def test_stop_request_arms_daemon_force_kill_timer(self, monkeypatch):
         process = _FakePipelineProcess(running=True)
         timers = []
+        signals = []
 
         class FakeTimer:
             def __init__(self, interval, callback):
@@ -756,6 +792,11 @@ class TestProcessTreeControl:
                 self.cancelled = True
 
         monkeypatch.setattr(_process_control.threading, "Timer", FakeTimer)
+        monkeypatch.setattr(
+            _process_control,
+            "signal_process_tree",
+            lambda proc: signals.append(proc) or True,
+        )
         hard_kills = []
         monkeypatch.setattr(
             _process_control,
@@ -765,7 +806,7 @@ class TestProcessTreeControl:
 
         timer = _process_control.request_process_tree_stop(process, grace=2.5)
 
-        assert process.signals == [signal.CTRL_BREAK_EVENT]
+        assert signals == [process]
         assert timer is timers[0]
         assert timer.interval == 2.5
         assert timer.daemon
@@ -773,6 +814,10 @@ class TestProcessTreeControl:
         timer.callback()
         assert hard_kills == [process]
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="taskkill and CREATE_NO_WINDOW are Windows-only",
+    )
     def test_windows_hard_stop_uses_taskkill_tree(self, monkeypatch):
         process = _FakePipelineProcess(running=True)
         calls = []
@@ -796,6 +841,31 @@ class TestProcessTreeControl:
         assert kwargs["check"] is False
         assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process-group signaling is unavailable on Windows",
+    )
+    def test_posix_hard_stop_sends_sigkill_to_process_group(
+        self, monkeypatch,
+    ):
+        process = _FakePipelineProcess(running=True)
+        calls = []
+
+        def fake_killpg(pid, sent_signal):
+            calls.append((pid, sent_signal))
+            process.running = False
+            process.returncode = -9
+
+        monkeypatch.setattr(_process_control.os, "killpg", fake_killpg)
+
+        assert _process_control.force_kill_process_tree(process)
+        assert calls == [(process.pid, signal.SIGKILL)]
+        assert not process.kill_called
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="Windows Job Objects are unavailable on other platforms",
+    )
     def test_windows_job_object_is_attached_terminated_and_released(
         self, monkeypatch,
     ):
