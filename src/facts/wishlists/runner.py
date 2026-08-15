@@ -30,7 +30,11 @@ from src.facts.wishlists.constants import (
     parse_global_dates,
     read_cfg,
 )
-from src.facts.wishlists.scd2 import build_scd2_price_lookup, resolve_scd2_prices
+from src.facts.wishlists.scd2 import (
+    build_scd2_price_lookup,
+    resolve_scd2_prices,
+    resolve_scd2_product_keys,
+)
 from src.facts.wishlists.selection import (
     build_subcategory_pool,
     generate_wishlist_items,
@@ -136,27 +140,118 @@ def _build_product_weights(
 def _build_purchased_map(
     purchased_pairs: pd.DataFrame,
     prod_key_to_idx: pd.Series,
-) -> Dict[int, List[int]]:
-    """Build {customer_key: [product_indices]} from accumulated sales data."""
-    cust_purchased: Dict[int, List[int]] = {}
+) -> Dict[int, List[Tuple[int, int]]]:
+    """Build stable product-index/first-purchase anchors by customer."""
+    cust_purchased: Dict[int, List[Tuple[int, int]]] = {}
     if len(purchased_pairs) == 0:
         return cust_purchased
 
     _pp_ckeys = purchased_pairs["CustomerKey"].to_numpy().astype(np.int64)
     _pp_pkeys = purchased_pairs["ProductKey"].to_numpy().astype(np.int64)
+    _pp_purchase_ns = pd.to_datetime(
+        purchased_pairs["FirstPurchaseDate"], errors="coerce",
+    ).to_numpy(dtype="datetime64[ns]").view(np.int64)
     _pp_idx_series = prod_key_to_idx.reindex(_pp_pkeys)
     _pp_valid = _pp_idx_series.notna()
     _pp_ckeys_valid = _pp_ckeys[_pp_valid.to_numpy()]
     _pp_idxs_valid = _pp_idx_series[_pp_valid].to_numpy(dtype=np.int64)
+    _pp_dates_valid = _pp_purchase_ns[_pp_valid.to_numpy()]
     if len(_pp_ckeys_valid) > 0:
-        _sort_order = np.argsort(_pp_ckeys_valid)
+        _sort_order = np.lexsort((
+            _pp_dates_valid,
+            _pp_idxs_valid,
+            _pp_ckeys_valid,
+        ))
         _sorted_ckeys = _pp_ckeys_valid[_sort_order]
         _sorted_idxs = _pp_idxs_valid[_sort_order]
+        _sorted_dates = _pp_dates_valid[_sort_order]
         _uniq_ckeys, _split_pos = np.unique(_sorted_ckeys, return_index=True)
         _split_groups = np.split(_sorted_idxs, _split_pos[1:])
-        for _ck, _idxs in zip(_uniq_ckeys, _split_groups):
-            cust_purchased[int(_ck)] = _idxs.tolist()
+        _date_groups = np.split(_sorted_dates, _split_pos[1:])
+        for _ck, _idxs, _dates in zip(
+            _uniq_ckeys, _split_groups, _date_groups,
+        ):
+            cust_purchased[int(_ck)] = [
+                (int(product_idx), int(purchase_ns))
+                for product_idx, purchase_ns in zip(_idxs, _dates)
+            ]
     return cust_purchased
+
+
+def _calibrate_conversion_probability(
+    participant_keys: np.ndarray,
+    items_per: np.ndarray,
+    purchased_map: Dict[int, List[Tuple[int, int]]],
+    target_rate: float,
+) -> float:
+    """Convert a global dated-conversion target to an eligible-row probability.
+
+    Customers without a purchase anchor cannot produce an intentional
+    conversion. Raising the probability only among eligible rows keeps the
+    configured rate meaningful at the whole-wishlist level.
+    """
+    total_rows = int(items_per.sum())
+    if total_rows <= 0:
+        return 0.0
+    # A customer can intentionally convert at most one wishlist row per
+    # distinct purchased product because wishlist (customer, product) pairs
+    # are unique.  Count that real capacity instead of treating every row for
+    # a purchaser as eligible; the latter systematically undershoots the
+    # configured global rate for light buyers.
+    eligible_rows = sum(
+        min(int(count), len(purchased_map.get(int(key), ())))
+        for key, count in zip(participant_keys, items_per)
+    )
+    if eligible_rows <= 0:
+        return 0.0
+    return float(np.clip(float(target_rate) * total_rows / eligible_rows, 0.0, 1.0))
+
+
+def _select_participant_indices(
+    rng: np.random.Generator,
+    cust_keys: np.ndarray,
+    n_participants: int,
+    purchased_map: Dict[int, List[Tuple[int, int]]],
+    target_rate: float,
+) -> np.ndarray:
+    """Select participants with enough purchase anchors to realize the target."""
+    all_indices = np.arange(len(cust_keys), dtype=np.int64)
+    purchaser_mask = np.array([
+        bool(purchased_map.get(int(key))) for key in cust_keys
+    ])
+    purchaser_indices = all_indices[purchaser_mask]
+    # Prefer customers with purchase anchors whenever conversion is requested.
+    # Item-level conversion also requires enough distinct purchased products,
+    # so using the full available purchaser pool avoids an artificial ceiling.
+    desired_share = 1.0 if float(target_rate) > 0.0 else 0.0
+    n_purchasers = min(
+        len(purchaser_indices),
+        n_participants,
+        int(np.ceil(n_participants * desired_share)),
+    )
+    if n_purchasers:
+        # Prefer customers with more distinct purchase anchors so the chosen
+        # population has enough unique products to realize the item-level
+        # conversion target.  Seeded jitter randomizes ties deterministically.
+        purchase_counts = np.array([
+            len(purchased_map[int(cust_keys[idx])])
+            for idx in purchaser_indices
+        ], dtype=np.int64)
+        tie_breaker = rng.random(len(purchaser_indices))
+        order = np.lexsort((tie_breaker, -purchase_counts))
+        selected_purchasers = purchaser_indices[order[:n_purchasers]]
+    else:
+        selected_purchasers = np.empty(0, dtype=np.int64)
+    remaining_pool = np.setdiff1d(
+        all_indices, selected_purchasers, assume_unique=False,
+    )
+    n_remaining = n_participants - n_purchasers
+    selected_remaining = rng.choice(
+        remaining_pool, size=n_remaining, replace=False,
+    )
+    selected = np.concatenate([selected_purchasers, selected_remaining])
+    selected.sort()
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +267,9 @@ def _write_bridge(
     g_start: pd.Timestamp,
     g_end: pd.Timestamp,
     out_path: Path,
-    scd2_lookup: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    scd2_lookup: Optional[Tuple[np.ndarray, ...]] = None,
+    product_key_to_idx: Optional[pd.Series] = None,
+    product_start_ns: Optional[np.ndarray] = None,
 ) -> int:
     rng = np.random.default_rng(c.seed)
     schema = bridge_schema()
@@ -184,22 +281,26 @@ def _write_bridge(
     n_customers = len(cust_keys)
     n_participants = max(1, int(round(n_customers * c.participation_rate)))
 
-    participant_idx = rng.choice(n_customers, size=n_participants, replace=False)
-    participant_idx.sort()
-
     prod_keys = products["ProductKey"].to_numpy().astype(np.int64)
     prod_prices = products["ListPrice"].to_numpy().astype(np.float64)
     prod_subcat = products["SubcategoryKey"].to_numpy().astype(np.int64)
     n_products = len(prod_keys)
 
-    prod_key_to_idx = pd.Series(np.arange(n_products), index=prod_keys)
-    cust_purchased = _build_purchased_map(purchased_pairs, prod_key_to_idx)
+    if product_key_to_idx is None:
+        product_key_to_idx = pd.Series(np.arange(n_products), index=prod_keys)
+    cust_purchased = _build_purchased_map(purchased_pairs, product_key_to_idx)
+    participant_idx = _select_participant_indices(
+        rng, cust_keys, n_participants, cust_purchased, c.conversion_rate,
+    )
 
     pool, global_cdf = build_subcategory_pool(prod_subcat, product_weights)
 
     items_per = rng.poisson(lam=c.avg_items, size=n_participants)
     items_per = np.clip(items_per, 1, min(c.max_items, n_products))
     total_rows = int(items_per.sum())
+    effective_conversion_rate = _calibrate_conversion_probability(
+        cust_keys[participant_idx], items_per, cust_purchased, c.conversion_rate,
+    )
 
     # Run unified selection loop
     out_prod_idx, out_ckey, out_date_ns, out_priority, out_quantity = (
@@ -214,18 +315,25 @@ def _write_bridge(
             n_products=n_products,
             global_cdf=global_cdf,
             pool=pool,
-            conversion_rate=c.conversion_rate,
+            conversion_rate=effective_conversion_rate,
             affinity_strength=c.affinity_strength,
+            pre_browse_days=c.pre_browse_days,
         )
     )
 
     # Build final output
     out_wkey = np.arange(1, total_rows + 1, dtype=np.int64)
+    if product_start_ns is not None:
+        out_date_ns = np.maximum(out_date_ns, product_start_ns[out_prod_idx])
     out_pkey = prod_keys[out_prod_idx]
     if scd2_lookup is not None:
         out_price = resolve_scd2_prices(
             out_prod_idx, out_date_ns, scd2_lookup[0], scd2_lookup[1],
         )
+        if len(scd2_lookup) >= 3:
+            out_pkey = resolve_scd2_product_keys(
+                out_prod_idx, out_date_ns, scd2_lookup[0], scd2_lookup[2],
+            )
     else:
         out_price = prod_prices[out_prod_idx]
     out_dates_dt = out_date_ns.view("datetime64[ns]").astype("datetime64[ms]")
@@ -261,7 +369,8 @@ def _build_product_data_dict(
     prod_prices: np.ndarray,
     prod_subcat: np.ndarray,
     product_weights: np.ndarray,
-    scd2_lookup: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    scd2_lookup: Optional[Tuple[np.ndarray, ...]] = None,
+    product_start_ns: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Serialize product arrays + CDFs into a picklable dict for workers."""
     pool, global_cdf = build_subcategory_pool(prod_subcat, product_weights)
@@ -275,6 +384,13 @@ def _build_product_data_dict(
         **pool_dict,
         "scd2_starts": scd2_lookup[0].tolist() if scd2_lookup is not None else None,
         "scd2_prices": scd2_lookup[1].tolist() if scd2_lookup is not None else None,
+        "scd2_keys": (
+            scd2_lookup[2].tolist()
+            if scd2_lookup is not None and len(scd2_lookup) >= 3 else None
+        ),
+        "product_start_ns": (
+            product_start_ns.tolist() if product_start_ns is not None else None
+        ),
     }
 
 
@@ -311,10 +427,10 @@ def _partition_purchased_pairs(
     purchased_pairs: pd.DataFrame,
     prod_key_to_idx: pd.Series,
     participant_chunks: List[Dict[str, Any]],
-) -> List[Dict[int, List[int]]]:
+) -> List[Dict[int, List[Tuple[int, int]]]]:
     """For each chunk, build {customer_key: [product_indices]} filtered to that chunk's customers."""
     full_map = _build_purchased_map(purchased_pairs, prod_key_to_idx)
-    chunk_maps: List[Dict[int, List[int]]] = []
+    chunk_maps: List[Dict[int, List[Tuple[int, int]]]] = []
     for chunk in participant_chunks:
         ck_set = set(chunk["cust_keys"])
         chunk_maps.append({ck: v for ck, v in full_map.items() if ck in ck_set})
@@ -356,7 +472,9 @@ def _run_parallel(
     g_end: pd.Timestamp,
     out_path: Path,
     workers: Optional[int] = None,
-    scd2_lookup: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    scd2_lookup: Optional[Tuple[np.ndarray, ...]] = None,
+    product_key_to_idx: Optional[pd.Series] = None,
+    product_start_ns: Optional[np.ndarray] = None,
 ) -> int:
     """Parallel wishlist generation: distribute customers across worker pool."""
     from src.utils.pool import PoolRunSpec, iter_imap_unordered
@@ -374,17 +492,29 @@ def _run_parallel(
     n_customers = len(cust_keys)
     n_participants = max(1, int(round(n_customers * c.participation_rate)))
 
-    participant_idx = rng.choice(n_customers, size=n_participants, replace=False)
-    participant_idx.sort()
-
-    participant_cust_keys = cust_keys[participant_idx]
-    participant_earliest_ns = earliest_ns[participant_idx]
-    participant_latest_ns = latest_ns[participant_idx]
-
     prod_keys = products["ProductKey"].to_numpy().astype(np.int64)
     prod_prices = products["ListPrice"].to_numpy().astype(np.float64)
     prod_subcat = products["SubcategoryKey"].to_numpy().astype(np.int64)
     n_products = len(prod_keys)
+
+    product_data = _build_product_data_dict(
+        prod_keys,
+        prod_prices,
+        prod_subcat,
+        product_weights,
+        scd2_lookup,
+        product_start_ns,
+    )
+
+    if product_key_to_idx is None:
+        product_key_to_idx = pd.Series(np.arange(n_products), index=prod_keys)
+    full_purchased_map = _build_purchased_map(purchased_pairs, product_key_to_idx)
+    participant_idx = _select_participant_indices(
+        rng, cust_keys, n_participants, full_purchased_map, c.conversion_rate,
+    )
+    participant_cust_keys = cust_keys[participant_idx]
+    participant_earliest_ns = earliest_ns[participant_idx]
+    participant_latest_ns = latest_ns[participant_idx]
 
     items_per = rng.poisson(lam=c.avg_items, size=n_participants)
     items_per = np.clip(items_per, 1, min(c.max_items, n_products))
@@ -399,9 +529,12 @@ def _run_parallel(
     info(f"Wishlists parallel: {n_chunks} chunks across {n_workers} workers "
          f"({n_participants:,} participants, ~{total_rows:,} rows)")
 
-    product_data = _build_product_data_dict(prod_keys, prod_prices, prod_subcat, product_weights, scd2_lookup)
-
-    prod_key_to_idx = pd.Series(np.arange(n_products), index=prod_keys)
+    effective_conversion_rate = _calibrate_conversion_probability(
+        participant_cust_keys,
+        items_per,
+        full_purchased_map,
+        c.conversion_rate,
+    )
 
     participant_chunks = _partition_participants(
         participant_cust_keys,
@@ -413,15 +546,16 @@ def _run_parallel(
     n_chunks = len(participant_chunks)
 
     chunk_purchased_maps = _partition_purchased_pairs(
-        purchased_pairs, prod_key_to_idx, participant_chunks,
+        purchased_pairs, product_key_to_idx, participant_chunks,
     )
 
     config_scalars = {
-        "conversion_rate": c.conversion_rate,
+        "conversion_rate": effective_conversion_rate,
         "affinity_strength": c.affinity_strength,
         "avg_items": c.avg_items,
         "max_items": c.max_items,
         "write_chunk_rows": c.write_chunk_rows,
+        "pre_browse_days": c.pre_browse_days,
     }
 
     chunk_dir = out_path.parent / "_wishlist_chunks"
@@ -524,7 +658,38 @@ def run_wishlist_pipeline(
         products["ProductID"].to_numpy().astype(np.int64)
         if "ProductID" in products.columns else None
     )
-    scd2_lookup = build_scd2_price_lookup(all_products, prod_ids_arr, prod_prices_arr)
+    prod_keys_arr = products["ProductKey"].to_numpy().astype(np.int64)
+    effective_starts = pd.to_datetime(
+        all_products["EffectiveStartDate"], errors="coerce",
+    )
+    if prod_ids_arr is not None and "ProductID" in all_products.columns:
+        family_starts = effective_starts.groupby(all_products["ProductID"]).min()
+        product_start_ns = family_starts.reindex(prod_ids_arr).to_numpy(
+            dtype="datetime64[ns]",
+        ).view(np.int64)
+    else:
+        product_start_ns = effective_starts.to_numpy(
+            dtype="datetime64[ns]",
+        ).view(np.int64)
+    scd2_lookup = build_scd2_price_lookup(
+        all_products,
+        prod_ids_arr,
+        prod_prices_arr,
+        prod_keys_current=prod_keys_arr,
+        include_product_keys=True,
+    )
+
+    # Sales can reference any historical ProductKey. Map every version key to
+    # the current family index used by wishlist selection, then resolve the
+    # correct version key back from AddedDate when writing the row.
+    product_key_to_idx: Optional[pd.Series] = None
+    if prod_ids_arr is not None and "ProductID" in all_products.columns:
+        family_to_idx = pd.Series(np.arange(len(prod_ids_arr)), index=prod_ids_arr)
+        mapped_indices = family_to_idx.reindex(all_products["ProductID"]).to_numpy()
+        product_key_to_idx = pd.Series(
+            mapped_indices,
+            index=all_products["ProductKey"].to_numpy(),
+        ).dropna().astype(np.int64)
 
     wishlists_dir = fact_out / "customer_wishlists"
     wishlists_dir.mkdir(parents=True, exist_ok=True)
@@ -555,6 +720,8 @@ def run_wishlist_pipeline(
             out_path=pq_path,
             workers=_workers,
             scd2_lookup=scd2_lookup,
+            product_key_to_idx=product_key_to_idx,
+            product_start_ns=product_start_ns,
         )
     else:
         n_rows = _write_bridge(
@@ -567,6 +734,8 @@ def run_wishlist_pipeline(
             g_end=g_end,
             out_path=pq_path,
             scd2_lookup=scd2_lookup,
+            product_key_to_idx=product_key_to_idx,
+            product_start_ns=product_start_ns,
         )
 
     # Format-specific post-processing

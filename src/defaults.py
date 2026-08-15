@@ -693,6 +693,7 @@ CURRENCY_NAME_MAP: Dict[str, str] = {
     "CHF": "Swiss Franc",
     "SEK": "Swedish Krona",
     "NOK": "Norwegian Krone",
+    "PLN": "Polish Zloty",
     "SGD": "Singapore Dollar",
     "HKD": "Hong Kong Dollar",
     "KRW": "Korean Won",
@@ -703,6 +704,7 @@ CURRENCY_BASE = "USD"
 
 CURRENCY_DEFAULT_LIST: List[str] = [
     "CAD", "GBP", "EUR", "INR", "AUD", "CNY", "JPY",
+    "NOK", "PLN", "SEK", "CHF",
 ]
 
 CURRENCY_SYMBOL_MAP: Dict[str, str] = {
@@ -718,6 +720,7 @@ CURRENCY_SYMBOL_MAP: Dict[str, str] = {
     "CHF": "CHF",
     "SEK": "kr",
     "NOK": "kr",
+    "PLN": "zł",
     "SGD": "S$",
     "HKD": "HK$",
     "KRW": "₩",
@@ -888,7 +891,31 @@ SALES_CHANNEL_CORE_KEYS = np.array([1, 2, 3, 4, 5], dtype=np.int32)
 SALES_CHANNEL_CORE_KEYS.flags.writeable = False
 
 # Channel classification arrays (used by sales pipeline correlation logic)
-PHYSICAL_CHANNELS = np.array([1, 5, 10], dtype=np.int16)          # Store, CallCenter, Kiosk
+# Organization-industry affinities for the sales segment model. Values are
+# Product CategoryKey tuples from the generated product_category dimension.
+# Keeping this domain mapping centralized makes the preference interpretable and
+# prevents the sales loader from carrying a second hard-coded industry taxonomy.
+ORGANIZATION_INDUSTRY_CATEGORY_AFFINITY: dict[str, tuple[int, ...]] = {
+    "technology": (3, 5, 14),
+    "healthcare": (3, 11, 14),
+    "retail": (3, 8, 14),
+    "manufacturing": (3, 15, 16),
+    "education": (2, 3, 14),
+    "finance": (3, 5, 14),
+    "logistics": (3, 5, 16),
+    "construction": (14, 15, 16),
+    "energy": (3, 15, 16),
+    "media": (1, 2, 3, 4),
+}
+for _industry_name, _category_keys in ORGANIZATION_INDUSTRY_CATEGORY_AFFINITY.items():
+    if not _category_keys or any(not 1 <= int(k) <= 32 for k in _category_keys):
+        raise ValidationError(
+            "defaults.ORGANIZATION_INDUSTRY_CATEGORY_AFFINITY contains an "
+            f"invalid Product CategoryKey for {_industry_name!r}: {_category_keys}"
+        )
+del _industry_name, _category_keys
+
+PHYSICAL_CHANNELS = np.array([1, 10], dtype=np.int16)             # Store, Kiosk
 DIGITAL_CHANNELS = np.array([2, 3, 6, 7, 8], dtype=np.int16)     # Online, Marketplace, Web, MobileApp, Social
 ALL_CHANNELS = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.int16)
 
@@ -949,6 +976,9 @@ RETURN_REASON_CATEGORIES: dict[int, str] = {r[0]: r[2] for r in RETURN_REASONS}
 RETURN_REASON_DEFAULT_WEIGHTS: dict[int, float] = {r[0]: r[3] for r in RETURN_REASONS}
 RETURN_REASON_LOGISTICS_KEYS: frozenset[int] = frozenset(
     r[0] for r in RETURN_REASONS if r[2] == "Logistics"
+)
+RETURN_REASON_QUALITY_KEYS: frozenset[int] = frozenset(
+    r[0] for r in RETURN_REASONS if r[2] == "Quality"
 )
 
 _rr_weights = np.array([r[3] for r in RETURN_REASONS])

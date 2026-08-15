@@ -599,7 +599,8 @@ def _global_start_month_int() -> int:
 # Public API
 # ===============================================================
 
-def build_prices(order_dates, qty, price, *, promo_keys=None, no_discount_key=1,
+def build_prices(order_dates, qty, price, *, promo_keys=None,
+                 promo_discount_pct=None, no_discount_key=1,
                  product_ids=None, order_numbers=None, line_numbers=None):
     """
     Single-pass sales pricing pipeline.
@@ -629,8 +630,14 @@ def build_prices(order_dates, qty, price, *, promo_keys=None, no_discount_key=1,
         The per-row assigned PromotionKey. When supplied and
         ``models.pricing.markdown.reconcile_promotions`` is on, the
         markdown is reconciled with the promotion: only promoted lines
-        (``PromotionKey != no_discount_key``) receive a discount, drawn from the
-        nonzero ladder. When None, the independent markdown lottery is used.
+        (``PromotionKey != no_discount_key``) receive a discount. When aligned
+        ``promo_discount_pct`` is supplied, the dimension's nominal depth is the
+        target; otherwise direct/legacy calls fall back to the nonzero ladder.
+        When None, the independent markdown lottery is used.
+    promo_discount_pct : array-like of float or None
+        Nominal Promotion.DiscountPct aligned to each row. Constraints can cap
+        the realized depth for margin safety, but unrelated ladder draws cannot
+        replace the promotion's business meaning.
     no_discount_key : int
         The "no promotion" sentinel PromotionKey (default 1).
     product_ids : array-like of int
@@ -744,11 +751,24 @@ def build_prices(order_dates, qty, price, *, promo_keys=None, no_discount_key=1,
     # When reconciling, a discount is a consequence of a promotion — only
     # promoted lines carry one, drawn from the *nonzero* ladder, so a promoted
     # line always carries a real markdown while a "no promotion" line never does.
+    _reconcile_target = (
+        reconcile and md_enabled and promo_keys is not None
+        and promo_discount_pct is not None
+    )
     _reconcile = (
         reconcile and md_enabled and promo_keys is not None
         and nz_kind_codes is not None and nz_kind_codes.size > 0
     )
-    if _reconcile:
+    if _reconcile_target:
+        promo_mask = np.asarray(promo_keys, dtype=np.int64) != int(no_discount_key)
+        target_pct = np.asarray(promo_discount_pct, dtype=np.float64)
+        if target_pct.shape[0] != n:
+            raise SalesError("promo_discount_pct length must match order_dates")
+        target_pct = np.clip(
+            np.where(np.isfinite(target_pct), target_pct, 0.0), 0.0, 1.0,
+        )
+        disc = np.where(promo_mask, up * target_pct, 0.0)
+    elif _reconcile:
         promo_mask = np.asarray(promo_keys, dtype=np.int64) != int(no_discount_key)
         idx = pick_from_cdf(cdf_from_probs(nz_probs), u_md)
         kc = nz_kind_codes[idx]

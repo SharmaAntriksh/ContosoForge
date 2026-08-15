@@ -57,8 +57,12 @@ from src.facts.sales.sales_logic.core.customer_sampling import (
     compute_month_distinct_targets,
 )
 from src.facts.sales.sales_logic.chunk_builder import (
+    _apply_organization_channel_routing,
+    _apply_segment_product_preferences,
+    _enforce_channel_product_eligibility,
     _eligible_counts_fast,
     _eligible_idx_by_month,
+    _organization_quantity_multiplier,
 )
 from src.facts.sales.sales_logic.plan_math import (
     chunk_month_band as _chunk_month_band,
@@ -111,6 +115,114 @@ def _date_pool(start: str = "2023-01-01", days: int = 31) -> np.ndarray:
     base = np.datetime64(start)
     return np.array([base + np.timedelta64(i, "D") for i in range(days)],
                     dtype="datetime64[D]")
+
+
+class TestSegmentBehavior:
+    def setup_method(self):
+        State.reset()
+
+    def teardown_method(self):
+        State.reset()
+
+    def test_organization_channel_routing_is_order_grain_and_keyed(self):
+        State.customer_is_organization_by_key = np.array([0, 1, 0], dtype=np.int8)
+        State.customer_org_scale_score_by_key = np.full(3, 0.5, dtype=np.float32)
+        State.customer_org_procurement_score_by_key = np.full(3, 0.5, dtype=np.float32)
+        customers = np.array([1, 1, 2, 2], dtype=np.int32)
+        order_numbers = np.array([100, 100, 200, 200], dtype=np.int64)
+        starts = np.array([True, False, True, False])
+        order_idx = np.array([0, 0, 1, 1], dtype=np.int64)
+
+        got = _apply_organization_channel_routing(
+            _rng(1), np.array([1, 1, 2, 2], dtype=np.int16), customers,
+            order_numbers=order_numbers, order_starts=starts, order_idx=order_idx,
+            business_channel_share=1.0, b2b_channel_share=1.0,
+        )
+
+        assert got.tolist() == [4, 4, 2, 2]
+
+    def test_income_product_preference_is_modest_and_directional(self):
+        n = 20_000
+        State.product_price_score = np.linspace(-1.0, 1.0, 21, dtype=np.float32)
+        State.customer_income_score_by_key = np.array([0.0, -1.0, 1.0], dtype=np.float32)
+        State.customer_is_organization_by_key = np.zeros(3, dtype=np.int8)
+        baseline = np.full(n, 10, dtype=np.int32)
+        customers = np.repeat(np.array([1, 2], dtype=np.int32), n // 2)
+        order_numbers = np.arange(1, n + 1, dtype=np.int64)
+        lines = np.ones(n, dtype=np.int32)
+
+        got = _apply_segment_product_preferences(
+            _rng(), baseline, customers, np.ones(21),
+            order_numbers=order_numbers, line_numbers=lines,
+            income_strength=0.8,
+            organization_category_strength=0.0,
+        )
+
+        low = State.product_price_score[got[: n // 2]].mean()
+        high = State.product_price_score[got[n // 2 :]].mean()
+        assert high > 0.08
+        assert low < -0.08
+        assert np.mean(got == baseline) > 0.65  # preserve broad overlap
+
+    def test_organization_category_preference_uses_semantic_mask(self):
+        n = 20_000
+        State.product_price_score = np.zeros(4, dtype=np.float32)
+        State.product_category_key = np.array([3, 14, 15, 16], dtype=np.int16)
+        State.customer_income_score_by_key = np.zeros(2, dtype=np.float32)
+        State.customer_is_organization_by_key = np.array([0, 1], dtype=np.int8)
+        # Construction: Office (14), Garden/tools (15), Automotive (16).
+        State.customer_org_preferred_category_mask_by_key = np.array(
+            [0, (1 << 13) | (1 << 14) | (1 << 15)], dtype=np.uint32,
+        )
+        baseline = np.zeros(n, dtype=np.int32)  # Computers: off preference
+
+        got = _apply_segment_product_preferences(
+            _rng(), baseline, np.ones(n, dtype=np.int32), np.ones(4),
+            order_numbers=np.arange(1, n + 1, dtype=np.int64),
+            line_numbers=np.ones(n, dtype=np.int32),
+            income_strength=0.0,
+            organization_category_strength=1.0,
+        )
+
+        assert np.isin(got, [1, 2, 3]).mean() > 0.30
+
+    def test_organization_quantity_uses_scale_and_procurement(self):
+        State.customer_is_organization_by_key = np.array([0, 1, 1], dtype=np.int8)
+        State.customer_org_scale_score_by_key = np.array([0.0, 0.2, 0.9], dtype=np.float32)
+        State.customer_org_procurement_score_by_key = np.array([0.0, 0.2, 0.9], dtype=np.float32)
+        cfg = {
+            "enabled": True,
+            "quantity_multiplier": 1.4,
+            "company_scale_strength": 0.3,
+            "procurement_strength": 0.2,
+        }
+
+        got = _organization_quantity_multiplier(
+            np.array([0, 1, 2], dtype=np.int32), cfg,
+        )
+
+        assert got[0] == 1.0
+        assert got[2] > got[1] > 1.0
+
+    def test_channel_eligibility_resample_is_counter_based(self):
+        prod_idx = np.zeros(200, dtype=np.int32)
+        channels = np.full(200, 4, dtype=np.int16)
+        eligibility = np.array([[1, 1, 1, 0], [1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int8)
+        channel_groups = np.array([0, 0, 1, 2, 3], dtype=np.int8)
+        order_numbers = np.arange(1, 201, dtype=np.int64)
+        lines = np.ones(200, dtype=np.int32)
+
+        a = _enforce_channel_product_eligibility(
+            _rng(1), prod_idx.copy(), channels, eligibility, channel_groups,
+            np.ones(3), order_numbers, lines,
+        )
+        b = _enforce_channel_product_eligibility(
+            _rng(999), prod_idx.copy(), channels, eligibility, channel_groups,
+            np.ones(3), order_numbers, lines,
+        )
+
+        assert np.array_equal(a, b)
+        assert set(a.tolist()) <= {1, 2}
 
 
 # ===================================================================
@@ -455,6 +567,54 @@ class TestApplyPromotions:
         n10 = int((result == 10).sum())
         # Uniform: neither should dominate by the 5x margin the salient case shows.
         assert 0.5 < n20 / max(1, n10) < 2.0
+
+    def test_customer_audience_restrictions_are_candidate_filters(self):
+        n = 1200
+        dates = np.array(["2023-01-15"] * n, dtype="datetime64[D]")
+        promo_keys = np.array([1, 10, 20, 30], dtype=np.int32)
+        starts = np.array(["2023-01-01"] * 4, dtype="datetime64[D]")
+        ends = np.array(["2023-01-31"] * 4, dtype="datetime64[D]")
+        audience = np.array([0, 0, 1, 2], dtype=np.int8)
+        customer_keys = np.tile(np.array([1, 2, 3], dtype=np.int32), n // 3)
+        loyalty = np.array([0, 0, 2, 0], dtype=np.int32)
+        epoch = np.iinfo(np.int64).min
+        customer_start = np.array(
+            [epoch, epoch, epoch, np.datetime64("2023-01-01", "D").astype(np.int64)],
+            dtype=np.int64,
+        )
+        customer_deadline = np.array(
+            [epoch, epoch, epoch, np.datetime64("2023-03-31", "D").astype(np.int64)],
+            dtype=np.int64,
+        )
+
+        result = apply_promotions(
+            _rng(), n, dates, promo_keys, starts, ends,
+            promo_audience_group=audience,
+            customer_keys=customer_keys,
+            customer_loyalty_tier_by_key=loyalty,
+            customer_start_day_by_key=customer_start,
+            customer_new_promo_end_by_key=customer_deadline,
+        )
+
+        assert not np.any(result[customer_keys == 1] == 20)
+        assert not np.any(result[customer_keys == 1] == 30)
+        assert not np.any(result[customer_keys == 2] == 30)
+        assert not np.any(result[customer_keys == 3] == 20)
+        assert np.any(result[customer_keys == 2] == 20)
+        assert np.any(result[customer_keys == 3] == 30)
+
+    def test_assisted_channel_does_not_receive_store_or_online_promo(self):
+        n = 200
+        result = apply_promotions(
+            _rng(), n,
+            np.array(["2023-01-15"] * n, dtype="datetime64[D]"),
+            np.array([1, 10, 20, 30], dtype=np.int32),
+            np.array(["2023-01-01"] * 4, dtype="datetime64[D]"),
+            np.array(["2023-01-31"] * 4, dtype="datetime64[D]"),
+            channel_keys=np.full(n, 5, dtype=np.int32),  # CallCenter/Assisted
+            promo_channel_group=np.array([0, 1, 2, 0], dtype=np.int8),
+        )
+        assert set(np.unique(result)).issubset({30})
 
 
 # ===================================================================

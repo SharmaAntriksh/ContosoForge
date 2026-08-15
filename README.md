@@ -430,6 +430,7 @@ load scripts, constraints, views, verification procedures, and indexes.
 | Import into PostgreSQL | [`scripts/run_postgres_import.ps1`](docs/operations/postgres-import.md) |
 | Provision a SQL login for SSAS/Power BI | [Tabular user guide](docs/operations/tabular-user.md) |
 | Manage keys and verify an import | [Post-import procedures](docs/operations/post-import-procedures.md) |
+| Interpret measures, events, promotions, and lifecycle rules | [Analytical semantics](docs/ANALYTICAL_SEMANTICS.md) |
 
 Generated identifiers are PascalCase. At import time you can choose
 `pascal` or `snake`; the import tool regenerates the SQL bundle without changing

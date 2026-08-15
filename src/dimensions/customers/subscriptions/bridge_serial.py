@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from src.defaults import FACT_MAX_PARALLEL_CHUNKS
 from src.exceptions import DimensionError
 
 from .helpers import (
@@ -36,6 +37,9 @@ def write_bridge_streaming(
     plan_types = dim_plans["PlanType"].astype(str).to_numpy()
     plan_cycle_prices = dim_plans["CyclePrice"].to_numpy(dtype=np.float64, na_value=0.0)
     plan_cycle_months = dim_plans["CycleMonths"].astype(np.int32).to_numpy()
+    plan_launch_ns = pd.to_datetime(dim_plans["LaunchDate"]).to_numpy(
+        dtype="datetime64[ns]",
+    ).view(np.int64)
     unique_types, type_members, type_weights = build_type_groups(plan_types)
 
     cust_keys, cust_start_ns, cust_end_ns = compute_customer_windows(
@@ -60,30 +64,84 @@ def write_bridge_streaming(
     eligible_hi = cust_end_ns[eligible_idx]
     eligible_span = _spans[_ok]
 
-    table = generate_subscriptions_bulk(
-        eligible_ck=eligible_ck,
-        eligible_lo=eligible_lo,
-        eligible_hi=eligible_hi,
-        eligible_span=eligible_span,
-        plan_keys=plan_keys,
-        plan_cycle_prices=plan_cycle_prices,
-        plan_cycle_months=plan_cycle_months,
-        unique_types=unique_types,
-        type_members=type_members,
-        type_weights=type_weights,
-        g_end_ns=int(g_end_ns),
-        max_subs=max_subs,
-        avg_subscriptions=c.avg_subscriptions,
-        churn_rate=c.churn_rate,
-        trial_rate=c.trial_rate,
-        trial_conversion_rate=c.trial_conversion_rate,
-        trial_days=c.trial_days,
-        rng=rng,
-    )
-
     out_bridge.parent.mkdir(parents=True, exist_ok=True)
     if out_bridge.exists():
         out_bridge.unlink()
 
-    pq.write_table(table, out_bridge, compression="snappy", row_group_size=500_000)
-    return len(table)
+    n_eligible = len(eligible_ck)
+    if n_eligible == 0:
+        pq.write_table(
+            generate_subscriptions_bulk(
+                eligible_ck=eligible_ck,
+                eligible_lo=eligible_lo,
+                eligible_hi=eligible_hi,
+                eligible_span=eligible_span,
+                plan_keys=plan_keys,
+                plan_cycle_prices=plan_cycle_prices,
+                plan_cycle_months=plan_cycle_months,
+                unique_types=unique_types,
+                type_members=type_members,
+                type_weights=type_weights,
+                g_end_ns=int(g_end_ns),
+                max_subs=max_subs,
+                avg_subscriptions=c.avg_subscriptions,
+                churn_rate=c.churn_rate,
+                trial_rate=c.trial_rate,
+                trial_conversion_rate=c.trial_conversion_rate,
+                trial_days=c.trial_days,
+                rng=np.random.default_rng(c.seed),
+                plan_launch_ns=plan_launch_ns,
+            ),
+            out_bridge,
+            compression="snappy",
+        )
+        return 0
+
+    # Stable data-sized chunks make this path byte-equivalent to the parallel
+    # writer. Worker count remains a performance choice, never a data choice.
+    n_chunks = max(1, min(n_eligible, FACT_MAX_PARALLEL_CHUNKS))
+    boundaries = np.array_split(np.arange(n_eligible), n_chunks)
+    child_seeds = np.random.SeedSequence(c.seed).spawn(n_chunks)
+    total_rows = 0
+    sub_key_cursor = 1
+
+    writer = None
+    try:
+        for chunk_idx, indices in enumerate(boundaries):
+            table = generate_subscriptions_bulk(
+                eligible_ck=eligible_ck[indices],
+                eligible_lo=eligible_lo[indices],
+                eligible_hi=eligible_hi[indices],
+                eligible_span=eligible_span[indices],
+                plan_keys=plan_keys,
+                plan_cycle_prices=plan_cycle_prices,
+                plan_cycle_months=plan_cycle_months,
+                unique_types=unique_types,
+                type_members=type_members,
+                type_weights=type_weights,
+                g_end_ns=int(g_end_ns),
+                max_subs=max_subs,
+                avg_subscriptions=c.avg_subscriptions,
+                churn_rate=c.churn_rate,
+                trial_rate=c.trial_rate,
+                trial_conversion_rate=c.trial_conversion_rate,
+                trial_days=c.trial_days,
+                rng=np.random.default_rng(child_seeds[chunk_idx]),
+                sub_key_start=sub_key_cursor,
+                plan_launch_ns=plan_launch_ns,
+            )
+            if writer is None:
+                writer = pq.ParquetWriter(
+                    out_bridge,
+                    schema=table.schema,
+                    compression="snappy",
+                )
+            if len(table):
+                writer.write_table(table, row_group_size=500_000)
+                total_rows += len(table)
+            sub_key_cursor += int(len(indices)) * int(max_subs)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    return total_rows

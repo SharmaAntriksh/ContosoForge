@@ -505,6 +505,25 @@ class TestPromotionReconciliation:
         # NetPrice stays consistent with the reconciled discount.
         np.testing.assert_allclose(net, np.round(100.0 - disc, 2))
 
+    def test_nominal_promotion_depth_drives_realized_discount(self):
+        self._bind_state(reconcile=True)
+        nominal = np.array([0.0, 0.10, 0.25, 0.60], dtype=np.float64)
+        promo = np.array([1, 2, 3, 4], dtype=np.int32)
+        price = build_prices(
+            np.array(["2022-06-15"] * 4, dtype="datetime64[D]"),
+            np.ones(4, dtype=np.int32),
+            self._price_dict(4, up=100.0, uc=40.0),
+            promo_keys=promo,
+            promo_discount_pct=nominal,
+            no_discount_key=1,
+            order_numbers=np.arange(1, 5, dtype=np.int64),
+            line_numbers=np.ones(4, dtype=np.int32),
+        )
+        # 60% is capped by max_pct_of_price=50%; the other nominal depths are
+        # realized exactly and retain their ordering.
+        np.testing.assert_allclose(price["discount_amt"], [0.0, 10.0, 25.0, 50.0])
+        assert np.all(price["final_net_price"] >= price["final_unit_cost"] + 0.01)
+
     def test_reconcile_off_is_promo_independent(self):
         # Legacy behavior: markdown is drawn independently of PromotionKey, so
         # some no-promotion rows still receive a discount (the pre-3.5 bug).

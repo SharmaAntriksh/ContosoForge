@@ -23,6 +23,41 @@ from src.utils.static_schemas import get_sales_schema
 PA_AVAILABLE = pa is not None
 
 
+def _add_calendar_months_epoch_days(
+    start_days: np.ndarray,
+    months: int,
+) -> np.ndarray:
+    """Add whole calendar months to epoch-day values, clamping month-end.
+
+    ``datetime64[M]`` supplies a vectorized Gregorian month grid. Unknown keys
+    use INT64_MIN and remain unknown in the returned dense lookup.
+    """
+    values = np.asarray(start_days, dtype=np.int64)
+    unknown = np.iinfo(np.int64).min
+    result = np.full(values.shape, unknown, dtype=np.int64)
+    valid = values != unknown
+    if not valid.any():
+        return result
+
+    start_date = values[valid].astype("datetime64[D]")
+    start_month = start_date.astype("datetime64[M]")
+    start_month_day = start_month.astype("datetime64[D]")
+    day_of_month = (start_date - start_month_day).astype(np.int64) + 1
+
+    target_month_int = start_month.astype(np.int64) + max(0, int(months))
+    target_month = target_month_int.astype("datetime64[M]")
+    target_month_day = target_month.astype("datetime64[D]")
+    next_month_day = (
+        (target_month_int + 1).astype("datetime64[M]").astype("datetime64[D]")
+    )
+    days_in_target_month = (next_month_day - target_month_day).astype(np.int64)
+    target_day = np.minimum(day_of_month, days_in_target_month)
+    result[valid] = (
+        target_month_day + (target_day - 1).astype("timedelta64[D]")
+    ).astype(np.int64)
+    return result
+
+
 # ===============================================================
 # Schema helpers
 # ===============================================================
@@ -100,6 +135,15 @@ class State:
     # chunk hot path so it isn't reallocated every chunk.
     customer_end_month_norm = None
     customer_base_weight = None  # optional float64
+    customer_first_eff_start_by_key = None  # dense key -> exact start epoch day
+    customer_last_eff_end_by_key = None     # dense key -> exact end epoch day; max=open
+    customer_new_promo_end_by_key = None    # dense key -> exact promotion deadline
+    customer_loyalty_tier_by_key = None     # dense key -> LoyaltyTierKey (0=unknown)
+    customer_income_score_by_key = None      # dense key -> income percentile score [-1, 1]
+    customer_is_organization_by_key = None  # dense key -> 1 for organization customers
+    customer_org_scale_score_by_key = None  # dense key -> company-size score [0, 1]
+    customer_org_procurement_score_by_key = None  # dense key -> cadence score [0, 1]
+    customer_org_preferred_category_mask_by_key = None  # dense key -> CategoryKey bitmask
 
     # Closed-form discovery schedule (optional): int64 array aligned with
     # customer_keys giving the month each customer first enters the sales
@@ -140,6 +184,9 @@ class State:
     promo_keys_all = None
     promo_start_all = None
     promo_end_all = None
+    promo_discount_pct_all = None
+    promo_discount_pct_by_key = None
+    promo_audience_group = None
     new_customer_promo_keys = None
     new_customer_window_months = 3
 
@@ -163,6 +210,8 @@ class State:
 
     # Product channel eligibility (aligned with product_np rows)
     product_channel_eligible = None  # int8 2-D: (n_products, n_channel_groups) — 4 groups: store/online/marketplace/b2b
+    product_price_score = None       # product-row-aligned price percentile [-1, 1]
+    product_category_key = None      # product-row-aligned CategoryKey
 
     # Promotion channel category
     promo_channel_group = None       # int8: per promo — 0=any, 1=physical, 2=digital
@@ -194,7 +243,6 @@ class State:
     customer_scd2_starts = None     # np.ndarray (N_pool, max_ver) — version start epoch days
     customer_scd2_keys = None       # np.ndarray (N_pool, max_ver) — CustomerKey per version
     cust_key_to_pool_idx = None     # np.ndarray (max_key+1,) — IsCurrent CustomerKey → pool index
-    customer_first_eff_start_by_key = None  # np.ndarray (max_key+1,) — CustomerKey → first EffectiveStartDate epoch days; INT64_MIN for unknown keys
 
     # --------------------------------------------------------------
     # Output configuration
@@ -260,6 +308,8 @@ class State:
     product_brand_key = None
     product_popularity = None
     product_seasonality = None
+    product_return_risk_by_key = None
+    product_defect_risk_by_key = None
     product_subcat_key = None
     promo_salience_all = None
     _channel_to_elig_group = None
@@ -351,6 +401,21 @@ def bind_globals(gdict: dict):
         from .core.customer_sampling import _normalize_end_month
         _n_cust = int(np.asarray(State.customer_keys).shape[0])
         State.customer_end_month_norm = _normalize_end_month(State.customer_end_month, _n_cust)
+
+    # Derive exact New Customer deadlines once at worker bind. This is a pure
+    # function of the read-only start-date lookup and configured calendar-month
+    # window, so workers and chunks see identical boundaries.
+    if (
+        "customer_first_eff_start_by_key" in gdict
+        or "new_customer_window_months" in gdict
+    ):
+        if State.customer_first_eff_start_by_key is None:
+            State.customer_new_promo_end_by_key = None
+        else:
+            State.customer_new_promo_end_by_key = _add_calendar_months_epoch_days(
+                State.customer_first_eff_start_by_key,
+                int(State.new_customer_window_months or 0),
+            )
 
     # --------------------------------------------------------------
     # Bind Sales schema ONCE, respecting skip_order_cols

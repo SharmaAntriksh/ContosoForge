@@ -244,7 +244,17 @@ def _maybe_build_returns(
     _task_require_cols(source_table, RETURNS_REQUIRED_DETAIL_COLS, ctx="Returns build requires")
 
     returns_seed = chunk_seed ^ 0x5A5A_1234
-    returns_table = build_sales_returns_from_detail(source_table, chunk_seed=returns_seed, cfg=returns_cfg)
+    returns_table = build_sales_returns_from_detail(
+        source_table,
+        chunk_seed=returns_seed,
+        cfg=returns_cfg,
+        product_return_risk_by_key=getattr(
+            State, "product_return_risk_by_key", None,
+        ),
+        product_defect_risk_by_key=getattr(
+            State, "product_defect_risk_by_key", None,
+        ),
+    )
     return returns_table if returns_table.num_rows > 0 else None
 
 

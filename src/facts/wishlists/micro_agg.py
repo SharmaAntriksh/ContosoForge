@@ -9,22 +9,34 @@ import pyarrow as pa
 from src.facts.shared.micro_agg_helpers import (
     validate_required_columns,
     extract_column,
-    deduplicate_tuples,
 )
 
 
 def micro_aggregate_wishlists(detail_table: pa.Table) -> Optional[Dict[str, np.ndarray]]:
-    """Extract unique (CustomerKey, ProductKey) pairs from a single sales chunk.
+    """Extract each pair's first purchase date from a single sales chunk.
 
     Returns a compact dict of two int64 arrays, or None if columns are missing.
     """
-    if not validate_required_columns(detail_table, {"CustomerKey", "ProductKey"}):
+    if not validate_required_columns(
+        detail_table, {"CustomerKey", "ProductKey", "OrderDate"},
+    ):
         return None
 
     ck = extract_column(detail_table, "CustomerKey", np.int64)
     pk = extract_column(detail_table, "ProductKey", np.int64)
-
-    return deduplicate_tuples(
-        [ck, pk],
-        ["customer_key", "product_key"],
+    purchase_ns = (
+        detail_table.column("OrderDate").to_numpy(zero_copy_only=False)
+        .astype("datetime64[ns]").view(np.int64)
     )
+
+    import pandas as pd
+
+    pairs = pd.DataFrame({
+        "customer_key": ck,
+        "product_key": pk,
+        "first_purchase_ns": purchase_ns,
+    })
+    pairs = pairs.groupby(
+        ["customer_key", "product_key"], as_index=False, sort=True,
+    )["first_purchase_ns"].min()
+    return {name: pairs[name].to_numpy() for name in pairs.columns}

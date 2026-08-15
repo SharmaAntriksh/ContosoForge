@@ -117,11 +117,32 @@ def _clamp_order_dates_to_customer_start(
     return od_days.view("datetime64[D]")
 
 
+def _clamp_order_dates_to_customer_lifecycle(
+    order_dates: np.ndarray,
+    customer_keys: np.ndarray,
+) -> np.ndarray:
+    """Clamp OrderDate to the customer's exact inclusive lifecycle bounds."""
+    if order_dates is None or customer_keys.size == 0:
+        return order_dates
+
+    start_lut = getattr(State, "customer_first_eff_start_by_key", None)
+    end_lut = getattr(State, "customer_last_eff_end_by_key", None)
+    if start_lut is None and end_lut is None:
+        return order_dates
+
+    od_days = np.asarray(order_dates, dtype="datetime64[D]").astype(np.int64)
+    if start_lut is not None:
+        np.maximum(od_days, start_lut[customer_keys], out=od_days)
+    if end_lut is not None:
+        np.minimum(od_days, end_lut[customer_keys], out=od_days)
+    return od_days.view("datetime64[D]")
+
+
 def _within_day_cursor(d_off: np.ndarray) -> np.ndarray:
     """0-based rank of each order within its OrderDate (day-offset) group.
 
     Robust to unsorted input. ``build_orders`` returns orders sorted by date,
-    but ``_clamp_order_dates_to_customer_start`` can push individual orders onto
+    but ``_clamp_order_dates_to_customer_lifecycle`` can push individual orders onto
     a later day *after* that sort, breaking the contiguity a naive
     ``arange - first_index`` cursor relies on. That naive cursor would then
     over-count within a day and spill the resulting OrderNumber past the
@@ -296,6 +317,11 @@ def _get_brand_probs(m_offset: int, B: int) -> np.ndarray | None:
 _PRODUCT_BRAND_SALT = np.uint64(0x9D0DC0DE00000001)
 _PRODUCT_PICK_SALT = np.uint64(0x9D0DC0DE00000002)
 _PRODUCT_FALLBACK_SALT = np.uint64(0x9D0DC0DE00000003)
+_SEGMENT_CHANNEL_ROUTE_SALT = np.uint64(0x5E6D3E1700000001)
+_SEGMENT_CHANNEL_SPLIT_SALT = np.uint64(0x5E6D3E1700000002)
+_SEGMENT_PRODUCT_CANDIDATE_SALT = np.uint64(0x5E6D3E1700000003)
+_SEGMENT_PRODUCT_SWITCH_SALT = np.uint64(0x5E6D3E1700000004)
+_PRODUCT_ELIGIBILITY_SALT = np.uint64(0x5E6D3E1700000100)
 
 
 def _line_uniform(rng, salt, order_numbers, line_numbers, count, idx=None):
@@ -324,6 +350,205 @@ def _uniform_index(u, k):
     """
     idx = (np.asarray(u, dtype=np.float64) * k).astype(np.int64)
     return np.minimum(idx, np.asarray(k, dtype=np.int64) - 1)
+
+
+def _dense_lookup(lut, keys, default=0.0):
+    """Safely index a dense CustomerKey lookup without allowing wraparound."""
+    if lut is None:
+        return np.full(len(keys), default)
+    _lut = np.asarray(lut)
+    _keys = np.asarray(keys, dtype=np.int64)
+    _out = np.full(len(_keys), default, dtype=_lut.dtype)
+    _valid = (_keys >= 0) & (_keys < len(_lut))
+    _out[_valid] = _lut[_keys[_valid]]
+    return _out
+
+
+def _apply_organization_channel_routing(
+    rng,
+    channel_keys,
+    customer_keys,
+    *,
+    order_numbers,
+    order_starts,
+    order_idx,
+    business_channel_share,
+    b2b_channel_share,
+):
+    """Route a configured share of organization orders to channels 4/9.
+
+    The choice is order-grain and counter-based when OrderNumber exists. Store
+    correlation lookups declare these account-level channels valid everywhere
+    with zero consumer weight, so this explicit opt-in is their only path outside
+    Warehouse stores.
+    """
+    _is_org_lut = getattr(State, "customer_is_organization_by_key", None)
+    if _is_org_lut is None or business_channel_share <= 0.0:
+        return channel_keys
+
+    _channel = np.asarray(channel_keys, dtype=np.int16).copy()
+    if order_starts is not None and order_idx is not None:
+        _cust = np.asarray(customer_keys)[order_starts]
+        _keys = np.asarray(order_numbers)[order_starts] if order_numbers is not None else None
+        _is_org = _dense_lookup(_is_org_lut, _cust, 0).astype(bool)
+        _scale = _dense_lookup(
+            getattr(State, "customer_org_scale_score_by_key", None), _cust, 0.5,
+        ).astype(np.float64)
+        _proc = _dense_lookup(
+            getattr(State, "customer_org_procurement_score_by_key", None), _cust, 0.5,
+        ).astype(np.float64)
+        _propensity = np.clip(1.0 + 0.30 * (_scale - 0.5) + 0.20 * (_proc - 0.5), 0.75, 1.25)
+        _route_p = np.clip(float(business_channel_share) * _propensity, 0.0, 1.0)
+        _route_u = (
+            hash_u01(_SEGMENT_CHANNEL_ROUTE_SALT, _keys)
+            if _keys is not None else rng.random(len(_cust))
+        )
+        _split_u = (
+            hash_u01(_SEGMENT_CHANNEL_SPLIT_SALT, _keys)
+            if _keys is not None else rng.random(len(_cust))
+        )
+        _route = _is_org & (_route_u < _route_p)
+        _order_channel = _channel[order_starts].copy()
+        _order_channel[_route] = np.where(
+            _split_u[_route] < float(b2b_channel_share), 4, 9,
+        ).astype(np.int16)
+        return _order_channel[order_idx]
+
+    _cust = np.asarray(customer_keys)
+    _is_org = _dense_lookup(_is_org_lut, _cust, 0).astype(bool)
+    _route = _is_org & (rng.random(len(_cust)) < float(business_channel_share))
+    _channel[_route] = np.where(
+        rng.random(int(_route.sum())) < float(b2b_channel_share), 4, 9,
+    ).astype(np.int16)
+    return _channel
+
+
+def _apply_segment_product_preferences(
+    rng,
+    prod_idx,
+    customer_keys,
+    product_weight,
+    *,
+    order_numbers,
+    line_numbers,
+    income_strength,
+    organization_category_strength,
+):
+    """Use a deterministic candidate tournament for segment preferences.
+
+    Income pulls individuals modestly toward similarly ranked catalog prices.
+    Organization industries use explicit, interpretable product-category
+    affinities. Only a better candidate can replace the baseline choice, and the
+    switch probability rises smoothly with score advantage, preserving
+    substantial segment overlap.
+    """
+    _price_score = getattr(State, "product_price_score", None)
+    if _price_score is None or len(prod_idx) == 0:
+        return prod_idx
+    _income_lut = getattr(State, "customer_income_score_by_key", None)
+    _org_lut = getattr(State, "customer_is_organization_by_key", None)
+    _category_mask_lut = getattr(
+        State, "customer_org_preferred_category_mask_by_key", None,
+    )
+    _product_category = getattr(State, "product_category_key", None)
+    if income_strength <= 0.0 and (
+        organization_category_strength <= 0.0 or _product_category is None
+    ):
+        return prod_idx
+
+    _n = len(prod_idx)
+    if product_weight is not None and float(np.asarray(product_weight).sum()) > 1e-12:
+        _candidate_cdf = cdf_from_probs(
+            np.asarray(product_weight, dtype=np.float64)
+            / float(np.asarray(product_weight, dtype=np.float64).sum())
+        )
+        _candidate_u = _line_uniform(
+            rng, _SEGMENT_PRODUCT_CANDIDATE_SALT,
+            order_numbers, line_numbers, _n,
+        )
+        _candidate = pick_from_cdf(_candidate_cdf, _candidate_u).astype(np.int32)
+    else:
+        _candidate_u = _line_uniform(
+            rng, _SEGMENT_PRODUCT_CANDIDATE_SALT,
+            order_numbers, line_numbers, _n,
+        )
+        _candidate = _uniform_index(_candidate_u, len(_price_score)).astype(np.int32)
+
+    _cust = np.asarray(customer_keys, dtype=np.int32)
+    _income = _dense_lookup(_income_lut, _cust, 0.0).astype(np.float64)
+    _is_org = _dense_lookup(_org_lut, _cust, 0).astype(bool)
+    _price_score = np.asarray(_price_score, dtype=np.float64)
+    _current_score = float(income_strength) * _income * _price_score[prod_idx]
+    _candidate_score = float(income_strength) * _income * _price_score[_candidate]
+
+    if (
+        organization_category_strength > 0.0
+        and _product_category is not None
+        and _category_mask_lut is not None
+    ):
+        _preferred_mask = _dense_lookup(
+            _category_mask_lut, _cust, 0,
+        ).astype(np.uint32)
+        _has_preference = _is_org & (_preferred_mask != 0)
+        _product_category = np.asarray(_product_category, dtype=np.int64)
+
+        def _category_matches(_row_idx):
+            _category = _product_category[_row_idx]
+            _valid = (_category >= 1) & (_category <= 32)
+            _bit = np.zeros(len(_category), dtype=np.uint32)
+            _bit[_valid] = np.left_shift(
+                np.uint32(1), (_category[_valid] - 1).astype(np.uint32),
+            )
+            return (_preferred_mask & _bit) != 0
+
+        _current_match = _category_matches(prod_idx)
+        _candidate_match = _category_matches(_candidate)
+        _current_score += (
+            float(organization_category_strength) * _has_preference * _current_match
+        )
+        _candidate_score += (
+            float(organization_category_strength) * _has_preference * _candidate_match
+        )
+
+    _advantage = np.maximum(_candidate_score - _current_score, 0.0)
+    _switch_p = np.tanh(_advantage)
+    _switch_u = _line_uniform(
+        rng, _SEGMENT_PRODUCT_SWITCH_SALT,
+        order_numbers, line_numbers, _n,
+    )
+    _switch = _switch_u < _switch_p
+    if _switch.any():
+        _out = np.asarray(prod_idx, dtype=np.int32).copy()
+        _out[_switch] = _candidate[_switch]
+        return _out
+    return prod_idx
+
+
+def _organization_quantity_multiplier(customer_keys, organization_cfg):
+    """Build a deterministic per-line organization quantity multiplier."""
+    _out = np.ones(len(customer_keys), dtype=np.float64)
+    if not organization_cfg or not organization_cfg.get("enabled", False):
+        return _out
+    _cust = np.asarray(customer_keys, dtype=np.int32)
+    _is_org = _dense_lookup(
+        getattr(State, "customer_is_organization_by_key", None), _cust, 0,
+    ).astype(bool)
+    if not _is_org.any():
+        return _out
+    _scale = _dense_lookup(
+        getattr(State, "customer_org_scale_score_by_key", None), _cust, 0.5,
+    ).astype(np.float64)
+    _proc = _dense_lookup(
+        getattr(State, "customer_org_procurement_score_by_key", None), _cust, 0.5,
+    ).astype(np.float64)
+    _mult = np.full(
+        len(_cust), float(organization_cfg.get("quantity_multiplier", 1.0)),
+        dtype=np.float64,
+    )
+    _mult *= 1.0 + float(organization_cfg.get("company_scale_strength", 0.0)) * (_scale - 0.5)
+    _mult *= 1.0 + float(organization_cfg.get("procurement_strength", 0.0)) * (_proc - 0.5)
+    _out[_is_org] = np.clip(_mult[_is_org], 1.0, 4.0)
+    return _out
 
 
 def _sample_product_row_indices(
@@ -1192,6 +1417,7 @@ def _apply_store_channel_correlation(
 def _enforce_channel_product_eligibility(
     rng, prod_idx, sales_channel_key_arr,
     pce, ch2eg, product_weight,
+    order_numbers=None, line_numbers=None,
 ):
     """Resample products that are ineligible for their assigned sales channel."""
     if (pce is None or ch2eg is None
@@ -1219,10 +1445,19 @@ def _enforce_channel_product_eligibility(
                 continue
             _ew = product_weight[_eligible_rows]
             _ews = float(_ew.sum())
+            _bad_positions = np.flatnonzero(_eg_mask)
+            _salt = np.uint64(
+                (int(_PRODUCT_ELIGIBILITY_SALT) + _pass * 17 + int(_eg))
+                & 0xFFFFFFFFFFFFFFFF
+            )
+            _u = _line_uniform(
+                rng, _salt, order_numbers, line_numbers, _n_eg,
+                idx=_bad_positions,
+            )
             if _ews > 1e-12:
-                _picks = rng.choice(len(_eligible_rows), size=_n_eg, p=_ew / _ews)
+                _picks = pick_from_cdf(cdf_from_probs(_ew / _ews), _u)
             else:
-                _picks = rng.integers(0, len(_eligible_rows), size=_n_eg)
+                _picks = _uniform_index(_u, len(_eligible_rows))
             prod_idx[_eg_mask] = _eligible_rows[_picks]
     return prod_idx
 
@@ -1230,21 +1465,31 @@ def _enforce_channel_product_eligibility(
 def _apply_new_customer_promo(
     promo_keys, order_dates, customer_keys_out,
     sales_channel_key_arr,
-    ckey_to_start_month, nc_min_month,
+    ckey_to_start_day, ckey_to_deadline_day,
     nc_keys, nc_starts, nc_ends,
-    nc_promo_set, nc_window_months,
+    nc_promo_set,
     no_discount_key,
     promo_channel_group, promo_keys_all,
 ):
-    """Strip invalid NC promo assignments and force-assign to genuinely new customers."""
-    if ckey_to_start_month is None or nc_keys is None or nc_keys.size == 0:
+    """Strip invalid NC assignments and use exact calendar-date eligibility."""
+    if (
+        ckey_to_start_day is None
+        or ckey_to_deadline_day is None
+        or nc_keys is None
+        or nc_keys.size == 0
+    ):
         return promo_keys
 
     order_dates_D = order_dates.astype("datetime64[D]", copy=False)
-    order_month_offset = order_dates.astype("datetime64[M]").astype("int64") - nc_min_month
-    cust_start = ckey_to_start_month[customer_keys_out]
-    months_since = order_month_offset - cust_start
-    is_new = (cust_start >= 0) & (months_since >= 0) & (months_since <= nc_window_months)
+    order_day = order_dates_D.astype(np.int64)
+    cust_start_day = ckey_to_start_day[customer_keys_out]
+    cust_deadline_day = ckey_to_deadline_day[customer_keys_out]
+    known_start = cust_start_day != np.iinfo(np.int64).min
+    is_new = (
+        known_start
+        & (order_day >= cust_start_day)
+        & (order_day <= cust_deadline_day)
+    )
 
     # Step 1: remove NC promo from non-new customers (invalid random assignments)
     has_nc = np.isin(promo_keys, list(nc_promo_set))
@@ -1578,6 +1823,8 @@ def build_chunk_table(
     promo_keys_all = State.promo_keys_all
     promo_start_all = State.promo_start_all
     promo_salience_all = getattr(State, "promo_salience_all", None)
+    promo_audience_group = getattr(State, "promo_audience_group", None)
+    promo_discount_pct_by_key = getattr(State, "promo_discount_pct_by_key", None)
     # Fulfillment-friction config (drives delivery bucketing here and
     # return prob/lag in the separate returns pass). Pydantic model or None; both
     # compute_dates and the returns builder read it via .get().
@@ -1590,27 +1837,37 @@ def build_chunk_table(
     _basket_num_themes = int(_basket_cfg.get("num_themes", 6)) if _basket_on else 0
     _basket_strength = float(_basket_cfg.get("strength", 0.0)) if _basket_on else 0.0
     _basket_subcat = getattr(State, "product_subcat_key", None) if _basket_on else None
+    _segment_cfg = _mdl_cfg.get("segments", {}) if _mdl_cfg is not None else {}
+    _segments_on = bool(_segment_cfg) and bool(_segment_cfg.get("enabled", False))
+    _income_cfg = (
+        _segment_cfg.get("income_product_preference", {}) if _segments_on else {}
+    )
+    _income_strength = (
+        float(_income_cfg.get("strength", 0.0))
+        if _income_cfg.get("enabled", False) else 0.0
+    )
+    _organization_cfg = _segment_cfg.get("organization", {}) if _segments_on else {}
+    _organization_on = bool(_organization_cfg) and bool(
+        _organization_cfg.get("enabled", False)
+    )
     promo_end_all = State.promo_end_all
 
     nc_promo_keys = State.new_customer_promo_keys
     nc_promo_set = frozenset(nc_promo_keys.tolist()) if nc_promo_keys is not None and nc_promo_keys.size > 0 else None
-    nc_window_months = int(State.new_customer_window_months or 3)
-
-    # Precompute New Customer promo date windows for force-assignment
-    if nc_promo_set is not None and customer_keys.size > 0 and start_month is not None:
-        _max_ckey = int(customer_keys.max())
-        _ckey_to_start_month = np.full(_max_ckey + 1, -1, dtype=np.int64)
-        _ckey_to_start_month[customer_keys] = start_month
-
-        _nc_min_month = int(month_offsets_int(date_pool).min())
-
+    # Exact CustomerStartDate and start+N-calendar-month deadline are derived
+    # once at worker bind and shared read-only across every chunk.
+    if nc_promo_set is not None and customer_keys.size > 0:
+        _ckey_to_start_day = getattr(
+            State, "customer_first_eff_start_by_key", None)
+        _ckey_to_deadline_day = getattr(
+            State, "customer_new_promo_end_by_key", None)
         nc_idx = np.isin(promo_keys_all, list(nc_promo_set))
         _nc_keys = promo_keys_all[nc_idx]
         _nc_starts = promo_start_all[nc_idx]
         _nc_ends = promo_end_all[nc_idx]
     else:
-        _ckey_to_start_month = None
-        _nc_min_month = 0
+        _ckey_to_start_day = None
+        _ckey_to_deadline_day = None
         _nc_keys = None
         _nc_starts = None
         _nc_ends = None
@@ -1802,7 +2059,8 @@ def build_chunk_table(
             order_dates = orders["order_dates"]
             line_num = orders["line_num"]
 
-            order_dates = _clamp_order_dates_to_customer_start(order_dates, customer_keys_out)
+            order_dates = _clamp_order_dates_to_customer_lifecycle(
+                order_dates, customer_keys_out)
 
             if _use_day_ids:
                 order_ids_int = _compute_day_based_order_ids(
@@ -1823,7 +2081,8 @@ def build_chunk_table(
             else:
                 _od_idx = rng.integers(0, len(month_date_pool), size=n_orders)
             order_dates = month_date_pool[_od_idx]
-            order_dates = _clamp_order_dates_to_customer_start(order_dates, customer_keys_out)
+            order_dates = _clamp_order_dates_to_customer_lifecycle(
+                order_dates, customer_keys_out)
             order_ids_int = None
             line_num = None
 
@@ -1878,6 +2137,21 @@ def build_chunk_table(
             getattr(State, "channel_prob_by_store", None),
             order_numbers=order_ids_int,
         )
+        if _organization_on:
+            sales_channel_key_arr = _apply_organization_channel_routing(
+                rng,
+                sales_channel_key_arr,
+                customer_keys_out,
+                order_numbers=order_ids_int,
+                order_starts=order_starts,
+                order_idx=order_idx,
+                business_channel_share=float(
+                    _organization_cfg.get("business_channel_share", 0.0)
+                ),
+                b2b_channel_share=float(
+                    _organization_cfg.get("b2b_channel_share", 0.70)
+                ),
+            )
 
         # --------------------------------------------------------
         # PRODUCTS (PER LINE) — each line gets its own product
@@ -1935,10 +2209,27 @@ def build_chunk_table(
                 num_themes=_basket_num_themes, strength=_basket_strength,
             )
 
+        if _segments_on:
+            prod_idx = _apply_segment_product_preferences(
+                rng,
+                prod_idx,
+                customer_keys_out,
+                _product_weight,
+                order_numbers=order_ids_int,
+                line_numbers=line_num,
+                income_strength=_income_strength,
+                organization_category_strength=(
+                    float(_organization_cfg.get("category_strength", 0.0))
+                    if _organization_on else 0.0
+                ),
+            )
+
         # CORRELATION #4: Channel → product eligibility enforcement
         prod_idx = _enforce_channel_product_eligibility(
             rng, prod_idx, sales_channel_key_arr,
             _pce, _ch2eg, _product_weight,
+            order_numbers=order_ids_int,
+            line_numbers=line_num,
         )
 
         customer_keys_out = np.asarray(customer_keys_out, dtype=np.int32)
@@ -2004,6 +2295,12 @@ def build_chunk_table(
                 channel_keys=_order_ch,
                 promo_channel_group=_pcg,
                 promo_salience_all=promo_salience_all,
+                customer_keys=customer_keys_out[order_starts],
+                customer_loyalty_tier_by_key=getattr(
+                    State, "customer_loyalty_tier_by_key", None),
+                customer_start_day_by_key=_ckey_to_start_day,
+                customer_new_promo_end_by_key=_ckey_to_deadline_day,
+                promo_audience_group=promo_audience_group,
             )
 
             promo_keys = np.asarray(promo_order_keys, dtype=np.int32)[order_idx]
@@ -2019,6 +2316,12 @@ def build_chunk_table(
                 channel_keys=sales_channel_key_arr,
                 promo_channel_group=_pcg,
                 promo_salience_all=promo_salience_all,
+                customer_keys=customer_keys_out,
+                customer_loyalty_tier_by_key=getattr(
+                    State, "customer_loyalty_tier_by_key", None),
+                customer_start_day_by_key=_ckey_to_start_day,
+                customer_new_promo_end_by_key=_ckey_to_deadline_day,
+                promo_audience_group=promo_audience_group,
             )
         promo_keys = np.asarray(promo_keys, dtype=np.int32)
 
@@ -2026,9 +2329,9 @@ def build_chunk_table(
         promo_keys = _apply_new_customer_promo(
             promo_keys, order_dates, customer_keys_out,
             sales_channel_key_arr,
-            _ckey_to_start_month, _nc_min_month,
+            _ckey_to_start_day, _ckey_to_deadline_day,
             _nc_keys, _nc_starts, _nc_ends,
-            nc_promo_set, nc_window_months,
+            nc_promo_set,
             no_discount_key,
             _pcg, promo_keys_all,
         )
@@ -2064,6 +2367,9 @@ def build_chunk_table(
             unit_price=unit_price,
             order_numbers=order_ids_int,
             line_numbers=line_num,
+            segment_multiplier=_organization_quantity_multiplier(
+                customer_keys_out, _organization_cfg,
+            ) if _organization_on else None,
         )
 
         price = compute_prices(
@@ -2077,6 +2383,10 @@ def build_chunk_table(
             qty=qty,
             price=price,
             promo_keys=promo_keys,
+            promo_discount_pct=(
+                promo_discount_pct_by_key[promo_keys]
+                if promo_discount_pct_by_key is not None else None
+            ),
             no_discount_key=no_discount_key,
             product_ids=product_keys,
             order_numbers=order_ids_int,

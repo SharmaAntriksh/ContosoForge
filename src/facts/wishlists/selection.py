@@ -139,13 +139,14 @@ def generate_wishlist_items(
     earliest_ns: np.ndarray,
     latest_ns: np.ndarray,
     items_per: np.ndarray,
-    purchased_map: Dict[int, List[int]],
+    purchased_map: Dict[int, List[Any]],
     prod_subcat: np.ndarray,
     n_products: int,
     global_cdf: np.ndarray,
     pool: SubcatPool,
     conversion_rate: float,
     affinity_strength: float,
+    pre_browse_days: int = 90,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Batch random generation + per-customer product selection.
 
@@ -158,7 +159,7 @@ def generate_wishlist_items(
         earliest_ns: earliest wishlist date (nanoseconds) per participant.
         latest_ns: latest wishlist date (nanoseconds) per participant.
         items_per: number of wishlist items per participant.
-        purchased_map: {customer_key: [product_indices]} from sales data.
+        purchased_map: {customer_key: [(product_index, first_purchase_ns)]}.
         prod_subcat: subcategory id per product (full product array).
         n_products: total number of products.
         global_cdf: cumulative probability distribution over all products.
@@ -246,8 +247,17 @@ def generate_wishlist_items(
             continue
         ck = int(cust_keys[i])
 
-        purch_list: List[int] = purchased_map.get(ck) or []
+        raw_purchases = purchased_map.get(ck) or []
+        purch_list: List[Tuple[int, int]] = []
+        for entry in raw_purchases:
+            if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                purch_list.append((int(entry[0]), int(entry[1])))
+            else:
+                # Backward-compatible unit-test/input shape. Production always
+                # supplies the actual first-purchase date.
+                purch_list.append((int(entry), int(latest_ns[i])))
         has_purch = len(purch_list) > 0
+        purchased_indices = {product_idx for product_idx, _ in purch_list}
 
         chosen_set: set = set()
         for j in range(n_items):
@@ -256,16 +266,41 @@ def generate_wishlist_items(
 
             # --- Conversion: pick from actual purchases ---
             if has_purch and _conv_rolls[pos] < conversion_rate:
-                avail = [p for p in purch_list if p not in chosen_set]
+                avail = [
+                    (product_idx, purchase_ns)
+                    for product_idx, purchase_ns in purch_list
+                    if product_idx not in chosen_set
+                    and purchase_ns >= int(earliest_ns[i])
+                ]
                 if avail:
-                    r = float(_misc[_mi]); _mi += 1
-                    out_prod_idx[pos] = avail[min(int(r * len(avail)), len(avail) - 1)]
-                    chosen_set.add(int(out_prod_idx[pos]))
-                    picked = True
+                    r = float(_misc[_mi])
+                    _mi += 1
+                    product_idx, purchase_ns = avail[
+                        min(int(r * len(avail)), len(avail) - 1)
+                    ]
+                    date_lo = max(
+                        int(earliest_ns[i]),
+                        purchase_ns - int(pre_browse_days) * NS_PER_DAY,
+                    )
+                    date_hi = min(int(latest_ns[i]), purchase_ns)
+                    if date_hi >= date_lo:
+                        span_days = max(
+                            1,
+                            (date_hi - date_lo) // NS_PER_DAY + 1,
+                        )
+                        date_offset = min(
+                            int(_date_rands[pos] * span_days),
+                            span_days - 1,
+                        )
+                        out_date_ns[pos] = date_lo + date_offset * NS_PER_DAY
+                        out_prod_idx[pos] = product_idx
+                        chosen_set.add(product_idx)
+                        picked = True
 
             # --- Affinity: pick from same subcategory ---
             if not picked and j > 0 and _aff_rolls[pos] < affinity_strength:
-                r = float(_misc[_mi]); _mi += 1
+                r = float(_misc[_mi])
+                _mi += 1
                 anchor_j = min(int(r * j), j - 1)
                 anchor = int(out_prod_idx[start + anchor_j])
                 sc = int(_prod_subcat[anchor])
@@ -280,20 +315,22 @@ def generate_wishlist_items(
                     if has_cdf and pool_len > 0:
                         sc_cdf_slice = _cdf_data_list[cs:ce]
                         for _ in range(_AFFINITY_RETRY_LIMIT):
-                            r = float(_misc[_mi]); _mi += 1
+                            r = float(_misc[_mi])
+                            _mi += 1
                             local_idx = bisect_left(sc_cdf_slice, r)
                             if local_idx >= pool_len:
                                 local_idx = pool_len - 1
                             pick = int(_pool_indices_arr[ps + local_idx])
-                            if pick not in chosen_set:
+                            if pick not in chosen_set and pick not in purchased_indices:
                                 out_prod_idx[pos] = pick
                                 chosen_set.add(pick)
                                 picked = True
                                 break
                     elif pool_len > 0:
-                        r = float(_misc[_mi]); _mi += 1
+                        r = float(_misc[_mi])
+                        _mi += 1
                         pick = int(_pool_indices_arr[ps + min(int(r * pool_len), pool_len - 1)])
-                        if pick not in chosen_set:
+                        if pick not in chosen_set and pick not in purchased_indices:
                             out_prod_idx[pos] = pick
                             chosen_set.add(pick)
                             picked = True
@@ -301,18 +338,19 @@ def generate_wishlist_items(
             # --- Default: use pre-generated global pick, dedup ---
             if not picked:
                 pick = int(out_prod_idx[pos])
-                if pick in chosen_set:
+                if pick in chosen_set or pick in purchased_indices:
                     for _ in range(_DEDUP_RETRY_LIMIT):
-                        r = float(_misc[_mi]); _mi += 1
+                        r = float(_misc[_mi])
+                        _mi += 1
                         pick = bisect_left(_global_cdf_list, r)
                         if pick >= _n_products:
                             pick = _n_products - 1
-                        if pick not in chosen_set:
+                        if pick not in chosen_set and pick not in purchased_indices:
                             out_prod_idx[pos] = pick
                             break
                     else:
                         for p in range(_n_products):
-                            if p not in chosen_set:
+                            if p not in chosen_set and p not in purchased_indices:
                                 out_prod_idx[pos] = p
                                 break
                 chosen_set.add(int(out_prod_idx[pos]))

@@ -11,7 +11,7 @@ Windows (spawn start method).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import pyarrow as pa
@@ -112,24 +112,42 @@ def _wishlist_worker_task(args: Tuple) -> Dict[str, Any]:
             pool=pool,
             conversion_rate=float(config_scalars["conversion_rate"]),
             affinity_strength=float(config_scalars["affinity_strength"]),
+            pre_browse_days=int(config_scalars["pre_browse_days"]),
         )
     )
 
     # --- Build output arrays ---
     global_row_start = int(participant_data["offsets"][0])
     out_wkey = np.arange(global_row_start + 1, global_row_start + total_rows + 1, dtype=np.int64)
+    _product_start_ns_raw = product_data.get("product_start_ns")
+    if _product_start_ns_raw is not None:
+        out_date_ns = np.maximum(
+            out_date_ns,
+            np.asarray(_product_start_ns_raw, dtype=np.int64)[out_prod_idx],
+        )
     out_pkey = prod_keys[out_prod_idx]
 
     # Resolve prices: SCD2 version lookup if available, otherwise current ListPrice
     _scd2_starts_raw = product_data.get("scd2_starts")
     _scd2_prices_raw = product_data.get("scd2_prices")
+    _scd2_keys_raw = product_data.get("scd2_keys")
     if _scd2_starts_raw is not None and _scd2_prices_raw is not None:
-        from src.facts.wishlists.scd2 import resolve_scd2_prices
+        from src.facts.wishlists.scd2 import (
+            resolve_scd2_prices,
+            resolve_scd2_product_keys,
+        )
         _scd2_starts = np.asarray(_scd2_starts_raw, dtype=np.int64)
         _scd2_prices = np.asarray(_scd2_prices_raw, dtype=np.float64)
         out_price = resolve_scd2_prices(
             out_prod_idx, out_date_ns, _scd2_starts, _scd2_prices,
         )
+        if _scd2_keys_raw is not None:
+            out_pkey = resolve_scd2_product_keys(
+                out_prod_idx,
+                out_date_ns,
+                _scd2_starts,
+                np.asarray(_scd2_keys_raw, dtype=np.int64),
+            )
     else:
         out_price = prod_prices[out_prod_idx]
 

@@ -26,8 +26,16 @@ from src.dimensions.customers.subscriptions.helpers import (
     month_start_date,
     month_end_date,
     bridge_schema,
+    generate_subscriptions_bulk,
+    prorate_period_prices,
     trial_period_price,
     _NS_PER_DAY,
+)
+from src.dimensions.customers.subscriptions.bridge_parallel import (
+    write_bridge_parallel,
+)
+from src.dimensions.customers.subscriptions.bridge_serial import (
+    write_bridge_streaming,
 )
 
 
@@ -208,6 +216,26 @@ class TestPlanSelection:
         plans = choose_plans_diverse(rng, 100, unique_types, type_members, type_weights)
         assert len(plans) == len(unique_types)
 
+    def test_choose_diverse_excludes_unlaunched_plans(self):
+        dim = build_dim_plans(pd.Timestamp("2020-01-01"))
+        plan_types = dim["PlanType"].astype(str).to_numpy()
+        unique_types, type_members, type_weights = build_type_groups(plan_types)
+        launch_ns = pd.to_datetime(dim["LaunchDate"]).to_numpy(
+            dtype="datetime64[ns]",
+        ).view(np.int64)
+
+        plans = choose_plans_diverse(
+            np.random.default_rng(42),
+            5,
+            unique_types,
+            type_members,
+            type_weights,
+            plan_launch_ns=launch_ns,
+            latest_start_ns=pd.Timestamp("2020-01-31").value,
+        )
+
+        assert (launch_ns[plans] <= pd.Timestamp("2020-01-31").value).all()
+
 
 # ===================================================================
 # Customer windows tests
@@ -287,6 +315,122 @@ class TestTrialPeriodPrice:
         assert out[2] == 30.0
 
 
+class TestClippedPeriodPricing:
+    def test_exact_calendar_day_proration(self):
+        nominal_start = np.array(["2024-01-01"], dtype="datetime64[D]")
+        nominal_end = np.array(["2024-01-31"], dtype="datetime64[D]")
+        actual_start = np.array(["2024-01-16"], dtype="datetime64[D]")
+        actual_end = np.array(["2024-01-31"], dtype="datetime64[D]")
+
+        out = prorate_period_prices(
+            np.array([31.0]),
+            nominal_start,
+            nominal_end,
+            actual_start,
+            actual_end,
+            np.array([False]),
+            14,
+        )
+
+        assert out[0] == 16.0
+
+    def test_trial_applies_to_clipped_days(self):
+        dates = np.array(["2024-01-01"], dtype="datetime64[D]")
+        end = np.array(["2024-01-14"], dtype="datetime64[D]")
+        out = prorate_period_prices(
+            np.array([31.0]), dates, np.array(["2024-01-31"], dtype="datetime64[D]"),
+            dates, end, np.array([True]), 14,
+        )
+        assert out[0] == 0.0
+
+
+def _generate_one_customer_subscriptions(
+    *,
+    churn_rate: float = 0.0,
+    trial_rate: float = 0.0,
+    trial_conversion_rate: float = 1.0,
+):
+    lo = pd.Timestamp("2024-01-15")
+    hi = pd.Timestamp("2024-04-10")
+    return generate_subscriptions_bulk(
+        eligible_ck=np.array([1], dtype=np.int32),
+        eligible_lo=np.array([lo.value], dtype=np.int64),
+        eligible_hi=np.array([hi.value], dtype=np.int64),
+        eligible_span=np.array([(hi - lo).days], dtype=np.int64),
+        plan_keys=np.array([7], dtype=np.int32),
+        plan_cycle_prices=np.array([31.0]),
+        plan_cycle_months=np.array([1], dtype=np.int32),
+        unique_types=np.array(["Streaming"], dtype=object),
+        type_members=[np.array([0], dtype=np.int64)],
+        type_weights=np.array([1.0]),
+        g_end_ns=pd.Timestamp("2024-12-31").value,
+        max_subs=1,
+        avg_subscriptions=1.0,
+        churn_rate=churn_rate,
+        trial_rate=trial_rate,
+        trial_conversion_rate=trial_conversion_rate,
+        trial_days=14,
+        rng=np.random.default_rng(42),
+    ).to_pandas()
+
+
+class TestSubscriptionLifecycleContract:
+    def test_periods_stay_inside_customer_and_global_bounds(self):
+        df = _generate_one_customer_subscriptions()
+        assert pd.to_datetime(df["PeriodStartDate"]).min() >= pd.Timestamp("2024-01-15")
+        assert pd.to_datetime(df["PeriodEndDate"]).max() <= pd.Timestamp("2024-04-10")
+        assert (df["PeriodStartDate"] <= df["PeriodEndDate"]).all()
+        assert df["BillingCycleNumber"].tolist() == list(range(1, len(df) + 1))
+        assert df["TerminationReason"].iloc[-1] == "CustomerLifecycleEnd"
+        assert not df["IsChurnPeriod"].any()
+
+    def test_trial_non_conversion_is_not_voluntary_churn(self):
+        df = _generate_one_customer_subscriptions(
+            trial_rate=1.0,
+            trial_conversion_rate=0.0,
+        )
+        assert df["TerminationReason"].iloc[-1] == "TrialNonConversion"
+        assert not df["IsChurnPeriod"].any()
+        assert df["PeriodPrice"].sum() == 0.0
+
+    def test_voluntary_churn_is_explicit(self):
+        df = _generate_one_customer_subscriptions(churn_rate=1.0)
+        if df["TerminationReason"].iloc[-1] == "VoluntaryChurn":
+            assert bool(df["IsChurnPeriod"].iloc[-1])
+
+    def test_serial_and_parallel_outputs_match(self, tmp_path):
+        customers = pd.DataFrame({
+            "CustomerKey": np.arange(1, 25, dtype=np.int32),
+            "CustomerStartDate": pd.Timestamp("2024-01-15"),
+            "CustomerEndDate": pd.Timestamp("2024-10-20"),
+        })
+        plans = build_dim_plans(pd.Timestamp("2024-01-01"))
+        cfg = SubscriptionsCfg(
+            participation_rate=1.0,
+            avg_subscriptions=1.5,
+            max_subscriptions=3,
+            seed=73,
+        )
+        serial_path = tmp_path / "serial.parquet"
+        parallel_path = tmp_path / "parallel.parquet"
+
+        write_bridge_streaming(
+            customers, plans, cfg,
+            pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31"),
+            serial_path,
+        )
+        write_bridge_parallel(
+            customers, plans, cfg,
+            pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31"),
+            parallel_path,
+            workers=1,
+        )
+
+        serial = pd.read_parquet(serial_path).reset_index(drop=True)
+        parallel = pd.read_parquet(parallel_path).reset_index(drop=True)
+        pd.testing.assert_frame_equal(serial, parallel)
+
+
 # ===================================================================
 # Bridge schema tests
 # ===================================================================
@@ -294,7 +438,7 @@ class TestTrialPeriodPrice:
 class TestBridgeSchema:
     def test_column_count(self):
         schema = bridge_schema()
-        assert len(schema) == 10
+        assert len(schema) == 11
 
     def test_column_names(self):
         schema = bridge_schema()
@@ -305,6 +449,7 @@ class TestBridgeSchema:
         assert "PeriodStartDate" in names
         assert "IsTrialPeriod" in names
         assert "BillingCycleNumber" in names
+        assert "TerminationReason" in names
 
 
 # ===================================================================
@@ -369,7 +514,6 @@ class TestEdgeCases:
 
     def test_zero_month_window_eligible(self):
         """A customer window of zero days should still be handled without crash."""
-        sub_ns = int(pd.Timestamp("2024-06-15").value)
         # Zero-length windows are filtered by eligibility in bulk generation;
         # verify the compute_customer_windows helper handles them gracefully.
         cust = pd.DataFrame({

@@ -163,14 +163,32 @@ def choose_plans_diverse(
     unique_types: np.ndarray,
     type_members: List[np.ndarray],
     type_weights: np.ndarray,
+    plan_launch_ns: Optional[np.ndarray] = None,
+    latest_start_ns: Optional[int] = None,
 ) -> np.ndarray:
-    """Pick n_subs plans from distinct PlanTypes."""
-    n_types = len(unique_types)
-    n_subs = min(n_subs, n_types)
-    chosen_type_idx = rng.choice(n_types, size=n_subs, replace=False, p=type_weights)
+    """Pick plans from distinct types that are launched by the customer horizon."""
+    eligible_type_idx = np.arange(len(unique_types), dtype=np.intp)
+    eligible_members = type_members
+    if plan_launch_ns is not None and latest_start_ns is not None:
+        eligible_members = [
+            members[plan_launch_ns[members] <= int(latest_start_ns)]
+            for members in type_members
+        ]
+        eligible_type_idx = np.array([
+            idx for idx, members in enumerate(eligible_members) if len(members)
+        ], dtype=np.intp)
+
+    n_subs = min(n_subs, len(eligible_type_idx))
+    if n_subs <= 0:
+        return np.empty(0, dtype=np.intp)
+    eligible_weights = type_weights[eligible_type_idx]
+    eligible_weights = eligible_weights / eligible_weights.sum()
+    chosen_type_idx = rng.choice(
+        eligible_type_idx, size=n_subs, replace=False, p=eligible_weights,
+    )
     plan_idx = np.empty(n_subs, dtype=np.intp)
     for i, ti in enumerate(chosen_type_idx):
-        members = type_members[ti]
+        members = eligible_members[ti]
         plan_idx[i] = members[rng.integers(len(members))]
     return plan_idx
 
@@ -226,6 +244,7 @@ def bridge_schema() -> pa.Schema:
         pa.field("IsChurnPeriod", pa.bool_()),
         pa.field("IsTrialPeriod", pa.bool_()),
         pa.field("BillingCycleNumber", pa.int32()),
+        pa.field("TerminationReason", pa.string(), nullable=True),
     ])
 
 
@@ -296,6 +315,48 @@ def trial_period_price(
     )
 
 
+def prorate_period_prices(
+    cycle_price: np.ndarray,
+    nominal_start: np.ndarray,
+    nominal_end: np.ndarray,
+    actual_start: np.ndarray,
+    actual_end: np.ndarray,
+    is_trial_period: np.ndarray,
+    trial_days: int,
+    trial_start: Optional[np.ndarray] = None,
+    trial_end: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Prorate clipped billing periods using exact inclusive calendar days.
+
+    ``cycle_price`` prices the full nominal calendar cycle. The first and last
+    periods may be clipped by subscription/customer/dataset boundaries. A free
+    trial removes at most ``trial_days`` from the already-clipped first period.
+    """
+    nominal_days = (
+        nominal_end.astype("datetime64[D]")
+        - nominal_start.astype("datetime64[D]")
+    ).astype(np.int64) + 1
+    actual_days = (
+        actual_end.astype("datetime64[D]")
+        - actual_start.astype("datetime64[D]")
+    ).astype(np.int64) + 1
+    actual_days = np.maximum(actual_days, 0)
+    trial_mask = np.asarray(is_trial_period).astype(bool)
+    if trial_start is not None and trial_end is not None:
+        overlap_start = np.maximum(actual_start, trial_start)
+        overlap_end = np.minimum(actual_end, trial_end)
+        free_days = (
+            overlap_end.astype("datetime64[D]")
+            - overlap_start.astype("datetime64[D]")
+        ).astype(np.int64) + 1
+        free_days = np.where(trial_mask, np.maximum(free_days, 0), 0)
+    else:
+        free_days = np.where(trial_mask, np.minimum(actual_days, int(trial_days)), 0)
+    billable_days = np.maximum(actual_days - free_days, 0)
+    fraction = billable_days / np.maximum(nominal_days, 1)
+    return np.round(np.asarray(cycle_price, dtype=np.float64) * fraction, 2)
+
+
 def generate_subscriptions_bulk(
     eligible_ck: np.ndarray,
     eligible_lo: np.ndarray,
@@ -316,6 +377,7 @@ def generate_subscriptions_bulk(
     trial_days: int,
     rng: np.random.Generator,
     sub_key_start: int = 1,
+    plan_launch_ns: Optional[np.ndarray] = None,
 ) -> pa.Table:
     """Generate all subscription billing-period rows in vectorized bulk.
 
@@ -334,26 +396,31 @@ def generate_subscriptions_bulk(
         1, max_subs,
     ).astype(np.int32)
 
-    total_subs = int(n_subs_arr.sum())
-
-    # Customer index for each subscription
-    cust_idx = np.repeat(np.arange(n_eligible, dtype=np.int32), n_subs_arr)
-
     # ------------------------------------------------------------------
     # 2. Plan selection — must respect diverse type selection per customer
     #    Loop over customers but the inner work is minimal (RNG + indexing)
     # ------------------------------------------------------------------
-    sub_plan_idx = np.empty(total_subs, dtype=np.int32)
-    pos = 0
+    chosen_by_customer: List[np.ndarray] = []
+    actual_counts = np.empty(n_eligible, dtype=np.int32)
     for i in range(n_eligible):
         ns = int(n_subs_arr[i])
-        chosen = choose_plans_diverse(rng, ns, unique_types, type_members, type_weights)
-        sub_plan_idx[pos:pos + len(chosen)] = chosen
-        pos += len(chosen)
-    # Trim if choose_plans_diverse returned fewer than requested
-    total_subs = pos
-    cust_idx = cust_idx[:total_subs]
-    sub_plan_idx = sub_plan_idx[:total_subs]
+        chosen = choose_plans_diverse(
+            rng,
+            ns,
+            unique_types,
+            type_members,
+            type_weights,
+            plan_launch_ns=plan_launch_ns,
+            latest_start_ns=int(eligible_hi[i]),
+        )
+        chosen_by_customer.append(chosen.astype(np.int32, copy=False))
+        actual_counts[i] = len(chosen)
+    n_subs_arr = actual_counts
+    total_subs = int(n_subs_arr.sum())
+    if total_subs == 0:
+        return bridge_schema().empty_table()
+    cust_idx = np.repeat(np.arange(n_eligible, dtype=np.int32), n_subs_arr)
+    sub_plan_idx = np.concatenate(chosen_by_customer).astype(np.int32, copy=False)
 
     # ------------------------------------------------------------------
     # 3. Subscription start offsets (vectorized per customer group)
@@ -377,6 +444,11 @@ def generate_subscriptions_bulk(
     lo_ns = eligible_lo[cust_idx]
     hi_ns = eligible_hi[cust_idx]
     sub_ns = lo_ns + raw_offsets * _NS_PER_DAY
+    if plan_launch_ns is not None:
+        # A subscription cannot start before its plan is commercially active.
+        # Plan selection above guarantees the launch is still within the
+        # customer's observable lifecycle.
+        sub_ns = np.maximum(sub_ns, plan_launch_ns[sub_plan_idx])
 
     cycle_months = plan_cycle_months[sub_plan_idx]
     cycle_prices = plan_cycle_prices[sub_plan_idx]
@@ -396,13 +468,27 @@ def generate_subscriptions_bulk(
     is_churned = rng.random(total_subs) < churn_rate
     end_ns = sub_ns + base_duration_days * _NS_PER_DAY
 
-    # Cancel logic
+    # Termination logic. IsChurnPeriod is reserved for modeled voluntary churn;
+    # trial non-conversion and observation/lifecycle censoring are separate.
     cancel_ns = np.full(total_subs, -1, dtype=np.int64)  # -1 = no cancel
     no_convert = ~converts
-    cancel_ns[no_convert] = sub_ns[no_convert]
-    churn_ok = is_churned & converts & (end_ns <= hi_ns)
+    trial_end_ns = sub_ns + np.int64(max(trial_days - 1, 0)) * _NS_PER_DAY
+    cancel_ns[no_convert] = trial_end_ns[no_convert]
+    observable_end_ns = np.minimum(hi_ns, np.int64(g_end_ns))
+    churn_ok = is_churned & converts & (end_ns <= observable_end_ns)
     cancel_ns[churn_ok] = end_ns[churn_ok]
     has_cancel = cancel_ns >= 0
+
+    effective_end_ns = np.minimum(observable_end_ns, np.where(
+        has_cancel, cancel_ns, observable_end_ns,
+    ))
+    effective_end_ns = np.maximum(effective_end_ns, sub_ns)
+
+    termination_reason = np.full(total_subs, "DatasetEnd", dtype=object)
+    lifecycle_end = (~has_cancel) & (hi_ns < np.int64(g_end_ns))
+    termination_reason[lifecycle_end] = "CustomerLifecycleEnd"
+    termination_reason[churn_ok] = "VoluntaryChurn"
+    termination_reason[no_convert] = "TrialNonConversion"
 
     # RNG consumption for payment method (maintain stream compatibility)
     rng.choice(len(PAYMENT_METHODS), size=total_subs, p=_PAYMENT_WEIGHTS)
@@ -410,8 +496,7 @@ def generate_subscriptions_bulk(
     # ------------------------------------------------------------------
     # 5. Compute number of billing periods per subscription (vectorized)
     # ------------------------------------------------------------------
-    # end_ref = cancel_ns if has_cancel else g_end_ns
-    end_ref = np.where(has_cancel, cancel_ns, np.int64(g_end_ns))
+    end_ref = effective_end_ns
 
     sub_y, sub_m = _ns_to_year_month_arrays(sub_ns)
     end_y, end_m = _ns_to_year_month_arrays(end_ref)
@@ -435,9 +520,12 @@ def generate_subscriptions_bulk(
     r_sub_y = np.repeat(sub_y, n_periods)
     r_sub_m = np.repeat(sub_m, n_periods)
     r_cycle_months = np.repeat(cycle_months, n_periods)
-    r_has_cancel = np.repeat(has_cancel, n_periods)
     r_has_trial = np.repeat(has_trial, n_periods)
     r_n_periods = np.repeat(n_periods, n_periods)
+    r_sub_ns = np.repeat(sub_ns, n_periods)
+    r_effective_end_ns = np.repeat(effective_end_ns, n_periods)
+    r_termination_reason = np.repeat(termination_reason, n_periods)
+    r_voluntary_churn = np.repeat(churn_ok, n_periods)
 
     # Period index within each subscription (0, 1, 2, ...)
     offsets = np.zeros(total_subs + 1, dtype=np.int64)
@@ -451,23 +539,43 @@ def generate_subscriptions_bulk(
     abs_month = base_month + total_month_offset
     ps_year = (abs_month // 12 + 1970).astype(np.int32)
     ps_month = (abs_month % 12 + 1).astype(np.int32)
-    period_start = _month_start_dates(ps_year, ps_month)
+    nominal_start = _month_start_dates(ps_year, ps_month)
 
     abs_end_month = base_month + total_month_offset + (r_cycle_months - 1).astype(np.int64)
     pe_year = (abs_end_month // 12 + 1970).astype(np.int32)
     pe_month = (abs_end_month % 12 + 1).astype(np.int32)
-    period_end = _month_end_dates(pe_year, pe_month)
+    nominal_end = _month_end_dates(pe_year, pe_month)
+
+    subscription_start = r_sub_ns.astype("datetime64[ns]").astype("datetime64[D]")
+    effective_end = (
+        r_effective_end_ns.astype("datetime64[ns]").astype("datetime64[D]")
+    )
+    period_start = np.maximum(nominal_start, subscription_start)
+    period_end = np.minimum(nominal_end, effective_end)
 
     # Flags
     billing_cycle = (period_idx + 1).astype(np.int32)
     is_first = (period_idx == 0).astype(np.int32)
     is_last = (period_idx == r_n_periods - 1)
-    is_churn = (is_last & r_has_cancel).astype(np.int32)
-    is_trial_period = (is_first.astype(bool) & r_has_trial).astype(np.int32)
+    is_churn = (is_last & r_voluntary_churn).astype(np.int32)
+    trial_start = subscription_start
+    trial_end = trial_start + np.timedelta64(max(trial_days - 1, 0), "D")
+    is_trial_period = (
+        r_has_trial & (period_start <= trial_end) & (period_end >= trial_start)
+    ).astype(np.int32)
+    out_termination_reason = np.where(is_last, r_termination_reason, None)
 
-    # Trial periods are charged only for the cycle portion after the free
-    # trial_days window (a 14-day trial no longer waives a full month/quarter/year).
-    r_price = trial_period_price(r_price, r_cycle_months, is_trial_period, trial_days)
+    r_price = prorate_period_prices(
+        r_price,
+        nominal_start,
+        nominal_end,
+        period_start,
+        period_end,
+        is_trial_period,
+        trial_days,
+        trial_start,
+        trial_end,
+    )
 
     # ------------------------------------------------------------------
     # 7. Build Arrow table
@@ -485,6 +593,7 @@ def generate_subscriptions_bulk(
             pa.array(is_churn),
             pa.array(is_trial_period),
             pa.array(billing_cycle),
+            pa.array(out_termination_reason, type=pa.string()),
         ],
         schema=schema,
     )

@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from src.defaults import FACT_MAX_PARALLEL_CHUNKS
 from src.exceptions import DimensionError
 from src.utils.logging_utils import info
 
@@ -34,6 +35,7 @@ class _SubWorkerTask(NamedTuple):
     plan_keys: np.ndarray
     plan_cycle_prices: np.ndarray
     plan_cycle_months: np.ndarray
+    plan_launch_ns: np.ndarray
     unique_types: np.ndarray
     type_members: list
     type_weights: np.ndarray
@@ -78,6 +80,7 @@ def _subscription_worker_task(args: _SubWorkerTask) -> Dict[str, Any]:
         trial_days=args.trial_days,
         rng=rng,
         sub_key_start=args.sub_key_start,
+        plan_launch_ns=args.plan_launch_ns,
     )
 
     n_rows = len(table)
@@ -153,6 +156,9 @@ def write_bridge_parallel(
     plan_types = dim_plans["PlanType"].astype(str).to_numpy()
     plan_cycle_prices = dim_plans["CyclePrice"].to_numpy(dtype=np.float64, na_value=0.0)
     plan_cycle_months = dim_plans["CycleMonths"].astype(np.int32).to_numpy()
+    plan_launch_ns = pd.to_datetime(dim_plans["LaunchDate"]).to_numpy(
+        dtype="datetime64[ns]",
+    ).view(np.int64)
     unique_types, type_members, type_weights = build_type_groups(plan_types)
 
     cust_keys, cust_start_ns, cust_end_ns = compute_customer_windows(customers, g_start, g_end)
@@ -178,7 +184,8 @@ def write_bridge_parallel(
     n_cpus = max(1, cpu_count() - 1)
     if workers is not None and workers >= 1:
         n_cpus = min(n_cpus, workers)
-    n_chunks = max(2, min(n_eligible, n_cpus * 2))
+    # Chunk count depends only on the data, matching the serial writer exactly.
+    n_chunks = max(1, min(n_eligible, FACT_MAX_PARALLEL_CHUNKS))
     n_workers = min(n_chunks, n_cpus)
 
     info(f"Subscriptions parallel: {n_eligible:,} eligible customers, "
@@ -206,6 +213,7 @@ def write_bridge_parallel(
             plan_keys=plan_keys,
             plan_cycle_prices=plan_cycle_prices,
             plan_cycle_months=plan_cycle_months,
+            plan_launch_ns=plan_launch_ns,
             unique_types=unique_types,
             type_members=type_members,
             type_weights=type_weights,

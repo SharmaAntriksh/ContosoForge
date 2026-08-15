@@ -436,7 +436,7 @@ def compute_inventory_snapshots(
         daily_demand = np.maximum(1.0, sold * (1.0 / 30.0))
         days_oos = np.where(
             stockout_mask,
-            np.minimum(30, (np.abs(qoh) / daily_demand).astype(np.int32)),
+            np.minimum(30, np.ceil(np.abs(qoh) / daily_demand).astype(np.int32)),
             0,
         )
         qoh = np.maximum(qoh, 0)

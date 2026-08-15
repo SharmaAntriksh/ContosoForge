@@ -27,6 +27,8 @@ class PromoPool:
     promo_keys_all: np.ndarray
     promo_start_all: np.ndarray
     promo_end_all: np.ndarray
+    promo_discount_pct_all: np.ndarray
+    promo_audience_group: np.ndarray
     new_customer_promo_keys: np.ndarray
 
 
@@ -76,6 +78,13 @@ class CustomerPool:
     customer_base_weight: Optional[np.ndarray]
     customer_geo_key: Optional[np.ndarray]
     customer_first_eff_start_by_key: Optional[np.ndarray]
+    customer_last_eff_end_by_key: Optional[np.ndarray]
+    customer_loyalty_tier_by_key: Optional[np.ndarray]
+    customer_income_score_by_key: Optional[np.ndarray]
+    customer_is_organization_by_key: Optional[np.ndarray]
+    customer_org_scale_score_by_key: Optional[np.ndarray]
+    customer_org_procurement_score_by_key: Optional[np.ndarray]
+    customer_org_preferred_category_mask_by_key: Optional[np.ndarray]
     customer_scd2_active: bool
     customer_scd2_starts: Optional[np.ndarray]
     customer_scd2_keys: Optional[np.ndarray]
@@ -92,6 +101,10 @@ class ProductPool:
     product_subcat_key: Optional[np.ndarray]
     product_popularity: Optional[np.ndarray]
     product_seasonality: Optional[np.ndarray]
+    product_return_risk_by_key: Optional[np.ndarray]
+    product_defect_risk_by_key: Optional[np.ndarray]
+    product_price_score: Optional[np.ndarray]
+    product_category_key: Optional[np.ndarray]
     date_pool: np.ndarray
     date_prob: np.ndarray
     product_scd2_active: bool

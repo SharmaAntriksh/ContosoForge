@@ -12,7 +12,6 @@ from src.facts.wishlists.constants import (
     NS_PER_DAY,
     PRIORITY_VALUES,
     PRIORITY_WEIGHTS,
-    WishlistsCfg,
     bridge_schema,
     read_cfg,
 )
@@ -23,7 +22,11 @@ from src.facts.wishlists.selection import (
     pool_to_dict,
     subcategory_pool_from_dict,
 )
-from src.facts.wishlists.scd2 import build_scd2_price_lookup, resolve_scd2_prices
+from src.facts.wishlists.scd2 import (
+    build_scd2_price_lookup,
+    resolve_scd2_prices,
+    resolve_scd2_product_keys,
+)
 
 
 # ===================================================================
@@ -48,6 +51,7 @@ class TestWishlistAccumulator:
         micro = {
             "customer_key": np.array([1, 2, 3], dtype=np.int64),
             "product_key": np.array([10, 20, 30], dtype=np.int64),
+            "first_purchase_ns": np.array([3, 2, 1], dtype=np.int64),
         }
         acc.add(micro)
         assert acc.has_data is True
@@ -70,10 +74,12 @@ class TestWishlistAccumulator:
         acc.add({
             "customer_key": np.array([1, 1, 2], dtype=np.int64),
             "product_key": np.array([10, 10, 20], dtype=np.int64),
+            "first_purchase_ns": np.array([5, 3, 4], dtype=np.int64),
         })
         acc.add({
             "customer_key": np.array([1, 3], dtype=np.int64),
             "product_key": np.array([10, 30], dtype=np.int64),
+            "first_purchase_ns": np.array([2, 6], dtype=np.int64),
         })
         df = acc.finalize()
         assert len(df) == 3  # (1,10), (2,20), (3,30) — duplicate (1,10) removed
@@ -83,13 +89,30 @@ class TestWishlistAccumulator:
         acc.add({
             "customer_key": np.array([1], dtype=np.int64),
             "product_key": np.array([10], dtype=np.int64),
+            "first_purchase_ns": np.array([1], dtype=np.int64),
         })
         acc.add({
             "customer_key": np.array([2], dtype=np.int64),
             "product_key": np.array([20], dtype=np.int64),
+            "first_purchase_ns": np.array([2], dtype=np.int64),
         })
         df = acc.finalize()
         assert len(df) == 2
+
+    def test_first_purchase_date_is_minimum_across_chunks(self):
+        acc = WishlistAccumulator()
+        acc.add({
+            "customer_key": np.array([1], dtype=np.int64),
+            "product_key": np.array([10], dtype=np.int64),
+            "first_purchase_ns": np.array([5 * NS_PER_DAY], dtype=np.int64),
+        })
+        acc.add({
+            "customer_key": np.array([1], dtype=np.int64),
+            "product_key": np.array([10], dtype=np.int64),
+            "first_purchase_ns": np.array([2 * NS_PER_DAY], dtype=np.int64),
+        })
+        df = acc.finalize()
+        assert df["FirstPurchaseDate"].iloc[0] == pd.Timestamp("1970-01-03")
 
 
 # ===================================================================
@@ -99,9 +122,15 @@ class TestWishlistAccumulator:
 
 class TestMicroAggregateWishlists:
     def _make_table(self, ck, pk):
+        n = len(ck)
         return pa.table({
             "CustomerKey": pa.array(ck, type=pa.int64()),
             "ProductKey": pa.array(pk, type=pa.int64()),
+            "OrderDate": pa.array(
+                np.arange(n, dtype="timedelta64[D]")
+                + np.datetime64("2024-01-01", "D"),
+                type=pa.date32(),
+            ),
         })
 
     def test_basic_extraction(self):
@@ -334,6 +363,28 @@ class TestGenerateWishlistItems:
         # All 5 products are purchased — with conversion_rate=1.0 all should come from purchases
         assert set(out_prod_idx).issubset({0, 1, 2, 3, 4})
 
+    def test_converted_item_is_dated_before_first_purchase(self):
+        prod_subcat, _, pool, global_cdf = self._setup()
+        purchase_ns = 100 * NS_PER_DAY
+        out_prod_idx, _, out_date_ns, _, _ = generate_wishlist_items(
+            np.random.default_rng(42),
+            cust_keys=np.array([100], dtype=np.int64),
+            earliest_ns=np.array([0], dtype=np.int64),
+            latest_ns=np.array([200 * NS_PER_DAY], dtype=np.int64),
+            items_per=np.array([1], dtype=np.int64),
+            purchased_map={100: [(2, purchase_ns)]},
+            prod_subcat=prod_subcat,
+            n_products=5,
+            global_cdf=global_cdf,
+            pool=pool,
+            conversion_rate=1.0,
+            affinity_strength=0.0,
+            pre_browse_days=30,
+        )
+
+        assert out_prod_idx[0] == 2
+        assert 70 * NS_PER_DAY <= out_date_ns[0] <= purchase_ns
+
     def test_deterministic(self):
         """Same seed produces same output."""
         prod_subcat, _, pool, global_cdf = self._setup()
@@ -514,3 +565,27 @@ class TestResolveSCD2Prices:
         assert prices[0] == 8.0   # product 0, day 90 → version 0
         assert prices[1] == 10.0  # product 0, day 200 → version 1
         assert prices[2] == 20.0  # product 1, day 100 → version 0
+
+    def test_resolve_product_key_valid_on_added_date(self):
+        all_products = pd.DataFrame({
+            "ProductID": [100, 100, 200],
+            "ProductKey": [1, 2, 3],
+            "ListPrice": [8.0, 10.0, 20.0],
+            "EffectiveStartDate": ["2023-01-01", "2023-07-01", "2023-01-01"],
+        })
+        starts, _, keys = build_scd2_price_lookup(
+            all_products,
+            prod_ids_current=np.array([100, 200], dtype=np.int64),
+            prod_prices_current=np.array([10.0, 20.0]),
+            prod_keys_current=np.array([2, 3], dtype=np.int64),
+            include_product_keys=True,
+        )
+        date_ns = pd.to_datetime([
+            "2023-03-01", "2023-09-01",
+        ]).to_numpy(dtype="datetime64[ns]").view(np.int64)
+
+        resolved = resolve_scd2_product_keys(
+            np.array([0, 0]), date_ns, starts, keys,
+        )
+
+        assert resolved.tolist() == [1, 2]

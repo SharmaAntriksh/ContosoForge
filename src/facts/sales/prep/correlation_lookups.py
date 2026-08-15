@@ -66,6 +66,23 @@ def _build_correlation_lookups(
             sk_int = int(sk)
             st = store_type_map.get(sk_int, "")
             keys, probs = STORE_TYPE_CHANNEL_MAP.get(st, DEFAULT_CHANNEL_MAP)
+            # B2B and PartnerReseller are account-level routes, not walk-in
+            # storefront routes. Make them valid at every fulfillment location
+            # with zero baseline weight; the organization segment model opts
+            # eligible orders into them explicitly. This avoids making business
+            # channels disappear whenever a generated store sample happens to
+            # contain no Warehouse store while leaving consumer channel shares
+            # unchanged.
+            _missing_business = [k for k in (4, 9) if k not in keys]
+            if _missing_business:
+                keys = np.concatenate([
+                    np.asarray(keys, dtype=np.int16),
+                    np.asarray(_missing_business, dtype=np.int16),
+                ])
+                probs = np.concatenate([
+                    np.asarray(probs, dtype=np.float64),
+                    np.zeros(len(_missing_business), dtype=np.float64),
+                ])
             store_channel_keys_list[sk_int] = keys
             channel_prob_by_store_list[sk_int] = probs / probs.sum()
     else:

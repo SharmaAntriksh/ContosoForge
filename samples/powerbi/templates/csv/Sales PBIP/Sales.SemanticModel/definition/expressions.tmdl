@@ -263,7 +263,7 @@ expression Transform_Inventory_File =
 
 expression Sample_File_Wishlist =
 		let
-		    Source = Folder.Files("C:\Users\antsharma\Downloads\synthetic-data-generator\generated_datasets\2026-03-30 03_54_25 PM Customers 43K Sales 1M CSV\facts\customer_wishlists"),
+		    Source = Folder.Files(ContosoFolder & "\facts\customer_wishlists"),
 		    Navigation1 = Source{0}[Content]
 		in
 		    Navigation1

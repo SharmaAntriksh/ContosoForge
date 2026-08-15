@@ -783,6 +783,7 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("IsChurnPeriod", BIT(not_null=True)),
         ("IsTrialPeriod", BIT(not_null=True)),
         ("BillingCycleNumber", INT(not_null=True)),
+        ("TerminationReason", VARCHAR(40, not_null=False)),
     ),
     "Complaints": (
         ("ComplaintKey", INT_NN),

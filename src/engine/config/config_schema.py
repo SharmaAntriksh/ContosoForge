@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # =========================================================================
@@ -261,6 +261,10 @@ class DatesTableConfig(_Base):
     fiscal_start_month: int = 5
     as_of_date: Optional[str] = None
     spaced_column_names: bool = False
+    # Calendar coverage beyond the final sales date for returns, complaints,
+    # and their resolution dates. This extends Dates only; it does not add sales
+    # demand months or extend subscriptions.
+    post_sale_tail_days: int = Field(120, ge=0, le=3660)
 
     @model_validator(mode="before")
     @classmethod
@@ -342,7 +346,10 @@ class CurrencyConfig(_Base):
 
 class ExchangeRatesConfig(_Base):
     from_currencies: List[str] = ["USD"]
-    to_currencies: List[str] = ["CAD", "GBP", "EUR", "INR", "AUD", "CNY", "JPY"]
+    to_currencies: List[str] = [
+        "CAD", "GBP", "EUR", "INR", "AUD", "CNY", "JPY",
+        "NOK", "PLN", "SEK", "CHF",
+    ]
     base_currency: str = "USD"
     future_annual_drift: float = 0.02
     include_monthly: bool = True
@@ -456,7 +463,8 @@ class ProductsConfig(_Base):
 # -- Promotions --
 
 class PromotionsConfig(_Base):
-    new_customer_window_months: int = 3
+    # Exact calendar months after CustomerStartDate (inclusive deadline).
+    new_customer_window_months: int = Field(3, ge=0, le=120)
     num_seasonal: Optional[int] = None
     num_clearance: Optional[int] = None
     num_limited: Optional[int] = None
@@ -703,10 +711,21 @@ class ComplaintsConfig(_Base):
     max_complaints: int = 5
     resolution_rate: float = 0.85
     escalation_rate: float = 0.10
+    min_days_after_anchor: int = Field(0, ge=0, le=3660)
+    max_days_after_anchor: int = Field(30, ge=0, le=3660)
     avg_response_days: int = 5
     max_response_days: int = 30
     seed: Optional[int] = 600
     write_chunk_rows: int = 250_000
+
+    @model_validator(mode="after")
+    def _validate_anchor_lag_range(self) -> "ComplaintsConfig":
+        if self.min_days_after_anchor > self.max_days_after_anchor:
+            raise ValueError(
+                "complaints.min_days_after_anchor must be <= "
+                "complaints.max_days_after_anchor"
+            )
+        return self
 
 
 # -- Subscriptions --
@@ -891,9 +910,11 @@ class QuantityElasticityConfig(_Base):
 
 
 class QuantityModelConfig(_Base):
-    base_poisson_lambda: float = 1.7
+    base_poisson_lambda: float = 1.6
     min_qty: int = 1
     max_qty: int = 8
+    truncate_at_max: bool = True
+    max_redraw_attempts: int = Field(default=8, ge=0, le=32)
     monthly_factors: List[float] = [1.0] * 12
     noise_sigma: float = 0.12
     elasticity: QuantityElasticityConfig = QuantityElasticityConfig()
@@ -1018,10 +1039,35 @@ class ReturnQuantityConfig(_Base):
     reconcile_cents: bool = False
 
 
+class ProductReturnRiskConfig(_Base):
+    """How ProductProfile risk fields shape return behavior.
+
+    The coordinator normalizes ReturnRateBase and DefectRateBase to portfolio
+    multipliers with weighted mean 1.0. Strengths then control how much of that
+    dimension signal reaches return selection and quality-reason routing.
+    """
+    enabled: bool = True
+    return_rate_strength: float = Field(default=1.0, ge=0.0, le=3.0)
+    defect_reason_strength: float = Field(default=1.0, ge=0.0, le=3.0)
+    multiplier_clip: List[float] = [0.25, 4.0]
+
+    @model_validator(mode="after")
+    def _validate_multiplier_clip(self) -> "ProductReturnRiskConfig":
+        if len(self.multiplier_clip) != 2:
+            raise ValueError("returns.product_risk.multiplier_clip must contain [min, max]")
+        lo, hi = (float(v) for v in self.multiplier_clip)
+        if not (0.0 < lo <= 1.0 <= hi):
+            raise ValueError(
+                "returns.product_risk.multiplier_clip must satisfy 0 < min <= 1 <= max"
+            )
+        return self
+
+
 class ReturnsModelsConfig(_Base):
     reasons: List[ReturnReasonEntry] = []
     lag_days: LagDaysConfig = LagDaysConfig()
     quantity: ReturnQuantityConfig = ReturnQuantityConfig()
+    product_risk: ProductReturnRiskConfig = ProductReturnRiskConfig()
 
     @model_validator(mode="before")
     @classmethod
@@ -1143,6 +1189,40 @@ class BasketConfig(_Base):
     strength: float = 0.5                       # share of off-theme lines redirected
 
 
+class IncomeProductPreferenceConfig(_Base):
+    """Modest income-to-product-price preference for individual customers."""
+
+    enabled: bool = True
+    strength: float = Field(default=0.45, ge=0.0, le=3.0)
+
+
+class OrganizationSegmentConfig(_Base):
+    """Organization-specific channel, quantity, and category behavior.
+
+    These settings only change line attributes and measures. They deliberately do
+    not change row counts or customer assignment, preserving the sales generator's
+    worker/chunk determinism contract.
+    """
+
+    enabled: bool = True
+    business_channel_share: float = Field(default=0.70, ge=0.0, le=1.0)
+    b2b_channel_share: float = Field(default=0.70, ge=0.0, le=1.0)
+    quantity_multiplier: float = Field(default=1.45, ge=1.0, le=4.0)
+    company_scale_strength: float = Field(default=0.30, ge=0.0, le=1.5)
+    procurement_strength: float = Field(default=0.15, ge=0.0, le=1.0)
+    category_strength: float = Field(default=0.55, ge=0.0, le=3.0)
+
+
+class SegmentBehaviorConfig(_Base):
+    """Customer/organization correlations applied to the sales fact."""
+
+    enabled: bool = True
+    income_product_preference: IncomeProductPreferenceConfig = (
+        IncomeProductPreferenceConfig()
+    )
+    organization: OrganizationSegmentConfig = OrganizationSegmentConfig()
+
+
 class ModelsInnerConfig(_Base):
     """The ``models`` section inside models.yaml."""
     macro_demand: MacroDemandConfig = MacroDemandConfig()
@@ -1151,6 +1231,7 @@ class ModelsInnerConfig(_Base):
     brand_popularity: BrandPopularityConfig = BrandPopularityConfig()
     promotions: PromoSalienceConfig = PromoSalienceConfig()
     basket: BasketConfig = BasketConfig()
+    segments: SegmentBehaviorConfig = SegmentBehaviorConfig()
     fulfillment: FulfillmentConfig = FulfillmentConfig()
     returns: ReturnsModelsConfig = ReturnsModelsConfig()
     # Injected at runtime by resolve_trend_preset

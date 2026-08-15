@@ -10,7 +10,7 @@ import html
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -489,7 +489,13 @@ def _check_referential_integrity(
                 ("sales", "fact", "OrderDate"),
                 ("sales", "fact", "DueDate"),
                 ("sales", "fact", "DeliveryDate"),
+                ("returns", "fact", "ReturnDate"),
+                ("complaints", "fact", "ComplaintDate"),
+                ("complaints", "fact", "ResolutionDate"),
+                ("customer_wishlists", "fact", "AddedDate"),
                 ("inventory_snapshot", "fact", "SnapshotDate"),
+                ("customer_subscriptions", "dim", "PeriodStartDate"),
+                ("customer_subscriptions", "dim", "PeriodEndDate"),
             ]
 
             def _date_min_max_fast(path: Path, col: str):
@@ -607,6 +613,648 @@ def _check_nulls_and_duplicates(
             message=f"{dup_count} duplicate(s)" if dup_count > 0 else "No duplicates",
             category="Null / Duplicate",
         ))
+
+
+# ============================================================================
+# Analytical integrity checks
+# ============================================================================
+
+def _has_columns(df: Optional[pd.DataFrame], columns: Sequence[str]) -> bool:
+    """Return whether *df* contains every requested column."""
+    return df is not None and all(column in df.columns for column in columns)
+
+
+def _find_check(report: QualityReport, name: str) -> Optional[CheckResult]:
+    """Return a named check result (primarily useful to callers and tests)."""
+    return next((check for check in report.checks if check.name == name), None)
+
+
+def _config_value(cfg: Any, *path: str, default: Any = None) -> Any:
+    """Read a nested value from Pydantic config models or plain mappings."""
+    current = cfg
+    for part in path:
+        if current is None:
+            return default
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            current = getattr(current, part, None)
+    return default if current is None else current
+
+
+def _load_available_columns(
+    cache: _TableCache,
+    path: Optional[Path],
+    columns: Sequence[str],
+) -> Optional[pd.DataFrame]:
+    """Load the requested columns that actually exist in a packaged table.
+
+    Quality reports must tolerate optional facts and schema variants. Reading a
+    Parquet file with one missing requested column raises, so inspect its schema
+    first and request only the intersection. Other formats fall back to the
+    existing loader and may return ``None`` when the schema is incompatible.
+    """
+    if path is None:
+        return None
+
+    available: Optional[set[str]] = None
+    try:
+        if path.is_file() and path.suffix == ".parquet":
+            import pyarrow.parquet as pq
+            available = set(pq.read_schema(str(path)).names)
+        elif path.is_dir():
+            parquet_files = sorted(path.glob("*.parquet"))
+            if parquet_files:
+                import pyarrow.parquet as pq
+                available = set(pq.read_schema(str(parquet_files[0])).names)
+        elif path.is_file() and path.suffix == ".csv":
+            available = set(pd.read_csv(path, nrows=0).columns)
+    except (OSError, ValueError, KeyError, TypeError):
+        available = None
+
+    requested = list(columns)
+    if available is not None:
+        requested = [column for column in requested if column in available]
+        if not requested:
+            return None
+    return cache.get(path, columns=requested)
+
+
+def _check_return_amount_integrity(
+    report: QualityReport,
+    sales: pd.DataFrame,
+    returns: pd.DataFrame,
+    *,
+    atol: float = 0.005,
+) -> None:
+    """Check that return event amounts reconcile to per-unit sales net price."""
+    sales_cols = ["OrderNumber", "OrderLineNumber", "NetPrice"]
+    return_line_col = (
+        "OrderLineNumber" if "OrderLineNumber" in returns.columns else "LineNumber"
+    )
+    return_cols = [
+        "OrderNumber", return_line_col, "ReturnQuantity", "ReturnNetPrice"]
+    if not _has_columns(sales, sales_cols) or not _has_columns(returns, return_cols):
+        return
+
+    sold = sales[sales_cols].drop_duplicates(
+        ["OrderNumber", "OrderLineNumber"], keep="first")
+    returned = (
+        returns[return_cols].rename(columns={return_line_col: "LineNumber"})
+        .groupby(["OrderNumber", "LineNumber"], as_index=False, dropna=False)
+        .agg(
+            ReturnQuantity=("ReturnQuantity", "sum"),
+            ReturnAmount=("ReturnNetPrice", "sum"),
+        )
+    )
+    joined = returned.merge(
+        sold,
+        left_on=["OrderNumber", "LineNumber"],
+        right_on=["OrderNumber", "OrderLineNumber"],
+        how="left",
+    )
+    orphan_count = int(joined["NetPrice"].isna().sum())
+    expected = np.round(
+        joined["NetPrice"].to_numpy(dtype=np.float64)
+        * joined["ReturnQuantity"].to_numpy(dtype=np.float64),
+        2,
+    )
+    actual = np.round(joined["ReturnAmount"].to_numpy(dtype=np.float64), 2)
+    mismatch = ~np.isclose(actual, expected, rtol=0.0, atol=atol, equal_nan=False)
+    mismatch_count = int(mismatch.sum())
+    passed = orphan_count == 0 and mismatch_count == 0
+    report.checks.append(CheckResult(
+        name="Return amount reconciliation",
+        passed=passed,
+        message=(
+            "All returned lines reconcile to Sales.NetPrice x ReturnQuantity"
+            if passed else
+            f"{mismatch_count} amount mismatch(es); {orphan_count} orphan line(s)"
+        ),
+        details=(
+            f"Actual={np.nansum(actual):.2f}; expected={np.nansum(expected):.2f}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_complaint_chronology(
+    report: QualityReport,
+    sales: pd.DataFrame,
+    complaints: pd.DataFrame,
+    customers: Optional[pd.DataFrame] = None,
+) -> None:
+    """Check linked complaint causality, lifecycle, and response arithmetic."""
+    required_sales = ["OrderNumber", "OrderLineNumber", "OrderDate", "CustomerKey"]
+    required_complaints = ["OrderNumber", "LineNumber", "ComplaintDate", "CustomerKey"]
+    if not _has_columns(sales, required_sales) or not _has_columns(
+        complaints, required_complaints):
+        return
+
+    linked = complaints.loc[complaints["OrderNumber"].notna(), required_complaints].copy()
+    sold = sales[required_sales].drop_duplicates(
+        ["OrderNumber", "OrderLineNumber"], keep="first")
+    joined = linked.merge(
+        sold,
+        left_on=["OrderNumber", "LineNumber"],
+        right_on=["OrderNumber", "OrderLineNumber"],
+        how="left",
+        suffixes=("_complaint", "_sale"),
+    )
+    complaint_dates = pd.to_datetime(joined["ComplaintDate"], errors="coerce")
+    order_dates = pd.to_datetime(joined["OrderDate"], errors="coerce")
+    missing_anchor = int(order_dates.isna().sum())
+    before_sale = int((complaint_dates < order_dates).fillna(False).sum())
+    customer_mismatch = int((
+        joined["CustomerKey_complaint"].notna()
+        & joined["CustomerKey_sale"].notna()
+        & (joined["CustomerKey_complaint"] != joined["CustomerKey_sale"])
+    ).sum())
+    chronology_passed = missing_anchor == 0 and before_sale == 0 and customer_mismatch == 0
+    report.checks.append(CheckResult(
+        name="Complaint chronology (linked sale)",
+        passed=chronology_passed,
+        message=(
+            "All linked complaints occur on or after their sale"
+            if chronology_passed else
+            f"{before_sale} before sale; {missing_anchor} missing anchor; "
+            f"{customer_mismatch} customer mismatch(es)"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    if _has_columns(customers, ["CustomerKey", "CustomerStartDate", "CustomerEndDate"]):
+        lifecycle = complaints[["CustomerKey", "ComplaintDate"]].merge(
+            customers[["CustomerKey", "CustomerStartDate", "CustomerEndDate"]],
+            on="CustomerKey",
+            how="left",
+        )
+        event_date = pd.to_datetime(lifecycle["ComplaintDate"], errors="coerce")
+        start_date = pd.to_datetime(lifecycle["CustomerStartDate"], errors="coerce")
+        end_date = pd.to_datetime(lifecycle["CustomerEndDate"], errors="coerce")
+        outside = (event_date < start_date) | (end_date.notna() & (event_date > end_date))
+        outside_count = int(outside.fillna(False).sum())
+        report.checks.append(CheckResult(
+            name="Complaint within customer lifecycle",
+            passed=outside_count == 0,
+            message=(
+                "All complaints fall within customer lifecycle"
+                if outside_count == 0 else f"{outside_count} lifecycle violation(s)"
+            ),
+            category="Analytical Integrity",
+        ))
+
+    if _has_columns(complaints, ["ComplaintDate", "ResolutionDate", "ResponseDays"]):
+        resolved = complaints.loc[complaints["ResolutionDate"].notna()].copy()
+        if not resolved.empty:
+            derived = (
+                pd.to_datetime(resolved["ResolutionDate"], errors="coerce")
+                - pd.to_datetime(resolved["ComplaintDate"], errors="coerce")
+            ).dt.days
+            mismatch_count = int((derived != resolved["ResponseDays"]).fillna(True).sum())
+            report.checks.append(CheckResult(
+                name="Complaint response-day arithmetic",
+                passed=mismatch_count == 0,
+                message=(
+                    "ResolutionDate - ComplaintDate equals ResponseDays"
+                    if mismatch_count == 0 else f"{mismatch_count} mismatch(es)"
+                ),
+                category="Analytical Integrity",
+            ))
+
+
+def _check_subscription_lifecycle(
+    report: QualityReport,
+    subscriptions: pd.DataFrame,
+    customers: pd.DataFrame,
+    *,
+    global_end: Any = None,
+) -> None:
+    """Check subscription billing periods against customer/global boundaries."""
+    period_start_col = (
+        "PeriodStartDate" if "PeriodStartDate" in subscriptions.columns else "PeriodStart"
+    )
+    period_end_col = (
+        "PeriodEndDate" if "PeriodEndDate" in subscriptions.columns else "PeriodEnd"
+    )
+    sub_cols = ["CustomerKey", period_start_col, period_end_col]
+    cust_cols = ["CustomerKey", "CustomerStartDate", "CustomerEndDate"]
+    if not _has_columns(subscriptions, sub_cols) or not _has_columns(customers, cust_cols):
+        return
+
+    joined = subscriptions.merge(customers[cust_cols], on="CustomerKey", how="left")
+    period_start = pd.to_datetime(joined[period_start_col], errors="coerce")
+    period_end = pd.to_datetime(joined[period_end_col], errors="coerce")
+    customer_start = pd.to_datetime(joined["CustomerStartDate"], errors="coerce")
+    customer_end = pd.to_datetime(joined["CustomerEndDate"], errors="coerce")
+
+    invalid_order = period_start.isna() | period_end.isna() | (period_end < period_start)
+    before_start = period_start < customer_start
+    after_end = customer_end.notna() & (period_end > customer_end)
+    lifecycle_failures = int((invalid_order | before_start | after_end).fillna(True).sum())
+    report.checks.append(CheckResult(
+        name="Subscription period within customer lifecycle",
+        passed=lifecycle_failures == 0,
+        message=(
+            "All billing periods are within customer lifecycle"
+            if lifecycle_failures == 0 else f"{lifecycle_failures} violation(s)"
+        ),
+        details=(
+            f"before_start={int(before_start.fillna(False).sum())}; "
+            f"after_end={int(after_end.fillna(False).sum())}; "
+            f"invalid_period={int(invalid_order.fillna(True).sum())}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    if global_end is not None:
+        end_bound = pd.Timestamp(global_end)
+        after_global = int((period_end > end_bound).fillna(False).sum())
+        report.checks.append(CheckResult(
+            name="Subscription period within global end",
+            passed=after_global == 0,
+            message=(
+                f"All billing periods end by {end_bound.date()}"
+                if after_global == 0 else
+                f"{after_global} period(s) end after {end_bound.date()}"
+            ),
+            category="Analytical Integrity",
+        ))
+
+
+def _rank_correlation(left: pd.Series, right: pd.Series) -> float:
+    """Compute Spearman-style rank correlation without a scipy dependency."""
+    if len(left) < 2 or left.nunique(dropna=True) < 2 or right.nunique(dropna=True) < 2:
+        return float("nan")
+    return float(left.rank(method="average").corr(right.rank(method="average")))
+
+
+def _check_promotion_alignment(
+    report: QualityReport,
+    sales: pd.DataFrame,
+    promotions: pd.DataFrame,
+    customers: Optional[pd.DataFrame] = None,
+    *,
+    min_rank_correlation: float = 0.5,
+    new_customer_window_months: Optional[int] = None,
+) -> None:
+    """Check nominal/realized promotion depth and audience eligibility."""
+    sales_cols = ["PromotionKey", "UnitPrice", "DiscountAmount"]
+    promo_cols = ["PromotionKey", "DiscountPct"]
+    if not _has_columns(sales, sales_cols) or not _has_columns(promotions, promo_cols):
+        return
+
+    audience_col = next(
+        (
+            column for column in ["SeasonType", "PromotionType", "PromotionName"]
+            if column in promotions.columns
+        ),
+        None,
+    )
+    promo_extra = [audience_col] if audience_col is not None else []
+    merged = sales.merge(
+        promotions[promo_cols + promo_extra].drop_duplicates("PromotionKey"),
+        on="PromotionKey",
+        how="left",
+    )
+    valid_price = merged["UnitPrice"].to_numpy(dtype=np.float64) > 0.0
+    merged["RealizedDiscountPct"] = np.where(
+        valid_price,
+        merged["DiscountAmount"].to_numpy(dtype=np.float64)
+        / merged["UnitPrice"].to_numpy(dtype=np.float64),
+        np.nan,
+    )
+    promoted = merged.loc[merged["DiscountPct"].fillna(0.0) > 0.0]
+    grouped = (
+        promoted.groupby(["PromotionKey", "DiscountPct"], as_index=False)
+        ["RealizedDiscountPct"].mean()
+    )
+    corr = _rank_correlation(grouped["DiscountPct"], grouped["RealizedDiscountPct"])
+    depth_passed = np.isfinite(corr) and corr >= min_rank_correlation
+    report.checks.append(CheckResult(
+        name="Promotion nominal-to-realized depth",
+        passed=bool(depth_passed),
+        message=(
+            f"Promotion-level rank correlation={corr:.3f}"
+            if np.isfinite(corr) else
+            "Promotion depth correlation is undefined (insufficient variation)"
+        ),
+        details=f"Required correlation >= {min_rank_correlation:.3f}",
+        category="Analytical Integrity",
+    ))
+
+    if (
+        customers is not None
+        and audience_col is not None
+        and _has_columns(sales, ["CustomerKey"])
+        and _has_columns(customers, ["CustomerKey", "LoyaltyTierKey"])
+    ):
+        audience = merged.merge(
+            customers[["CustomerKey", "LoyaltyTierKey"]].drop_duplicates("CustomerKey"),
+            on="CustomerKey",
+            how="left",
+        )
+        loyalty_mask = audience[audience_col].astype("string").str.contains(
+            "Loyalty Exclusive", case=False, na=False)
+        invalid_loyalty = loyalty_mask & (
+            audience["LoyaltyTierKey"].isna() | (audience["LoyaltyTierKey"] <= 0)
+        )
+        invalid_count = int(invalid_loyalty.sum())
+        report.checks.append(CheckResult(
+            name="Loyalty promotion eligibility",
+            passed=invalid_count == 0,
+            message=(
+                "All Loyalty Exclusive sales have an eligible loyalty tier"
+                if invalid_count == 0 else f"{invalid_count} ineligible sale(s)"
+            ),
+            category="Analytical Integrity",
+        ))
+
+    if (
+        new_customer_window_months is not None
+        and audience_col is not None
+        and _has_columns(sales, ["CustomerKey", "OrderDate"])
+        and _has_columns(customers, ["CustomerKey", "CustomerStartDate"])
+    ):
+        audience = merged.merge(
+            customers[["CustomerKey", "CustomerStartDate"]].drop_duplicates("CustomerKey"),
+            on="CustomerKey",
+            how="left",
+        )
+        new_mask = audience[audience_col].astype("string").str.contains(
+            "New Customer", case=False, na=False)
+        start = pd.to_datetime(audience["CustomerStartDate"], errors="coerce")
+        order = pd.to_datetime(audience["OrderDate"], errors="coerce")
+        deadline = start + pd.DateOffset(months=int(new_customer_window_months))
+        invalid_new = new_mask & (order > deadline)
+        invalid_count = int(invalid_new.fillna(False).sum())
+        report.checks.append(CheckResult(
+            name="New-customer promotion window",
+            passed=invalid_count == 0,
+            message=(
+                "All New Customer promotions fall within the exact window"
+                if invalid_count == 0 else f"{invalid_count} out-of-window sale(s)"
+            ),
+            category="Analytical Integrity",
+        ))
+
+
+def _check_wishlist_conversion_chronology(
+    report: QualityReport,
+    sales: pd.DataFrame,
+    wishlists: pd.DataFrame,
+    *,
+    expected_rate: Optional[float] = None,
+    tolerance: float = 0.02,
+) -> None:
+    """Check that wishlist conversion means purchase on/after AddedDate."""
+    sales_cols = ["CustomerKey", "ProductKey", "OrderDate"]
+    wishlist_cols = ["CustomerKey", "ProductKey", "AddedDate"]
+    if not _has_columns(sales, sales_cols) or not _has_columns(wishlists, wishlist_cols):
+        return
+
+    # Any purchase on/after AddedDate counts as conversion. The latest purchase
+    # is sufficient to answer that question even when the same pair was bought
+    # both before and after it was wishlisted.
+    latest_purchase = (
+        sales[sales_cols]
+        .assign(OrderDate=lambda frame: pd.to_datetime(frame["OrderDate"], errors="coerce"))
+        .groupby(["CustomerKey", "ProductKey"], as_index=False)["OrderDate"].max()
+    )
+    joined = wishlists[wishlist_cols].merge(
+        latest_purchase,
+        on=["CustomerKey", "ProductKey"],
+        how="left",
+    )
+    added = pd.to_datetime(joined["AddedDate"], errors="coerce")
+    converted = joined["OrderDate"].notna() & (joined["OrderDate"] >= added)
+    dated_rate = float(converted.mean()) if len(joined) else 0.0
+
+    if expected_rate is None:
+        passed = True
+        message = f"Dated wishlist conversion={dated_rate:.2%}"
+        details = "No configured target supplied"
+    else:
+        delta = abs(dated_rate - float(expected_rate))
+        passed = delta <= tolerance
+        message = (
+            f"Dated conversion={dated_rate:.2%}; target={float(expected_rate):.2%}"
+        )
+        details = f"Allowed absolute difference <= {tolerance:.2%}"
+    report.checks.append(CheckResult(
+        name="Wishlist dated conversion",
+        passed=passed,
+        message=message,
+        details=details,
+        category="Analytical Integrity",
+    ))
+
+
+def _check_customer_sales_lifecycle(
+    report: QualityReport,
+    sales: pd.DataFrame,
+    customers: pd.DataFrame,
+) -> None:
+    """Check exact-day customer eligibility for every sales line."""
+    sales_cols = ["CustomerKey", "OrderDate"]
+    customer_cols = ["CustomerKey", "CustomerStartDate", "CustomerEndDate"]
+    if not _has_columns(sales, sales_cols) or not _has_columns(customers, customer_cols):
+        return
+
+    joined = sales[sales_cols].merge(customers[customer_cols], on="CustomerKey", how="left")
+    order_date = pd.to_datetime(joined["OrderDate"], errors="coerce")
+    start_date = pd.to_datetime(joined["CustomerStartDate"], errors="coerce")
+    end_date = pd.to_datetime(joined["CustomerEndDate"], errors="coerce")
+    missing_customer = int(start_date.isna().sum())
+    before = order_date < start_date
+    after = end_date.notna() & (order_date > end_date)
+    violation_count = int((before | after).fillna(False).sum())
+    passed = missing_customer == 0 and violation_count == 0
+    report.checks.append(CheckResult(
+        name="Sales within customer lifecycle",
+        passed=passed,
+        message=(
+            "All sales fall within exact customer lifecycle"
+            if passed else
+            f"{violation_count} date violation(s); {missing_customer} missing customer(s)"
+        ),
+        details=(
+            f"before_start={int(before.fillna(False).sum())}; "
+            f"after_end={int(after.fillna(False).sum())}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_quantity_ceiling(
+    report: QualityReport,
+    sales: pd.DataFrame,
+    *,
+    max_qty: Optional[int] = None,
+    terminal_share_limit: float = 0.20,
+    dominance_ratio: float = 1.25,
+) -> None:
+    """Flag a dominant terminal bucket characteristic of hard clipping."""
+    if not _has_columns(sales, ["Quantity"]) or sales.empty:
+        return
+    qty = pd.to_numeric(sales["Quantity"], errors="coerce").dropna()
+    if qty.empty:
+        return
+    terminal = int(max_qty if max_qty is not None else qty.max())
+    terminal_share = float((qty == terminal).mean())
+    prior_share = float((qty == terminal - 1).mean())
+    suspicious = (
+        terminal_share > terminal_share_limit
+        and terminal_share > prior_share * dominance_ratio
+    )
+    report.checks.append(CheckResult(
+        name="Quantity terminal-bucket concentration",
+        passed=not suspicious,
+        message=(
+            f"Quantity={terminal} share={terminal_share:.2%}; "
+            f"quantity={terminal - 1} share={prior_share:.2%}"
+        ),
+        details=(
+            f"Flagged when terminal share > {terminal_share_limit:.2%} and "
+            f"> {dominance_ratio:.2f}x the preceding bucket"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_inventory_stockout_semantics(
+    report: QualityReport,
+    inventory: pd.DataFrame,
+) -> None:
+    """Require stockout flags and day counts to describe the same event."""
+    required = ["StockoutFlag", "DaysOutOfStock"]
+    if not _has_columns(inventory, required):
+        return
+    flag = inventory["StockoutFlag"].fillna(False).astype(bool)
+    days = pd.to_numeric(inventory["DaysOutOfStock"], errors="coerce")
+    flagged_without_days = flag & (days < 1)
+    days_without_flag = ~flag & (days != 0)
+    invalid_days = days.isna() | (days < 0)
+    violations = flagged_without_days | days_without_flag | invalid_days
+    count = int(violations.sum())
+    report.checks.append(CheckResult(
+        name="Inventory stockout flag/day consistency",
+        passed=count == 0,
+        message=(
+            "StockoutFlag and DaysOutOfStock are semantically consistent"
+            if count == 0 else f"{count} contradictory inventory row(s)"
+        ),
+        details=(
+            f"flagged_without_days={int(flagged_without_days.sum())}; "
+            f"days_without_flag={int(days_without_flag.sum())}; "
+            f"invalid_days={int(invalid_days.sum())}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_analytical_integrity(
+    report: QualityReport,
+    dims_folder: Path,
+    facts_folder: Path,
+    cache: _TableCache,
+    cfg: Any = None,
+) -> None:
+    """Run cross-table semantic checks discovered by analytical review."""
+    sales_path = _find_table(facts_folder, "sales")
+    customers_path = _find_table(dims_folder, "customers")
+    sales = _load_available_columns(cache, sales_path, [
+        "OrderNumber", "OrderLineNumber", "CustomerKey", "ProductKey",
+        "OrderDate", "Quantity", "UnitPrice", "NetPrice", "DiscountAmount",
+        "PromotionKey",
+    ])
+    customers = _load_available_columns(cache, customers_path, [
+        "CustomerKey", "CustomerStartDate", "CustomerEndDate", "LoyaltyTierKey",
+    ])
+
+    inventory = _load_available_columns(
+        cache,
+        _find_table(facts_folder, "inventory_snapshot"),
+        ["StockoutFlag", "DaysOutOfStock"],
+    )
+    if inventory is not None:
+        _check_inventory_stockout_semantics(report, inventory)
+
+    if sales is None:
+        return
+
+    returns = _load_available_columns(
+        cache,
+        _find_table(facts_folder, "returns"),
+        [
+            "OrderNumber", "OrderLineNumber", "LineNumber", "ReturnQuantity",
+            "ReturnNetPrice",
+        ],
+    )
+    if returns is not None:
+        _check_return_amount_integrity(report, sales, returns)
+
+    complaints = _load_available_columns(
+        cache,
+        _find_table(facts_folder, "complaints"),
+        [
+            "OrderNumber", "LineNumber", "CustomerKey", "ComplaintDate",
+            "ResolutionDate", "ResponseDays",
+        ],
+    )
+    if complaints is not None:
+        _check_complaint_chronology(report, sales, complaints, customers)
+
+    subscriptions = _load_available_columns(
+        cache,
+        _find_table(dims_folder, "customer_subscriptions"),
+        [
+            "CustomerKey", "PeriodStartDate", "PeriodEndDate", "PeriodStart",
+            "PeriodEnd",
+        ],
+    )
+    if subscriptions is not None and customers is not None:
+        global_end = _config_value(cfg, "defaults", "dates", "end", default=None)
+        _check_subscription_lifecycle(
+            report, subscriptions, customers, global_end=global_end)
+
+    promotions = _load_available_columns(
+        cache,
+        _find_table(dims_folder, "promotions"),
+        [
+            "PromotionKey", "DiscountPct", "SeasonType", "PromotionType",
+            "PromotionName",
+        ],
+    )
+    if promotions is not None:
+        window = _config_value(
+            cfg, "promotions", "new_customer_window_months", default=None)
+        _check_promotion_alignment(
+            report,
+            sales,
+            promotions,
+            customers,
+            new_customer_window_months=window,
+        )
+
+    wishlists = _load_available_columns(
+        cache,
+        _find_table(facts_folder, "customer_wishlists"),
+        ["CustomerKey", "ProductKey", "AddedDate"],
+    )
+    if wishlists is not None:
+        conversion_rate = _config_value(
+            cfg, "wishlists", "conversion_rate", default=None)
+        _check_wishlist_conversion_chronology(
+            report,
+            sales,
+            wishlists,
+            expected_rate=conversion_rate,
+        )
+
+    if customers is not None:
+        _check_customer_sales_lifecycle(report, sales, customers)
+    _check_quantity_ceiling(report, sales)
 
 
 def _check_distributions(
@@ -942,6 +1590,10 @@ def generate_quality_report(
 
         info("Checking distributions...")
         _check_distributions(report, dims_folder, facts_folder, cache, cfg)
+
+        info("Running analytical integrity checks...")
+        _check_analytical_integrity(
+            report, dims_folder, facts_folder, cache, cfg=cfg)
 
         info("Counting rows...")
         _collect_row_counts(report, dims_folder, facts_folder)

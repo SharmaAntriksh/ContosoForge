@@ -12,6 +12,10 @@ from src.engine.quality_report import (
     _TableCache,
     _check_nulls_and_duplicates,
     _check_referential_integrity,
+    _check_complaint_chronology,
+    _check_subscription_lifecycle,
+    _check_wishlist_conversion_chronology,
+    _check_inventory_stockout_semantics,
 )
 
 
@@ -123,8 +127,10 @@ class TestOrderIntegrity:
 
     @pytest.fixture
     def dims_facts(self, tmp_path):
-        dims = tmp_path / "dimensions"; dims.mkdir()
-        facts = tmp_path / "facts"; facts.mkdir()
+        dims = tmp_path / "dimensions"
+        dims.mkdir()
+        facts = tmp_path / "facts"
+        facts.mkdir()
         return dims, facts
 
     @staticmethod
@@ -194,3 +200,125 @@ class TestOrderIntegrity:
             "FK: complaints.OrderNumber → order_header.OrderNumber",
         )
         assert fk is not None and fk.passed is True
+
+
+class TestPhase2AnalyticalIntegrity:
+    @staticmethod
+    def _find(report, name):
+        return next(c for c in report.checks if c.name == name)
+
+    def test_complaint_chronology_and_response_arithmetic(self):
+        sales = pd.DataFrame({
+            "OrderNumber": [100],
+            "OrderLineNumber": [1],
+            "OrderDate": pd.to_datetime(["2024-02-10"]),
+            "CustomerKey": [7],
+        })
+        complaints = pd.DataFrame({
+            "OrderNumber": [100],
+            "LineNumber": [1],
+            "ComplaintDate": pd.to_datetime(["2024-02-12"]),
+            "ResolutionDate": pd.to_datetime(["2024-02-15"]),
+            "ResponseDays": [3],
+            "CustomerKey": [7],
+        })
+        customers = pd.DataFrame({
+            "CustomerKey": [7],
+            "CustomerStartDate": pd.to_datetime(["2024-01-01"]),
+            "CustomerEndDate": pd.to_datetime(["2024-12-31"]),
+        })
+        report = QualityReport()
+
+        _check_complaint_chronology(report, sales, complaints, customers)
+
+        assert self._find(report, "Complaint chronology (linked sale)").passed
+        assert self._find(report, "Complaint within customer lifecycle").passed
+        assert self._find(report, "Complaint response-day arithmetic").passed
+
+    def test_subscription_lifecycle_and_global_end(self):
+        subscriptions = pd.DataFrame({
+            "CustomerKey": [7],
+            "PeriodStartDate": pd.to_datetime(["2024-02-01"]),
+            "PeriodEndDate": pd.to_datetime(["2024-02-29"]),
+        })
+        customers = pd.DataFrame({
+            "CustomerKey": [7],
+            "CustomerStartDate": pd.to_datetime(["2024-01-01"]),
+            "CustomerEndDate": pd.to_datetime(["2024-06-30"]),
+        })
+        report = QualityReport()
+
+        _check_subscription_lifecycle(
+            report, subscriptions, customers, global_end="2024-12-31",
+        )
+
+        assert self._find(
+            report, "Subscription period within customer lifecycle",
+        ).passed
+        assert self._find(report, "Subscription period within global end").passed
+
+    def test_wishlist_dated_conversion_rate(self):
+        sales = pd.DataFrame({
+            "CustomerKey": [1],
+            "ProductKey": [10],
+            "OrderDate": pd.to_datetime(["2024-02-10"]),
+        })
+        wishlists = pd.DataFrame({
+            "CustomerKey": [1, 2],
+            "ProductKey": [10, 20],
+            "AddedDate": pd.to_datetime(["2024-02-01", "2024-02-01"]),
+        })
+        report = QualityReport()
+
+        _check_wishlist_conversion_chronology(
+            report, sales, wishlists, expected_rate=0.5,
+        )
+
+        assert self._find(report, "Wishlist dated conversion").passed
+
+
+class TestPhase4AnalyticalIntegrity:
+    @staticmethod
+    def _find(report, name):
+        return next(c for c in report.checks if c.name == name)
+
+    def test_inventory_stockout_flag_day_consistency(self):
+        report = QualityReport()
+        inventory = pd.DataFrame({
+            "StockoutFlag": [True, False, True],
+            "DaysOutOfStock": [1, 0, 0],
+        })
+
+        _check_inventory_stockout_semantics(report, inventory)
+
+        check = self._find(report, "Inventory stockout flag/day consistency")
+        assert check.passed is False
+        assert "1 contradictory" in check.message
+
+    def test_post_sale_fact_dates_are_covered_by_dates_dimension(self, tmp_path):
+        dims = tmp_path / "dimensions"
+        facts = tmp_path / "facts"
+        dims.mkdir()
+        facts.mkdir()
+        pd.DataFrame({
+            "Date": pd.date_range("2024-01-01", "2024-04-30", freq="D"),
+        }).to_parquet(dims / "dates.parquet", index=False)
+        pd.DataFrame({
+            "ReturnDate": pd.to_datetime(["2024-04-20"]),
+        }).to_parquet(facts / "returns.parquet", index=False)
+        pd.DataFrame({
+            "ComplaintDate": pd.to_datetime(["2024-04-21"]),
+            "ResolutionDate": pd.to_datetime(["2024-04-25"]),
+        }).to_parquet(facts / "complaints.parquet", index=False)
+
+        report = QualityReport()
+        _check_referential_integrity(report, dims, facts, _TableCache())
+
+        for table, column in (
+            ("returns", "ReturnDate"),
+            ("complaints", "ComplaintDate"),
+            ("complaints", "ResolutionDate"),
+        ):
+            assert self._find(
+                report, f"Date range: {table}.{column} ⊆ dates",
+            ).passed

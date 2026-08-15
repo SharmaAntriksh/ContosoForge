@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from src.defaults import NS_PER_DAY as _NS_PER_DAY, FACT_MAX_PARALLEL_CHUNKS
 from src.facts.complaints.accumulator import ComplaintsAccumulator
@@ -93,11 +94,13 @@ _COMPLAINT_DETAILS: Dict[str, list] = {
 
 _SEVERITY_VALUES = np.array(["Low", "Medium", "High", "Critical"], dtype=object)
 _SEVERITY_WEIGHTS = np.array([0.25, 0.40, 0.25, 0.10])
-_SEVERITY_CDF = np.cumsum(_SEVERITY_WEIGHTS); _SEVERITY_CDF[-1] = 1.0
+_SEVERITY_CDF = np.cumsum(_SEVERITY_WEIGHTS)
+_SEVERITY_CDF[-1] = 1.0
 
 _CHANNEL_VALUES = np.array(["Email", "Phone", "In-Store", "Website", "Chat"], dtype=object)
 _CHANNEL_WEIGHTS = np.array([0.30, 0.25, 0.15, 0.15, 0.15])
-_CHANNEL_CDF = np.cumsum(_CHANNEL_WEIGHTS); _CHANNEL_CDF[-1] = 1.0
+_CHANNEL_CDF = np.cumsum(_CHANNEL_WEIGHTS)
+_CHANNEL_CDF[-1] = 1.0
 
 _STATUS_VALUES = np.array(["Resolved", "Closed", "Open", "Escalated"], dtype=object)
 
@@ -105,7 +108,8 @@ _RESOLUTION_TYPES = np.array(
     ["Replacement", "Refund", "Discount", "Apology", "Store Credit"], dtype=object
 )
 _RESOLUTION_WEIGHTS = np.array([0.25, 0.30, 0.20, 0.10, 0.15])
-_RESOLUTION_CDF = np.cumsum(_RESOLUTION_WEIGHTS); _RESOLUTION_CDF[-1] = 1.0
+_RESOLUTION_CDF = np.cumsum(_RESOLUTION_WEIGHTS)
+_RESOLUTION_CDF[-1] = 1.0
 
 # Fraction of complaints that are order-linked vs general
 _ORDER_LINKED_RATE = 0.75
@@ -144,10 +148,12 @@ def _generate_rows_batch(
     *,
     complainer_keys: np.ndarray,
     complaints_per: np.ndarray,
-    cust_orders: Dict[int, Tuple[np.ndarray, np.ndarray]],
+    cust_orders: Dict[int, Tuple[np.ndarray, ...]],
     g_start_ns: int,
     g_end_ns: int,
     cfg: "_ComplaintsCfg",
+    customer_bounds: Optional[Dict[int, Tuple[int, int]]] = None,
+    event_end_ns: Optional[int] = None,
 ) -> Dict[str, np.ndarray]:
     """Fully vectorized complaint generation — no Python row loop.
 
@@ -156,6 +162,8 @@ def _generate_rows_batch(
     """
     n_complainers = len(complainer_keys)
     total_rows = int(complaints_per.sum())
+    customer_bounds = customer_bounds or {}
+    event_end_ns = int(event_end_ns if event_end_ns is not None else g_end_ns)
 
     if total_rows == 0:
         return {k: np.empty(0, dtype=d) for k, d in [
@@ -172,12 +180,18 @@ def _generate_rows_batch(
     # ------------------------------------------------------------------
     all_so: List[np.ndarray] = []
     all_ln: List[np.ndarray] = []
+    all_anchor_ns: List[np.ndarray] = []
     order_starts = np.zeros(n_complainers + 1, dtype=np.int64)
     for i in range(n_complainers):
         orders = cust_orders.get(int(complainer_keys[i]))
         if orders is not None:
             all_so.append(orders[0])
             all_ln.append(orders[1])
+            all_anchor_ns.append(
+                orders[2]
+                if len(orders) > 2
+                else np.full(len(orders[0]), g_start_ns, dtype=np.int64)
+            )
             order_starts[i + 1] = order_starts[i] + len(orders[0])
         else:
             order_starts[i + 1] = order_starts[i]
@@ -185,9 +199,11 @@ def _generate_rows_batch(
     if all_so:
         orders_so_flat = np.concatenate(all_so)
         orders_ln_flat = np.concatenate(all_ln)
+        orders_anchor_flat = np.concatenate(all_anchor_ns)
     else:
         orders_so_flat = np.empty(0, dtype=np.int64)
         orders_ln_flat = np.empty(0, dtype=np.int64)
+        orders_anchor_flat = np.empty(0, dtype=np.int64)
     has_any_orders = len(orders_so_flat) > 0
 
     n_orders_per_cust = np.diff(order_starts)  # shape (n_complainers,)
@@ -202,8 +218,13 @@ def _generate_rows_batch(
     order_select_rolls = rng.random(total_rows)
     type_detail_rolls = rng.random(total_rows)
 
-    span = max(1, g_end_ns - g_start_ns)
-    date_offsets = rng.integers(0, span, size=total_rows, dtype=np.int64)
+    date_rolls = rng.random(total_rows)
+    linked_lag_days = rng.integers(
+        cfg.min_days_after_anchor,
+        max(cfg.min_days_after_anchor, cfg.max_days_after_anchor) + 1,
+        size=total_rows,
+        dtype=np.int64,
+    )
 
     sev_idx = np.searchsorted(_SEVERITY_CDF, rng.random(total_rows))
     np.clip(sev_idx, 0, len(_SEVERITY_VALUES) - 1, out=sev_idx)
@@ -229,8 +250,26 @@ def _generate_rows_batch(
     # Customer keys: repeat each complainer's key by their complaint count
     out_ckey = np.repeat(complainer_keys, complaints_per)
 
-    # Dates
-    out_date_ns = g_start_ns + date_offsets
+    customer_lo = np.array([
+        customer_bounds.get(int(key), (g_start_ns, event_end_ns))[0]
+        for key in out_ckey
+    ], dtype=np.int64)
+    customer_hi = np.array([
+        customer_bounds.get(int(key), (g_start_ns, event_end_ns))[1]
+        for key in out_ckey
+    ], dtype=np.int64)
+    general_hi = np.maximum(
+        customer_lo,
+        np.minimum(customer_hi, np.int64(g_end_ns)),
+    )
+    general_span_days = np.maximum(
+        ((general_hi - customer_lo) // _NS_PER_DAY) + 1,
+        1,
+    )
+    out_date_ns = customer_lo + (
+        date_rolls * general_span_days
+    ).astype(np.int64) * _NS_PER_DAY
+    out_date_ns = np.minimum(out_date_ns, general_hi)
 
     # Severity and channel (fully batch)
     out_severity = _SEVERITY_VALUES[sev_idx]
@@ -243,6 +282,7 @@ def _generate_rows_batch(
     # Order selection for order-linked rows
     out_so = np.full(total_rows, -1, dtype=np.int64)
     out_ln = np.full(total_rows, -1, dtype=np.int64)
+    out_anchor_ns = np.full(total_rows, -1, dtype=np.int64)
     if has_any_orders:
         order_start_per_row = order_starts[:-1][cust_idx]
         order_offset = np.minimum(
@@ -255,6 +295,15 @@ def _generate_rows_batch(
         safe_flat_idx = np.clip(flat_idx, 0, max(len(orders_so_flat) - 1, 0))
         out_so[ol_mask] = orders_so_flat[safe_flat_idx[ol_mask]]
         out_ln[ol_mask] = orders_ln_flat[safe_flat_idx[ol_mask]]
+        out_anchor_ns[ol_mask] = orders_anchor_flat[safe_flat_idx[ol_mask]]
+
+    linked_date_ns = out_anchor_ns + linked_lag_days * _NS_PER_DAY
+    linked_date_ns = np.maximum(linked_date_ns, customer_lo)
+    linked_date_ns = np.minimum(
+        linked_date_ns,
+        np.minimum(customer_hi, np.int64(event_end_ns)),
+    )
+    out_date_ns = np.where(is_order_linked, linked_date_ns, out_date_ns)
 
     # Type and detail selection
     aot, aod = _ORDER_TYPES_FLAT, _ORDER_DETAILS_FLAT
@@ -284,15 +333,16 @@ def _generate_rows_batch(
 
     # Resolution dates (only meaningful for resolved rows)
     res_date_raw = out_date_ns + resp_days_raw.astype(np.int64) * _NS_PER_DAY
-    needs_clamp = is_resolved & (res_date_raw > g_end_ns)
+    resolution_hi = np.minimum(customer_hi, np.int64(event_end_ns))
+    needs_clamp = is_resolved & (res_date_raw > resolution_hi)
     clamped_resp_days = np.maximum(
         np.int32(0),
-        ((g_end_ns - out_date_ns) // _NS_PER_DAY).astype(np.int32),
+        ((resolution_hi - out_date_ns) // _NS_PER_DAY).astype(np.int32),
     )
 
     out_res_date_ns = np.where(
         is_resolved,
-        np.where(needs_clamp, np.int64(g_end_ns), res_date_raw),
+        np.where(needs_clamp, resolution_hi, res_date_raw),
         np.int64(-1),
     )
     out_resp_days = np.where(needs_clamp, clamped_resp_days, out_resp_days)
@@ -319,24 +369,32 @@ def _generate_rows_batch(
 
 def _build_order_lookup(
     order_arrays: Dict[str, np.ndarray],
-) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
-    """Build {customer_key: (so_array, ln_array)} from flat order arrays."""
+) -> Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Build customer order-line arrays with their OrderDate causal anchor."""
     ck_arr = order_arrays["CustomerKey"]
     so_arr = order_arrays["OrderNumber"]
     ln_arr = order_arrays["OrderLineNumber"]
+    anchor_arr = order_arrays.get(
+        "OrderDateNs",
+        np.zeros(len(ck_arr), dtype=np.int64),
+    )
 
-    cust_orders: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+    cust_orders: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     if len(ck_arr) > 0:
         sort_idx = np.argsort(ck_arr, kind="stable")
         sorted_ck = ck_arr[sort_idx]
         sorted_so = so_arr[sort_idx]
         sorted_ln = ln_arr[sort_idx]
+        sorted_anchor = anchor_arr[sort_idx]
         boundaries = np.where(np.diff(sorted_ck))[0] + 1
         ck_groups = np.split(sorted_ck, boundaries)
         so_groups = np.split(sorted_so, boundaries)
         ln_groups = np.split(sorted_ln, boundaries)
-        for g_ck, g_so, g_ln in zip(ck_groups, so_groups, ln_groups):
-            cust_orders[int(g_ck[0])] = (g_so, g_ln)
+        anchor_groups = np.split(sorted_anchor, boundaries)
+        for g_ck, g_so, g_ln, g_anchor in zip(
+            ck_groups, so_groups, ln_groups, anchor_groups,
+        ):
+            cust_orders[int(g_ck[0])] = (g_so, g_ln, g_anchor)
     return cust_orders
 
 
@@ -368,6 +426,7 @@ def _complaints_worker_task(args: Tuple) -> Dict[str, np.ndarray]:
         complainer_keys_chunk,
         complaints_per_chunk,
         order_arrays_chunk,
+        customer_bounds_chunk,
         complaints_cfg,
         date_range,
     ) = args
@@ -376,7 +435,7 @@ def _complaints_worker_task(args: Tuple) -> Dict[str, np.ndarray]:
         np.random.SeedSequence(seed).spawn(n_chunks)[chunk_idx]
     )
 
-    g_start_ns, g_end_ns = date_range
+    g_start_ns, g_end_ns, event_end_ns = date_range
     cust_orders = _build_order_lookup(order_arrays_chunk)
 
     result = _generate_rows_batch(
@@ -384,8 +443,10 @@ def _complaints_worker_task(args: Tuple) -> Dict[str, np.ndarray]:
         complainer_keys=complainer_keys_chunk,
         complaints_per=complaints_per_chunk,
         cust_orders=cust_orders,
+        customer_bounds=customer_bounds_chunk,
         g_start_ns=g_start_ns,
         g_end_ns=g_end_ns,
+        event_end_ns=event_end_ns,
         cfg=complaints_cfg,
     )
     # Tag with chunk_idx so the main process can reassemble in deterministic
@@ -407,6 +468,8 @@ class _ComplaintsCfg:
     max_complaints: int = 5
     resolution_rate: float = 0.85
     escalation_rate: float = 0.10
+    min_days_after_anchor: int = 0
+    max_days_after_anchor: int = 30
     avg_response_days: int = 5
     max_response_days: int = 30
     seed: int = 600
@@ -424,6 +487,8 @@ def _read_cfg(cfg: Any) -> _ComplaintsCfg:
         max_complaints=int(getattr(cc, "max_complaints", 5)),
         resolution_rate=float(getattr(cc, "resolution_rate", 0.85)),
         escalation_rate=float(getattr(cc, "escalation_rate", 0.10)),
+        min_days_after_anchor=int(getattr(cc, "min_days_after_anchor", 0)),
+        max_days_after_anchor=int(getattr(cc, "max_days_after_anchor", 30)),
         avg_response_days=int(getattr(cc, "avg_response_days", 5)),
         max_response_days=int(getattr(cc, "max_response_days", 30)),
         seed=int(getattr(cc, "seed", None) or 600),
@@ -433,6 +498,50 @@ def _read_cfg(cfg: Any) -> _ComplaintsCfg:
 
 def _parse_global_dates(cfg: Any) -> Tuple[pd.Timestamp, pd.Timestamp]:
     return _parse_global_dates_shared(cfg, {}, dimension_name="complaints")
+
+
+def _event_horizon_end(cfg: Any, g_end: pd.Timestamp) -> pd.Timestamp:
+    dates_cfg = getattr(cfg, "dates", None)
+    tail_days = int(getattr(dates_cfg, "post_sale_tail_days", 120) or 0)
+    return g_end + pd.Timedelta(days=max(tail_days, 0))
+
+
+def _build_customer_bounds(
+    parquet_dims: Path,
+    g_start: pd.Timestamp,
+    event_end: pd.Timestamp,
+) -> Dict[int, Tuple[int, int]]:
+    """Load exact customer lifecycle bounds for complaint generation."""
+    path = Path(parquet_dims) / "customers.parquet"
+    if not path.exists():
+        path = Path(parquet_dims) / "Customers.parquet"
+    if not path.exists():
+        return {}
+
+    names = set(pq.read_schema(path).names)
+    columns = ["CustomerKey"]
+    columns.extend(
+        name for name in ("CustomerStartDate", "CustomerEndDate", "IsCurrent")
+        if name in names
+    )
+    customers = pd.read_parquet(path, columns=columns)
+    if "IsCurrent" in customers.columns:
+        customers = customers[customers["IsCurrent"].astype(bool)]
+
+    starts = pd.to_datetime(
+        customers.get("CustomerStartDate", pd.Series(pd.NaT, index=customers.index)),
+        errors="coerce",
+    ).fillna(g_start).clip(lower=g_start, upper=event_end)
+    ends = pd.to_datetime(
+        customers.get("CustomerEndDate", pd.Series(pd.NaT, index=customers.index)),
+        errors="coerce",
+    ).fillna(event_end).clip(lower=g_start, upper=event_end)
+    ends = ends.where(ends >= starts, starts)
+
+    return {
+        int(key): (int(start.value), int(end.value))
+        for key, start, end in zip(customers["CustomerKey"], starts, ends)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +637,8 @@ def _generate_complaints_serial(
     c: _ComplaintsCfg,
     g_start: pd.Timestamp,
     g_end: pd.Timestamp,
+    event_end: pd.Timestamp,
+    customer_bounds: Dict[int, Tuple[int, int]],
 ) -> pa.Table:
     rng = np.random.default_rng(c.seed)
 
@@ -562,6 +673,9 @@ def _generate_complaints_serial(
         "CustomerKey": filtered["CustomerKey"].to_numpy(dtype=np.int64),
         "OrderNumber": filtered["OrderNumber"].to_numpy(dtype=np.int64),
         "OrderLineNumber": filtered["OrderLineNumber"].to_numpy(dtype=np.int64),
+        "OrderDateNs": pd.to_datetime(filtered["OrderDate"]).to_numpy(
+            dtype="datetime64[ns]",
+        ).view(np.int64),
     })
 
     result = _generate_rows_batch(
@@ -569,8 +683,10 @@ def _generate_complaints_serial(
         complainer_keys=complainer_keys,
         complaints_per=complaints_per,
         cust_orders=cust_orders,
+        customer_bounds=customer_bounds,
         g_start_ns=int(g_start_ns),
         g_end_ns=int(g_end_ns),
+        event_end_ns=int(event_end.value),
         cfg=c,
     )
 
@@ -593,6 +709,8 @@ def _generate_complaints_parallel(
     c: _ComplaintsCfg,
     g_start: pd.Timestamp,
     g_end: pd.Timestamp,
+    event_end: pd.Timestamp,
+    customer_bounds: Dict[int, Tuple[int, int]],
     n_workers: int,
 ) -> pa.Table:
     """Partition complainers across workers and merge results."""
@@ -633,6 +751,9 @@ def _generate_complaints_parallel(
     orders_ck = filtered["CustomerKey"].to_numpy(dtype=np.int64, copy=True)
     orders_so = filtered["OrderNumber"].to_numpy(dtype=np.int64, copy=True)
     orders_ln = filtered["OrderLineNumber"].to_numpy(dtype=np.int64, copy=True)
+    orders_anchor = pd.to_datetime(filtered["OrderDate"]).to_numpy(
+        dtype="datetime64[ns]",
+    ).view(np.int64)
 
     # --- Partition complainers into chunks ---
     # Chunk COUNT depends only on the data (not the worker count), so per-chunk
@@ -644,7 +765,7 @@ def _generate_complaints_parallel(
 
     chunk_indices = np.array_split(np.arange(n_complainers), n_chunks)
 
-    date_range = (int(g_start_ns), int(g_end_ns))
+    date_range = (int(g_start_ns), int(g_end_ns), int(event_end.value))
 
     tasks = []
     for chunk_idx, indices in enumerate(chunk_indices):
@@ -660,6 +781,14 @@ def _generate_complaints_parallel(
             "CustomerKey": orders_ck[mask],
             "OrderNumber": orders_so[mask],
             "OrderLineNumber": orders_ln[mask],
+            "OrderDateNs": orders_anchor[mask],
+        }
+        customer_bounds_chunk = {
+            int(key): customer_bounds.get(
+                int(key),
+                (int(g_start_ns), int(event_end.value)),
+            )
+            for key in chunk_keys
         }
 
         tasks.append((
@@ -669,6 +798,7 @@ def _generate_complaints_parallel(
             chunk_keys,
             chunk_counts,
             order_arrays_chunk,
+            customer_bounds_chunk,
             c,
             date_range,
         ))
@@ -737,6 +867,8 @@ def _generate_complaints(
     c: _ComplaintsCfg,
     g_start: pd.Timestamp,
     g_end: pd.Timestamp,
+    event_end: pd.Timestamp,
+    customer_bounds: Dict[int, Tuple[int, int]],
     workers: Optional[int] = None,
 ) -> pa.Table:
     """Generate the complaints table; dispatches to parallel or serial path."""
@@ -759,6 +891,8 @@ def _generate_complaints(
             c=c,
             g_start=g_start,
             g_end=g_end,
+            event_end=event_end,
+            customer_bounds=customer_bounds,
             n_workers=n_cpus,
         )
     else:
@@ -767,6 +901,8 @@ def _generate_complaints(
             c=c,
             g_start=g_start,
             g_end=g_end,
+            event_end=event_end,
+            customer_bounds=customer_bounds,
         )
 
 
@@ -828,6 +964,8 @@ def run_complaints_pipeline(
         return None
 
     g_start, g_end = _parse_global_dates(cfg)
+    event_end = _event_horizon_end(cfg, g_end)
+    customer_bounds = _build_customer_bounds(parquet_dims, g_start, event_end)
     order_data = accumulator.finalize()
 
     complaints_dir = Path(fact_out) / "complaints"
@@ -842,6 +980,8 @@ def run_complaints_pipeline(
         c=c,
         g_start=g_start,
         g_end=g_end,
+        event_end=event_end,
+        customer_bounds=customer_bounds,
         workers=workers,
     )
 

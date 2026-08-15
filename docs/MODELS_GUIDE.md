@@ -84,6 +84,11 @@ quantity.monthly_factors:
 
 Controls how prices evolve over time and how they appear in the output. Three sub-systems work together: inflation drift, markdown discounts, and appearance (rounding/snapping).
 
+`UnitPrice`, `UnitCost`, `NetPrice`, and `DiscountAmount` are per-unit sales
+measures. Promotion `DiscountPct` is the nominal target; the realized discount
+can be smaller when margin or minimum-price constraints apply. See
+[Analytical semantics](ANALYTICAL_SEMANTICS.md) for aggregation contracts.
+
 ### Inflation
 
 Simulates gradual price increases over time. Each product's `UnitPrice` drifts upward from its base `ListPrice` according to these parameters.

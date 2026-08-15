@@ -6,12 +6,12 @@
 # SCALE — row/entity counts for each table (start here)
 # ------------------------------------------------------------------
 scale:
-  sales_rows: 1003295
+  sales_rows: 20032950
   products:
     catalog: all                    # contoso (original 2517) | synthetic (5633) | all (combined - 7930)
     rows: 7930                      # target product count (trims or expands to fit)
-  customers: 42851
-  stores: 200
+  customers: 142851
+  stores: 500
   promotions: { seasonal: 11, clearance: 4, limited: 5, flash: 6, volume: 4, loyalty: 3, bundle: 3, new_customer: 3 }
 
 # ------------------------------------------------------------------
@@ -148,6 +148,8 @@ complaints:
   max_complaints: 5                 # max complaints per customer
   resolution_rate: 0.85             # fraction of complaints that get resolved
   escalation_rate: 0.10             # fraction of unresolved that get escalated (rest stay open)
+  min_days_after_anchor: 0           # linked complaints occur after their OrderDate
+  max_days_after_anchor: 30
   avg_response_days: 5              # mean days to resolve
   max_response_days: 30             # cap on resolution time
   seed: 600
@@ -177,7 +179,7 @@ geography: {}
 # PROMOTIONS
 # ------------------------------------------------------------------
 promotions:
-  new_customer_window_months: 3    # months after CustomerStartDate where New Customer promo applies (0 = same month only)
+  new_customer_window_months: 3    # exact calendar months after CustomerStartDate (inclusive deadline)
 
 # ------------------------------------------------------------------
 # STORES
@@ -226,6 +228,7 @@ dates:
   fiscal_start_month: 5
   as_of_date: null
   spaced_column_names: true
+  post_sale_tail_days: 120          # calendar coverage for returns/complaints; does not extend sales
 
   include:
     calendar: true
@@ -244,7 +247,7 @@ dates:
 # ------------------------------------------------------------------
 exchange_rates:
   from_currencies: ["USD"] #, "CAD", "GBP", "EUR"]
-  to_currencies: ["CAD", "GBP", "EUR", "INR", "AUD", "CNY", "JPY"] #, "KRW", "SGD", "AED", "ZAR", "BRL", "MXN"]
+  to_currencies: ["CAD", "GBP", "EUR", "INR", "AUD", "CNY", "JPY", "NOK", "PLN", "SEK", "CHF"] #, "KRW", "SGD", "AED", "ZAR", "BRL", "MXN"]
   base_currency: "USD"
 
   future_annual_drift: 0.02   # annual compounding rate applied to project rates beyond today

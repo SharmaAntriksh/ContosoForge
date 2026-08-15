@@ -10,7 +10,6 @@ Validates that:
 """
 from __future__ import annotations
 
-import copy
 import pytest
 import yaml
 
@@ -18,22 +17,14 @@ from src.engine.config.config_schema import (
     AppConfig,
     ModelsConfig,
     SalesConfig,
-    DefaultsConfig,
-    BudgetConfig,
     BudgetWeightsConfig,
     InventoryConfig,
-    CustomersConfig,
     StoresConfig,
-    EmployeesConfig,
-    ExchangeRatesConfig,
     ReturnsConfig,
     ProductsConfig,
-    PromotionsConfig,
     DatesTableConfig,
-    SubscriptionsConfig,
     PackagingConfig,
     YearLevelFactorsConfig,
-    ModelsInnerConfig,
 )
 
 
@@ -105,6 +96,20 @@ class TestAppConfigFromYAML:
         app = AppConfig.from_raw_dict(normalized_config)
         assert isinstance(app.returns.return_rate, float)
 
+    def test_complaint_anchor_lag_section(self, normalized_config):
+        app = AppConfig.from_raw_dict(normalized_config)
+        assert app.complaints.min_days_after_anchor == 0
+        assert app.complaints.max_days_after_anchor == 30
+
+    def test_complaint_anchor_lag_rejects_reversed_range(self):
+        with pytest.raises(ValueError, match="min_days_after_anchor"):
+            AppConfig.from_raw_dict({
+                "complaints": {
+                    "min_days_after_anchor": 31,
+                    "max_days_after_anchor": 30,
+                },
+            })
+
     def test_products_section(self, normalized_config):
         app = AppConfig.from_raw_dict(normalized_config)
         assert app.products.active_ratio == 0.96
@@ -123,8 +128,10 @@ class TestAppConfigFromYAML:
 class TestModelsConfigFromYAML:
     def test_validates_models_yaml(self, raw_models):
         m = ModelsConfig.from_raw_dict(raw_models)
-        assert m.models.quantity.base_poisson_lambda == 2.1
+        assert m.models.quantity.base_poisson_lambda == 1.6
         assert m.models.quantity.min_qty == 1
+        assert m.models.quantity.max_qty == 8
+        assert m.models.quantity.truncate_at_max is True
 
     def test_macro_demand(self, raw_models):
         m = ModelsConfig.from_raw_dict(raw_models)
@@ -161,6 +168,19 @@ class TestModelsConfigFromYAML:
         assert len(ret.reasons) == 8
         assert ret.lag_days.distribution == "triangular"
         assert ret.quantity.full_line_probability == 0.85
+        assert ret.product_risk.enabled is True
+        assert ret.product_risk.multiplier_clip == [0.25, 4.0]
+
+    def test_product_risk_clip_validation(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="multiplier_clip"):
+            ModelsConfig.from_raw_dict({
+                "models": {
+                    "returns": {
+                        "product_risk": {"multiplier_clip": [1.5, 0.5]},
+                    },
+                },
+            })
 
 
 # =========================================================================
@@ -267,6 +287,16 @@ class TestDefaults:
         ylf = YearLevelFactorsConfig.model_validate({"mode": "repeat", "values": [1.0, 2.0]})
         assert ylf.factor_values == [1.0, 2.0]
         assert ylf.mode == "repeat"
+
+
+class TestDatesTableConfig:
+    def test_post_sale_tail_default(self):
+        assert DatesTableConfig().post_sale_tail_days == 120
+
+    def test_post_sale_tail_rejects_negative_values(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            DatesTableConfig.model_validate({"post_sale_tail_days": -1})
 
 
 # =========================================================================

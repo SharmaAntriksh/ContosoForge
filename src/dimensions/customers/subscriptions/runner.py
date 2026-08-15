@@ -12,7 +12,7 @@ from src.utils.logging_utils import info, skip, stage
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning.version_store import should_regenerate, save_version
 
-from .helpers import SubscriptionsCfg, build_dim_plans, parse_global_dates, read_cfg
+from .helpers import build_dim_plans, parse_global_dates, read_cfg
 from .bridge_serial import write_bridge_streaming
 from .bridge_parallel import write_bridge_parallel
 
@@ -42,7 +42,7 @@ def run_subscriptions(cfg: Any, parquet_folder: Path) -> Dict[str, Any]:
     from src.utils.config_helpers import as_dict
     st = os.stat(customers_fp)
     version_cfg = as_dict(cfg.subscriptions)
-    version_cfg["_schema_version"] = 5
+    version_cfg["_schema_version"] = 6
     version_cfg["_upstream_customers_sig"] = {
         "path": str(customers_fp),
         "size": int(st.st_size),

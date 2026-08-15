@@ -229,6 +229,50 @@ class TestBuildQuantity:
 # Quantity elasticity (price + propensity)
 # ===================================================================
 
+class TestQuantitySegmentMultiplier:
+    def setup_method(self):
+        State.reset()
+        _reset_cache()
+        State.models_cfg = {
+            "quantity": {
+                "base_poisson_lambda": 1.6,
+                "monthly_factors": [1.0] * 12,
+                "noise_sigma": 0.0,
+                "min_qty": 1,
+                "max_qty": 20,
+            },
+        }
+
+    def teardown_method(self):
+        State.reset()
+        _reset_cache()
+
+    def test_segment_multiplier_raises_mean_without_new_rng_draws(self):
+        n = 10_000
+        dates = np.array(["2023-03-15"] * n, dtype="datetime64[D]")
+        orders = np.arange(1, n + 1, dtype=np.int64)
+        lines = np.ones(n, dtype=np.int32)
+        base = build_quantity(
+            np.random.default_rng(1), dates,
+            order_numbers=orders, line_numbers=lines,
+        )
+        boosted = build_quantity(
+            np.random.default_rng(999), dates,
+            order_numbers=orders, line_numbers=lines,
+            segment_multiplier=np.full(n, 1.5),
+        )
+
+        assert boosted.mean() > base.mean() * 1.30
+
+    def test_segment_multiplier_shape_is_validated(self):
+        dates = np.array(["2023-03-15"] * 3, dtype="datetime64[D]")
+        with pytest.raises(SalesError, match="segment_multiplier must have shape"):
+            build_quantity(
+                np.random.default_rng(1), dates,
+                segment_multiplier=np.ones(2),
+            )
+
+
 class TestQuantityElasticity:
     def setup_method(self):
         State.reset()
@@ -313,6 +357,30 @@ class TestQuantityElasticity:
         assert _reference_price(None) == 100.0
         # explicit config value overrides the auto median
         assert _reference_price(250.0) == 250.0
+
+    def test_restored_ceiling_is_not_a_terminal_bucket_artifact(self):
+        State.models_cfg = {
+            "quantity": {
+                "base_poisson_lambda": 2.1,
+                "monthly_factors": [1.0] * 12,
+                "noise_sigma": 0.12,
+                "min_qty": 1,
+                "max_qty": 8,
+                "elasticity": {"enabled": False},
+            }
+        }
+        _reset_cache()
+        n = 100_000
+        qty = build_quantity(
+            np.random.default_rng(1),
+            np.array(["2023-06-15"] * n, dtype="datetime64[D]"),
+            order_numbers=np.arange(1, n + 1, dtype=np.int64),
+            line_numbers=np.ones(n, dtype=np.int32),
+        )
+        terminal_share = float(np.mean(qty == 8))
+        assert qty.max() == 8
+        assert terminal_share < 0.02
+        assert int(np.sum(qty == 8)) < int(np.sum(qty == 7))
 
 
 # ===================================================================

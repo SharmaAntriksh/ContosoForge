@@ -6,7 +6,11 @@ from typing import Sequence
 import numpy as np
 import pyarrow as pa
 
-from src.defaults import RETURN_REASON_KEYS, RETURN_REASON_DEFAULT_WEIGHTS
+from src.defaults import (
+    RETURN_REASON_KEYS,
+    RETURN_REASON_DEFAULT_WEIGHTS,
+    RETURN_REASON_QUALITY_KEYS,
+)
 from src.exceptions import SalesError
 from src.facts.sales.sales_logic.core.delivery import line_friction
 from src.utils.hashing import hash_i64
@@ -90,6 +94,9 @@ class ReturnsConfig:
     # the pre-3.4 behavior for direct/unit construction).
     friction_return_boost: float = 0.0   # p_return_i = rate * (1 + boost*friction_i)
     friction_lag_shorten: float = 0.0    # lag_i *= (1 - shorten*friction_i)
+    product_return_risk_strength: float = 0.0
+    product_defect_reason_strength: float = 0.0
+    quality_keys: frozenset = RETURN_REASON_QUALITY_KEYS
 
 
 def _returns_schema_for(so_type: pa.DataType) -> pa.Schema:
@@ -289,6 +296,8 @@ def build_sales_returns_from_detail(
     *,
     chunk_seed: int,
     cfg: ReturnsConfig,
+    product_return_risk_by_key=None,
+    product_defect_risk_by_key=None,
 ) -> pa.Table:
     """
     Build Returns event rows from OrderDetail lines.
@@ -332,6 +341,17 @@ def build_sales_returns_from_detail(
     # numbers aren't truncated; the output is built back to _so_type below.
     so_all = _as_np_i64(_col_np(detail_cc, "OrderNumber"))
     line_all = _as_np_i32(_col_np(detail_cc, "OrderLineNumber"))
+    prod_all = _as_np_i32(_col_np(detail_cc, "ProductKey"))
+
+    def _risk_for_keys(lookup, keys):
+        if lookup is None:
+            return np.ones(len(keys), dtype=np.float64)
+        _lut = np.asarray(lookup, dtype=np.float64)
+        _keys = np.asarray(keys, dtype=np.int64)
+        _out = np.ones(len(_keys), dtype=np.float64)
+        _valid = (_keys >= 0) & (_keys < len(_lut))
+        _out[_valid] = _lut[_keys[_valid]]
+        return np.where(np.isfinite(_out) & (_out > 0.0), _out, 1.0)
 
     # Shared fulfillment friction couples returns to delivery — the
     # SAME per-line friction the delivery pass used (recomputed here from
@@ -341,10 +361,18 @@ def build_sales_returns_from_detail(
     friction_all = line_friction(so_all, line_all) if use_friction else None
 
     # Select candidate return lines (only positive-quantity lines can be returned).
+    _return_mult = _risk_for_keys(product_return_risk_by_key, prod_all)
+    _risk_strength = max(0.0, float(cfg.product_return_risk_strength))
+    _return_mult = np.maximum(0.0, 1.0 + _risk_strength * (_return_mult - 1.0))
     if cfg.friction_return_boost > 0.0 and friction_all is not None:
-        p_return = np.clip(rr * (1.0 + cfg.friction_return_boost * friction_all), 0.0, 1.0)
+        # line_friction is uniform on [0,1]. Divide by its analytical mean
+        # factor so friction changes *which* lines return without moving the
+        # configured portfolio return-rate anchor.
+        _boost = float(cfg.friction_return_boost)
+        _friction_mult = (1.0 + _boost * friction_all) / (1.0 + 0.5 * _boost)
     else:
-        p_return = rr
+        _friction_mult = 1.0
+    p_return = np.clip(rr * _return_mult * _friction_mult, 0.0, 1.0)
     mask = (rng.random(n) < p_return) & (qty_all > 0)
     if not bool(mask.any()):
         return _empty_returns_table(_so_type)
@@ -362,7 +390,8 @@ def build_sales_returns_from_detail(
     # the rest of the returns table stays byte-identical; only these columns are
     # added. Masked to the returned lines here, expanded per event below.
     cust = _as_np_i32(_col_np(detail_cc, "CustomerKey"))[mask]
-    prod = _as_np_i32(_col_np(detail_cc, "ProductKey"))[mask]
+    prod = prod_all[mask]
+    defect_risk = _risk_for_keys(product_defect_risk_by_key, prod)
     store = _as_np_i32(_col_np(detail_cc, "StoreKey"))[mask]
     emp = _as_np_i32(_col_np(detail_cc, "EmployeeKey"))[mask]
 
@@ -402,10 +431,10 @@ def build_sales_returns_from_detail(
     so_exp = np.repeat(so, num_events)
     line_exp = np.repeat(line, num_events)
     delivery_exp = np.repeat(delivery, num_events)
-    qty_exp = np.repeat(qty, num_events)  # original line qty (for pro-rating)
     net_price_exp = np.repeat(net_price, num_events)
     cust_exp = np.repeat(cust, num_events)
     prod_exp = np.repeat(prod, num_events)
+    defect_risk_exp = np.repeat(defect_risk, num_events)
     store_exp = np.repeat(store, num_events)
     emp_exp = np.repeat(emp, num_events)
 
@@ -486,7 +515,42 @@ def build_sales_returns_from_detail(
     # Logistics reasons (e.g., "Late delivery", "Damaged in shipping") are only
     # valid for delayed orders. On-time orders get those weights redistributed.
     reason = np.empty(total_events, dtype=np.int32)
-    if cfg.logistics_keys:
+    _defect_strength = max(0.0, float(cfg.product_defect_reason_strength))
+    _use_product_reasons = (
+        product_defect_risk_by_key is not None
+        and _defect_strength > 0.0
+        and bool(cfg.quality_keys)
+    )
+    if _use_product_reasons:
+        # Row-specific reason distributions: defect-prone products increase the
+        # canonical Quality-category weights. Logistics reasons remain forbidden
+        # on on-time orders before each row is renormalized.
+        _probs = np.broadcast_to(reason_probs, (total_events, len(reason_keys))).copy()
+        is_delayed_exp = np.repeat(is_delayed, num_events) > 0
+        if cfg.logistics_keys:
+            logistics_mask = np.array(
+                [k in cfg.logistics_keys for k in reason_keys], dtype=bool,
+            )
+            _probs[np.ix_(~is_delayed_exp, logistics_mask)] = 0.0
+        _quality_mask = np.array(
+            [k in cfg.quality_keys for k in reason_keys], dtype=bool,
+        )
+        _quality_mult = np.maximum(
+            0.0, 1.0 + _defect_strength * (defect_risk_exp - 1.0),
+        )
+        _probs[:, _quality_mask] *= _quality_mult[:, None]
+        _row_sum = _probs.sum(axis=1)
+        _bad = _row_sum <= 0.0
+        if _bad.any():
+            _probs[_bad] = reason_probs
+            _row_sum[_bad] = 1.0
+        _probs /= _row_sum[:, None]
+        _cdf = np.cumsum(_probs, axis=1)
+        _cdf[:, -1] = 1.0
+        _draw = rng.random(total_events)
+        _reason_idx = (_draw[:, None] > _cdf).sum(axis=1)
+        reason[:] = reason_keys[_reason_idx]
+    elif cfg.logistics_keys:
         logistics_mask = np.array([k in cfg.logistics_keys for k in reason_keys], dtype=bool)
         probs_ontime = _ontime_reason_probs(reason_probs, logistics_mask)
 
@@ -500,9 +564,12 @@ def build_sales_returns_from_detail(
     else:
         reason[:] = rng.choice(reason_keys, size=total_events, p=reason_probs).astype(np.int32)
 
-    # --- ReturnNetPrice: pro-rated by event quantity ---
-    unit_price = net_price_exp / np.maximum(qty_exp.astype(np.float64), 1.0)
-    return_net_price = np.round(unit_price * event_qty.astype(np.float64), 2)
+    # --- ReturnNetPrice: summable event amount ---
+    # Sales.NetPrice is a PER-UNIT value. A return event therefore carries
+    # NetPrice * ReturnQuantity. Dividing by the sold Quantity here would price
+    # the same unit twice and materially understate multi-unit returns.
+    return_net_price = np.round(
+        net_price_exp * event_qty.astype(np.float64), 2)
     if cfg.reconcile_cents and multi_idx.size:
         # Integer-cent largest-remainder apportionment: a line's multi-event
         # ReturnNetPrice values sum EXACTLY to its single-event equivalent
@@ -517,8 +584,8 @@ def build_sales_returns_from_detail(
             rq_line = int(ev.sum())                      # == ret_qty[i]
             if rq_line <= 0:
                 continue
-            up_line = float(net_price[i]) / max(float(qty[i]), 1.0)
-            total_cents = int(np.round(up_line * rq_line * 100.0))
+            unit_net_line = float(net_price[i])
+            total_cents = int(np.round(unit_net_line * rq_line * 100.0))
             ideal = total_cents * ev
             base = ideal // rq_line                       # floor cents per event
             leftover = int(total_cents - int(base.sum()))

@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+from pydantic import ValidationError
 
 from src.engine.config.config import (
     _clamp01,
@@ -18,6 +19,7 @@ from src.engine.config.config import (
     normalize_sales_config,
 )
 from src.exceptions import ConfigError
+from src.engine.config.config_schema import ModelsConfig
 
 
 # ===================================================================
@@ -511,5 +513,28 @@ def test_legacy_sql_section_warns_but_loads(tmp_path, capsys):
     assert cfg is not None
     out = capsys.readouterr()
     assert "sql:" in (out.out + out.err) or "'sql'" in (out.out + out.err)
+
+
+class TestSegmentModelsConfig:
+    def test_defaults_are_typed(self):
+        cfg = ModelsConfig.from_raw_dict({"models": {}})
+
+        assert cfg.models.segments.enabled is True
+        assert cfg.models.segments.organization.business_channel_share == 0.70
+        assert cfg.models.segments.income_product_preference.strength == 0.45
+
+    @pytest.mark.parametrize(
+        "organization",
+        [
+            {"business_channel_share": 1.01},
+            {"b2b_channel_share": -0.01},
+            {"quantity_multiplier": 0.99},
+        ],
+    )
+    def test_invalid_organization_settings_fail_fast(self, organization):
+        with pytest.raises(ValidationError):
+            ModelsConfig.from_raw_dict({
+                "models": {"segments": {"organization": organization}},
+            })
 
 

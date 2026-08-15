@@ -19,13 +19,12 @@ from src.dimensions.dates import (
 )
 from src.exceptions import DimensionError
 from src.dimensions.dates.helpers import _require_start_end
+from src.dimensions.dates.runner import _resolve_date_dimension_bounds
 from src.dimensions.dates.fiscal import add_fiscal_columns
-from src.dimensions.dates.iso import add_iso_columns
 from src.dimensions.dates.weekly_fiscal import (
     _weekday_num,
     _weekly_fiscal_year_bounds,
     _weeks_in_periods,
-    add_weekly_fiscal_columns,
     resolve_weekly_fiscal_cfg,
 )
 from src.utils.static_schemas import weekly_fiscal_enabled
@@ -126,6 +125,30 @@ class TestGenerateDateTable:
         dates = pd.DatetimeIndex(df["Date"])
         expected = pd.date_range(start, end, freq="D")
         pd.testing.assert_index_equal(dates, expected, check_names=False)
+
+
+class TestDateDimensionBounds:
+    def test_post_sale_tail_extends_calendar_when_buffer_is_disabled(self):
+        start, end = _resolve_date_dimension_bounds(
+            pd.Timestamp("2021-01-01"),
+            pd.Timestamp("2025-12-31"),
+            buffer_years=0,
+            post_sale_tail_days=120,
+        )
+
+        assert start == pd.Timestamp("2021-01-01")
+        assert end == pd.Timestamp("2026-04-30")
+
+    def test_year_buffer_wins_when_it_already_covers_event_horizon(self):
+        start, end = _resolve_date_dimension_bounds(
+            pd.Timestamp("2021-06-15"),
+            pd.Timestamp("2025-12-31"),
+            buffer_years=1,
+            post_sale_tail_days=120,
+        )
+
+        assert start == pd.Timestamp("2020-01-01")
+        assert end == pd.Timestamp("2026-12-31")
 
 
 class TestRequireStartEnd:

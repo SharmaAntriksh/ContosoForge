@@ -282,7 +282,9 @@ def _resolve_returns_config(cfg, sales_output, skip_order_cols, models_cfg) -> R
     )
 
 
-def _load_sales_pools(parquet_folder_p, cfg, start_date, end_date, seed, active_product_np) -> SalesPools:
+def _load_sales_pools(
+    parquet_folder_p, cfg, start_date, end_date, seed, active_product_np, models_cfg,
+) -> SalesPools:
     """Load every sales dimension pool + correlation lookups for the run.
 
     Reads customers / products / stores / promotions / employee-bridge parquet
@@ -294,6 +296,7 @@ def _load_sales_pools(parquet_folder_p, cfg, start_date, end_date, seed, active_
     _prod = _load_products(
         parquet_folder_p, cfg, seed, start_date, end_date,
         active_product_np=active_product_np,
+        models_cfg=models_cfg,
     )
     _sdw_cfg = getattr(getattr(cfg, "sales", None), "store_demand_weight", None)
     _stores = _load_stores(parquet_folder_p, end_date, weight_cfg=_sdw_cfg)
@@ -745,6 +748,7 @@ def generate_sales_fact(
     _pools = _load_sales_pools(
         parquet_folder_p, cfg, start_date, end_date, seed,
         active_product_np=getattr(State, "active_product_np", None),
+        models_cfg=models_cfg,
     )
     _cust = _pools.customers
     _prod = _pools.products

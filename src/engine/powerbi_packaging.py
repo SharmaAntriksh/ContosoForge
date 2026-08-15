@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import re
 import shutil
+import ntpath
+import posixpath
 from pathlib import Path
 from typing import Optional
 
@@ -141,6 +143,59 @@ def attach_pbip_project(
         expression_name=expression_name,
         final_folder=final_folder,
     )
+
+    # TMDLScripts is a legacy editor-export surface, not part of the active
+    # semantic-model definition. Some templates contain historical machine-local
+    # paths there, so never ship it in generated projects.
+    for legacy_dir in semantic_model.rglob("TMDLScripts"):
+        if legacy_dir.is_dir():
+            shutil.rmtree(legacy_dir)
+
+    _assert_no_external_absolute_paths(pbip_dst, final_folder)
+
+
+_QUOTED_ABSOLUTE_PATH = re.compile(
+    r'''(?P<quote>["'])(?P<path>(?:[A-Za-z]:[\\/]|/)[^"'\r\n]*)(?P=quote)'''
+)
+_PATH_TEXT_SUFFIXES = {".json", ".pbip", ".pbir", ".pbism", ".tmdl"}
+
+
+def _assert_no_external_absolute_paths(pbip_root: Path, final_folder: Path) -> None:
+    """Reject machine-local paths outside the dataset being packaged."""
+    allowed_native = str(final_folder.resolve())
+    allowed_windows = ntpath.normcase(ntpath.normpath(allowed_native))
+    allowed_posix = posixpath.normpath(Path(final_folder).resolve().as_posix())
+    violations: list[str] = []
+
+    for path in pbip_root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in _PATH_TEXT_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for match in _QUOTED_ABSOLUTE_PATH.finditer(text):
+            embedded = match.group("path").replace("\\\\", "\\")
+            if re.match(r"^[A-Za-z]:[\\/]", embedded):
+                candidate = ntpath.normcase(ntpath.normpath(embedded))
+                allowed = (
+                    candidate == allowed_windows
+                    or candidate.startswith(allowed_windows.rstrip("\\/") + "\\")
+                )
+            else:
+                candidate = posixpath.normpath(embedded)
+                allowed = (
+                    candidate == allowed_posix
+                    or candidate.startswith(allowed_posix.rstrip("/") + "/")
+                )
+            if not allowed:
+                violations.append(f"{path.relative_to(pbip_root)}: {embedded}")
+
+    if violations:
+        sample = "; ".join(violations[:5])
+        raise PackagingError(
+            "Packaged Power BI project contains an external absolute path: " + sample
+        )
 
 
 def _rewrite_expression(

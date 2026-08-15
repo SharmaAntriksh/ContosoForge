@@ -568,6 +568,8 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         promo_start_all = worker_cfg["promo_start_all"]
         promo_end_all = worker_cfg["promo_end_all"]
         promo_salience_all = worker_cfg.get("promo_salience_all")
+        promo_discount_pct_all = worker_cfg.get("promo_discount_pct_all")
+        promo_audience_group = worker_cfg.get("promo_audience_group")
         new_customer_promo_keys = worker_cfg.get("new_customer_promo_keys")
         new_customer_window_months = int(worker_cfg.get("new_customer_window_months", 3))
 
@@ -577,6 +579,13 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         customer_end_month = worker_cfg.get("customer_end_month")
         customer_base_weight = worker_cfg.get("customer_base_weight")
         customer_discovery_month = worker_cfg.get("customer_discovery_month")
+        customer_income_score_by_key = worker_cfg.get("customer_income_score_by_key")
+        customer_is_organization_by_key = worker_cfg.get("customer_is_organization_by_key")
+        customer_org_scale_score_by_key = worker_cfg.get("customer_org_scale_score_by_key")
+        customer_org_procurement_score_by_key = worker_cfg.get("customer_org_procurement_score_by_key")
+        customer_org_preferred_category_mask_by_key = worker_cfg.get(
+            "customer_org_preferred_category_mask_by_key"
+        )
 
         # Global per-month plan: tiny length-T arrays + scalars.
         sales_rows_per_month = worker_cfg.get("sales_rows_per_month")
@@ -920,6 +929,24 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     promo_end_all = np.asarray(promo_end_all, dtype="datetime64[D]")
     if promo_salience_all is not None:
         promo_salience_all = np.asarray(promo_salience_all, dtype=np.float64)
+    if promo_discount_pct_all is not None:
+        promo_discount_pct_all = np.asarray(promo_discount_pct_all, dtype=np.float64)
+    if promo_audience_group is not None:
+        promo_audience_group = np.asarray(promo_audience_group, dtype=np.int8)
+    if promo_discount_pct_all is not None:
+        if len(promo_discount_pct_all) != len(promo_keys_all):
+            raise SalesError("promo_discount_pct_all must align with promo_keys_all")
+        promo_discount_pct_by_key = np.zeros(
+            int(promo_keys_all.max()) + 1 if promo_keys_all.size else 0,
+            dtype=np.float64,
+        )
+        promo_discount_pct_by_key[promo_keys_all] = np.clip(
+            promo_discount_pct_all, 0.0, 1.0,
+        )
+    else:
+        promo_discount_pct_by_key = None
+    if promo_audience_group is not None and len(promo_audience_group) != len(promo_keys_all):
+        raise SalesError("promo_audience_group must align with promo_keys_all")
     if new_customer_promo_keys is not None and len(new_customer_promo_keys) > 0:
         new_customer_promo_keys = as_int32(new_customer_promo_keys)
     else:
@@ -941,6 +968,22 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         customer_end_month = as_int64(customer_end_month)
         if customer_end_month.shape[0] != customer_keys.shape[0]:
             raise SalesError("customer_end_month must align with customer_keys length")
+
+    # Dense CustomerKey-indexed lifecycle lookups must cover every pool key.
+    _max_customer_key = int(customer_keys.max()) if customer_keys.size else -1
+    for _lifecycle_name in (
+        "customer_first_eff_start_by_key",
+        "customer_last_eff_end_by_key",
+    ):
+        _lifecycle_lut = worker_cfg.get(_lifecycle_name)
+        if _lifecycle_lut is None:
+            continue
+        _lifecycle_lut = as_int64(_lifecycle_lut)
+        if _lifecycle_lut.ndim != 1 or len(_lifecycle_lut) <= _max_customer_key:
+            raise SalesError(
+                f"{_lifecycle_name} must be a dense lookup covering every CustomerKey"
+            )
+        worker_cfg[_lifecycle_name] = _lifecycle_lut
 
     if customer_base_weight is not None:
         customer_base_weight = np.asarray(customer_base_weight, dtype=np.float64)
@@ -1038,6 +1081,9 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "promo_start_all": promo_start_all,
             "promo_end_all": promo_end_all,
             "promo_salience_all": promo_salience_all,
+            "promo_discount_pct_all": promo_discount_pct_all,
+            "promo_discount_pct_by_key": promo_discount_pct_by_key,
+            "promo_audience_group": promo_audience_group,
             "new_customer_promo_keys": new_customer_promo_keys,
             "new_customer_window_months": new_customer_window_months,
             "customer_keys": customer_keys,
@@ -1049,6 +1095,17 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             # CustomerKey -> first start date (epoch days); clamps OrderDate forward
             # so no order predates the customer's day-granular start date.
             "customer_first_eff_start_by_key": worker_cfg.get("customer_first_eff_start_by_key"),
+            # CustomerKey -> exact lifecycle end (epoch days, INT64_MAX=open);
+            # clamps OrderDate backward inside a customer's churn day.
+            "customer_last_eff_end_by_key": worker_cfg.get("customer_last_eff_end_by_key"),
+            "customer_loyalty_tier_by_key": worker_cfg.get("customer_loyalty_tier_by_key"),
+            "customer_income_score_by_key": customer_income_score_by_key,
+            "customer_is_organization_by_key": customer_is_organization_by_key,
+            "customer_org_scale_score_by_key": customer_org_scale_score_by_key,
+            "customer_org_procurement_score_by_key": customer_org_procurement_score_by_key,
+            "customer_org_preferred_category_mask_by_key": (
+                customer_org_preferred_category_mask_by_key
+            ),
             # Global per-month plan
             "sales_rows_per_month": sales_rows_per_month,
             "sales_orders_per_month": sales_orders_per_month,
@@ -1111,6 +1168,10 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             # Product profile attributes for weighted sampling
             "product_popularity": worker_cfg.get("product_popularity"),
             "product_seasonality": worker_cfg.get("product_seasonality"),
+            "product_return_risk_by_key": worker_cfg.get("product_return_risk_by_key"),
+            "product_defect_risk_by_key": worker_cfg.get("product_defect_risk_by_key"),
+            "product_price_score": worker_cfg.get("product_price_score"),
+            "product_category_key": worker_cfg.get("product_category_key"),
             # Per-product SubcategoryKey for basket-theme correlation.
             "product_subcat_key": worker_cfg.get("product_subcat_key"),
 

@@ -83,7 +83,11 @@ Sales return fact table. Generates return events linked to original sales orders
 | `returns.enabled` | Master toggle. When `false`, no returns are generated. Also auto-disabled if `skip_order_cols=true` (returns need `OrderNumber` to link back). | `true` |
 | `returns.return_rate` | Fraction of sales rows that generate a return event. 0.08 = 8% of sales are returned. | `0.08` |
 | `returns.min_days_after_sale` | Minimum days between sale date and return date. | `1` |
-| `returns.max_days_after_sale` | Maximum days between sale date and return date. | `60` |
+| `returns.max_days_after_sale` | Maximum days between sale date and return date. The Date dimension must cover the resulting event through `dates.post_sale_tail_days`. | `60` |
+
+`ReturnNetPrice` is a summable return-event amount (`Sales.NetPrice *
+ReturnQuantity`) despite its compatibility name. Sales price and discount fields
+remain per-unit measures; see [Analytical semantics](ANALYTICAL_SEMANTICS.md).
 
 ---
 
@@ -153,7 +157,7 @@ Customer wishlist fact table. Generates product wishlists linked to customers.
 | `wishlists.max_items` | Hard cap on wishlist items per customer. | `20` |
 | `wishlists.pre_browse_days` | How many days before a customer's start date they can begin wishlisting products. Simulates browsing before first purchase. | `90` |
 | `wishlists.affinity_strength` | Probability that the next wishlist item comes from the same subcategory as a previous item. Higher values create more focused wishlists. | `0.6` |
-| `wishlists.conversion_rate` | Fraction of wishlist items drawn from the customer's actual purchase history. Higher values mean wishlists overlap more with what the customer actually bought. | `0.50` |
+| `wishlists.conversion_rate` | Target fraction of wishlist rows with a same-customer/product purchase on or after `AddedDate`. Converted rows are anchored to a stable purchase date. | `0.50` |
 | `wishlists.seed` | Random seed for wishlist generation. | `500` |
 
 ---
@@ -210,7 +214,7 @@ Promotion dimension configuration.
 
 | Key | Description | Example |
 |-----|-------------|---------|
-| `promotions.new_customer_window_months` | Number of months after a customer's start date during which the "New Customer" promo type applies. 0 = same month only. | `3` |
+| `promotions.new_customer_window_months` | Number of calendar months after the exact customer start date during which the "New Customer" promo type applies. 0 = acquisition date only. | `3` |
 
 > Promotion counts are set in the [Scale](#scale) section (`scale.promotions`).
 
@@ -264,6 +268,7 @@ Date dimension: calendar systems and fiscal year configuration.
 |-----|-------------|---------|
 | `dates.fiscal_start_month` | Month number (1-12) when the fiscal year begins. 5 = fiscal year starts in May. Affects all fiscal calendar columns (FiscalYear, FiscalQuarter, etc.). | `5` |
 | `dates.as_of_date` | Reference date for `IsToday`, `IsCurrentMonth`, etc. columns. Set to `null` to use the actual current date at generation time. Useful for reproducible demos. | `null` |
+| `dates.post_sale_tail_days` | Days added to Date-dimension coverage after the global sales end for returns, complaints, and resolutions. Does not extend sales or subscriptions. | `120` |
 
 ### Include toggles
 

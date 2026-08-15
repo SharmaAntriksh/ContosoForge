@@ -26,7 +26,24 @@ if TYPE_CHECKING:
 # (alias removals, offset fixes) never reached existing outputs until an
 # unrelated config edit. Bump this whenever the dates *output* changes so all
 # users get a one-time regen (release-note it).
-DATES_SCHEMA_VERSION = 1
+DATES_SCHEMA_VERSION = 2
+
+
+def _resolve_date_dimension_bounds(
+    raw_start_ts: pd.Timestamp,
+    raw_end_ts: pd.Timestamp,
+    *,
+    buffer_years: int,
+    post_sale_tail_days: int,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Resolve conformed calendar coverage without extending sales demand."""
+    buffer_years = max(0, int(buffer_years))
+    post_sale_tail_days = max(0, int(post_sale_tail_days))
+    start_date = pd.Timestamp(raw_start_ts.year - buffer_years, 1, 1)
+    buffered_end = pd.Timestamp(raw_end_ts.year + buffer_years, 12, 31)
+    event_horizon_end = pd.Timestamp(raw_end_ts) + pd.Timedelta(
+        days=post_sale_tail_days)
+    return start_date, max(buffered_end, event_horizon_end)
 
 
 def run_dates(cfg: "AppConfig", parquet_folder: Path) -> None:
@@ -57,9 +74,17 @@ def run_dates(cfg: "AppConfig", parquet_folder: Path) -> None:
     raw_start_ts, raw_end_ts = _require_start_end(raw_start, raw_end)
 
     buffer_years = max(0, _int_or(dates_cfg.buffer_years, 1))
-    start_date = pd.Timestamp(raw_start_ts.year - buffer_years, 1, 1)
-    end_date = pd.Timestamp(raw_end_ts.year + buffer_years, 12, 31)
-    info(f"Dates: {start_date.date()} to {end_date.date()} (±{buffer_years}yr buffer)")
+    post_sale_tail_days = max(0, _int_or(dates_cfg.post_sale_tail_days, 120))
+    start_date, end_date = _resolve_date_dimension_bounds(
+        raw_start_ts,
+        raw_end_ts,
+        buffer_years=buffer_years,
+        post_sale_tail_days=post_sale_tail_days,
+    )
+    info(
+        f"Dates: {start_date.date()} to {end_date.date()} "
+        f"(buffer={buffer_years}yr, post-sale tail={post_sale_tail_days}d)"
+    )
 
     fiscal_start_month = _clamp_month(_int_or(dates_cfg.fiscal_start_month, 5))
 

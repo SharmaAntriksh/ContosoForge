@@ -32,12 +32,14 @@ _QTY_LOGNORMAL_SALT = np.uint64(0x2B0AC0DE00000002)
 # ---------------------------------------------------------------
 
 _DEFAULTS = {
-    "base_poisson_lambda": 1.7,
+    "base_poisson_lambda": 1.6,
     "monthly_factors": [0.99, 0.98, 1.00, 1.00, 1.01, 1.02,
                         1.02, 1.01, 1.00, 1.03, 1.06, 1.05],
     "noise_sigma": 0.12,
     "min_qty": 1,
     "max_qty": 8,
+    "truncate_at_max": True,
+    "max_redraw_attempts": 8,
 }
 
 
@@ -155,6 +157,12 @@ def _load_cfg() -> dict:
         "noise_sigma": noise,
         "min_qty": min_qty,
         "max_qty": max_qty,
+        "truncate_at_max": bool(raw.get(
+            "truncate_at_max", _DEFAULTS["truncate_at_max"],
+        )),
+        "max_redraw_attempts": max(0, min(32, int(raw.get(
+            "max_redraw_attempts", _DEFAULTS["max_redraw_attempts"],
+        )))),
         "elasticity": _parse_elasticity(raw.get("elasticity", None)),
     }
 
@@ -260,7 +268,8 @@ def _reset_cache() -> None:
 # ---------------------------------------------------------------
 
 def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None,
-                   order_numbers=None, line_numbers=None):
+                   order_numbers=None, line_numbers=None,
+                   segment_multiplier=None):
     """
     Generate per-order item quantities.
 
@@ -293,6 +302,9 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None,
     order_numbers, line_numbers : array-like of int or None
         Per-line entity key for the counter-based draws; ``None`` under
         skip_order_cols, where the chunk RNG is used instead.
+    segment_multiplier : array-like of float or None
+        Optional deterministic per-line customer-segment multiplier. It consumes
+        no random draws and is applied to every truncated-redraw candidate.
 
     Returns
     -------
@@ -306,28 +318,23 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None,
     _keyed = order_numbers is not None and line_numbers is not None
     lam = cfg["base_poisson_lambda"]
 
-    # 1. Base Poisson draw (+1 ensures minimum of 1)
-    if _keyed:
-        u_pois = hash_u01(_QTY_POISSON_SALT, order_numbers, line_numbers)
-        qty = pick_from_cdf(_poisson_cdf(lam), u_pois).astype(np.float64) + 1.0
-    else:
-        qty = rng.poisson(lam, n).astype(np.float64) + 1.0
-
-    # 2. Monthly seasonal factors (direct lookup, no smoothing)
+    # Fixed per-row scale: month seasonality + price elasticity + product
+    # propensity. Stochastic Poisson/noise candidates are multiplied by this
+    # same scale on every truncated redraw.
     order_months = np.asarray(order_dates).astype("datetime64[M]", copy=False)
     unique_months, inv = np.unique(order_months, return_inverse=True)
     month_of_year = (unique_months.astype("int64") % 12).astype(np.int64)
-
-    qty *= cfg["monthly_factors"][month_of_year][inv]
-
-    # 3. Multiplicative noise (lognormal to avoid negative values)
-    sigma = cfg["noise_sigma"]
-    if sigma > 0.0:
-        if _keyed:
-            u_ln = hash_u01(_QTY_LOGNORMAL_SALT, order_numbers, line_numbers)
-            qty *= np.exp(sigma * normal_ppf(u_ln))
-        else:
-            qty *= rng.lognormal(mean=0.0, sigma=sigma, size=n)
+    fixed_scale = cfg["monthly_factors"][month_of_year][inv].astype(
+        np.float64, copy=True,
+    )
+    if segment_multiplier is not None:
+        _segment = np.asarray(segment_multiplier, dtype=np.float64)
+        if _segment.shape != (n,):
+            raise SalesError(
+                f"segment_multiplier must have shape ({n},), got {_segment.shape}"
+            )
+        _segment = np.where(np.isfinite(_segment), _segment, 1.0)
+        fixed_scale *= np.clip(_segment, 0.1, 4.0)
 
     # 3b. Elasticity + propensity — deterministic, no RNG draws.
     el = cfg["elasticity"]
@@ -339,9 +346,60 @@ def build_quantity(rng, order_dates, *, product_row_idx=None, unit_price=None,
                 up = np.asarray(unit_price, dtype=np.float64)
                 price_factor = np.power(np.maximum(up, 0.01) / ref, -eps)
                 price_factor = np.where(np.isfinite(price_factor), price_factor, 1.0)
-                qty *= np.clip(price_factor, el.get("factor_lo", 0.4), el.get("factor_hi", 2.5))
-        qty *= _propensity_factor(product_row_idx, el)
+                fixed_scale *= np.clip(
+                    price_factor, el.get("factor_lo", 0.4), el.get("factor_hi", 2.5),
+                )
+        fixed_scale *= _propensity_factor(product_row_idx, el)
 
-    # 4. Round and clamp
-    qty = np.rint(qty).astype(np.int32)
-    return np.clip(qty, cfg["min_qty"], cfg["max_qty"])
+    sigma = cfg["noise_sigma"]
+    _order_numbers = np.asarray(order_numbers) if _keyed else None
+    _line_numbers = np.asarray(line_numbers) if _keyed else None
+
+    def _draw_candidate(indices, attempt):
+        """Draw a deterministic candidate for the selected row positions."""
+        _size = len(indices)
+        if _keyed:
+            _salt_step = 0x00000100000001B3
+            _pois_salt = np.uint64(
+                (int(_QTY_POISSON_SALT) + attempt * _salt_step) & 0xFFFFFFFFFFFFFFFF
+            )
+            _noise_salt = np.uint64(
+                (int(_QTY_LOGNORMAL_SALT) + attempt * _salt_step) & 0xFFFFFFFFFFFFFFFF
+            )
+            _u_pois = hash_u01(
+                _pois_salt, _order_numbers[indices], _line_numbers[indices],
+            )
+            _candidate = (
+                pick_from_cdf(_poisson_cdf(lam), _u_pois).astype(np.float64) + 1.0
+            )
+            if sigma > 0.0:
+                _u_ln = hash_u01(
+                    _noise_salt, _order_numbers[indices], _line_numbers[indices],
+                )
+                _candidate *= np.exp(sigma * normal_ppf(_u_ln))
+        else:
+            _candidate = rng.poisson(lam, _size).astype(np.float64) + 1.0
+            if sigma > 0.0:
+                _candidate *= rng.lognormal(mean=0.0, sigma=sigma, size=_size)
+        return _candidate * fixed_scale[indices]
+
+    all_idx = np.arange(n, dtype=np.int64)
+    qty = _draw_candidate(all_idx, 0)
+    rounded = np.rint(qty).astype(np.int32)
+
+    # A hard np.clip censors every overflow at max_qty and creates a false modal
+    # bucket. Rejection sampling conditions the same model on Quantity<=max_qty;
+    # attempt-specific hash salts keep the keyed path byte-identical across
+    # chunk sizes and worker counts. The final clip is only a defensive fallback
+    # after the bounded number of redraws.
+    if cfg["truncate_at_max"] and cfg["max_redraw_attempts"] > 0:
+        overflow = rounded > cfg["max_qty"]
+        for attempt in range(1, cfg["max_redraw_attempts"] + 1):
+            if not overflow.any():
+                break
+            idx = np.flatnonzero(overflow)
+            qty[idx] = _draw_candidate(idx, attempt)
+            rounded[idx] = np.rint(qty[idx]).astype(np.int32)
+            overflow[idx] = rounded[idx] > cfg["max_qty"]
+
+    return np.clip(rounded, cfg["min_qty"], cfg["max_qty"])

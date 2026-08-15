@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pyarrow as pa
 import pytest
 
@@ -57,6 +56,8 @@ class TestComplaintsAccumulator:
             "customer_key": np.array([1, 2, 3], dtype=np.int64),
             "sales_order_number": np.array([100, 200, 300], dtype=np.int64),
             "line_number": np.array([1, 1, 2], dtype=np.int64),
+            "order_date_ns": np.array([1, 2, 3], dtype=np.int64),
+            "delivery_date_ns": np.array([4, 5, 6], dtype=np.int64),
         }
         acc.add(micro)
         assert acc.has_data is True
@@ -82,11 +83,15 @@ class TestComplaintsAccumulator:
             "customer_key": np.array([1, 2], dtype=np.int64),
             "sales_order_number": np.array([100, 200], dtype=np.int64),
             "line_number": np.array([1, 1], dtype=np.int64),
+            "order_date_ns": np.array([1, 2], dtype=np.int64),
+            "delivery_date_ns": np.array([3, 4], dtype=np.int64),
         })
         acc.add({
             "customer_key": np.array([1, 3], dtype=np.int64),
             "sales_order_number": np.array([300, 400], dtype=np.int64),
             "line_number": np.array([1, 1], dtype=np.int64),
+            "order_date_ns": np.array([5, 6], dtype=np.int64),
+            "delivery_date_ns": np.array([7, 8], dtype=np.int64),
         })
         df = acc.finalize()
         assert len(df) == 4  # all rows preserved (no cross-chunk overlap)
@@ -98,6 +103,8 @@ class TestComplaintsAccumulator:
                 "customer_key": np.array([i * 10], dtype=np.int64),
                 "sales_order_number": np.array([i * 100], dtype=np.int64),
                 "line_number": np.array([1], dtype=np.int64),
+                "order_date_ns": np.array([i + 1], dtype=np.int64),
+                "delivery_date_ns": np.array([i + 2], dtype=np.int64),
             })
         df = acc.finalize()
         assert len(df) == 3
@@ -110,10 +117,17 @@ class TestComplaintsAccumulator:
 
 class TestMicroAggregateComplaints:
     def _make_table(self, ck, so, ln):
+        n = len(ck)
         return pa.table({
             "CustomerKey": pa.array(ck, type=pa.int64()),
             "OrderNumber": pa.array(so, type=pa.int64()),
             "OrderLineNumber": pa.array(ln, type=pa.int64()),
+            "OrderDate": pa.array(
+                np.full(n, np.datetime64("2024-01-10", "D")), type=pa.date32(),
+            ),
+            "DeliveryDate": pa.array(
+                np.full(n, np.datetime64("2024-01-12", "D")), type=pa.date32(),
+            ),
         })
 
     def test_basic_extraction(self):
@@ -366,6 +380,43 @@ class TestGenerateRowsBatch:
         assert np.all(result["date_ns"] >= g_start)
         assert np.all(result["date_ns"] <= g_end)
 
+    def test_linked_dates_follow_order_anchor_and_customer_lifecycle(self):
+        day = self.NS_PER_DAY
+        anchor = 100 * day
+        result = _generate_rows_batch(
+            np.random.default_rng(42),
+            complainer_keys=np.array([1], dtype=np.int64),
+            complaints_per=np.array([100], dtype=np.int32),
+            cust_orders={1: (
+                np.array([500], dtype=np.int64),
+                np.array([1], dtype=np.int64),
+                np.array([anchor], dtype=np.int64),
+            )},
+            customer_bounds={1: (50 * day, 140 * day)},
+            g_start_ns=0,
+            g_end_ns=365 * day,
+            event_end_ns=400 * day,
+            cfg=_ComplaintsCfg(
+                min_days_after_anchor=5,
+                max_days_after_anchor=5,
+                resolution_rate=1.0,
+            ),
+        )
+
+        linked = result["so"] != -1
+        assert linked.any()
+        assert np.all(result["date_ns"][linked] == anchor + 5 * day)
+        assert np.all(result["date_ns"] >= 50 * day)
+        assert np.all(result["date_ns"] <= 140 * day)
+
+        resolved = result["res_date_ns"] != -1
+        expected_days = (
+            result["res_date_ns"][resolved] - result["date_ns"][resolved]
+        ) // day
+        np.testing.assert_array_equal(
+            result["resp_days"][resolved], expected_days.astype(np.int32),
+        )
+
     def test_resolution_dates_clamped(self):
         """Resolution dates should not exceed g_end_ns."""
         rng = np.random.default_rng(42)
@@ -468,7 +519,6 @@ class TestArraysToTable:
     NS_PER_DAY = 86_400_000_000_000
 
     def test_basic_assembly(self):
-        n = 3
         table = _arrays_to_table(
             out_ckey=np.array([1, 2, 3], dtype=np.int64),
             out_so=np.array([100, -1, 300], dtype=np.int64),

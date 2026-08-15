@@ -33,6 +33,10 @@ class SalesWorkerCfg(TypedDict, total=False):
     brand_names: Optional[np.ndarray]
     product_popularity: Optional[np.ndarray]
     product_seasonality: Optional[np.ndarray]
+    product_return_risk_by_key: Optional[np.ndarray]
+    product_defect_risk_by_key: Optional[np.ndarray]
+    product_price_score: Optional[np.ndarray]
+    product_category_key: Optional[np.ndarray]
     product_subcat_key: Optional[np.ndarray]
     product_channel_eligible: Optional[np.ndarray]
 
@@ -53,6 +57,8 @@ class SalesWorkerCfg(TypedDict, total=False):
     promo_start_all: Required[np.ndarray]
     promo_end_all: Required[np.ndarray]
     promo_salience_all: Optional[np.ndarray]
+    promo_discount_pct_all: Optional[np.ndarray]
+    promo_audience_group: Optional[np.ndarray]
     new_customer_promo_keys: Optional[np.ndarray]
     new_customer_window_months: int
 
@@ -65,6 +71,13 @@ class SalesWorkerCfg(TypedDict, total=False):
     customer_discovery_month: Optional[np.ndarray]
     customer_geo_key: Optional[np.ndarray]
     customer_first_eff_start_by_key: Optional[np.ndarray]
+    customer_last_eff_end_by_key: Optional[np.ndarray]
+    customer_loyalty_tier_by_key: Optional[np.ndarray]
+    customer_income_score_by_key: Optional[np.ndarray]
+    customer_is_organization_by_key: Optional[np.ndarray]
+    customer_org_scale_score_by_key: Optional[np.ndarray]
+    customer_org_procurement_score_by_key: Optional[np.ndarray]
+    customer_org_preferred_category_mask_by_key: Optional[np.ndarray]
 
     # -- Global per-month plan -----------------------------------------------
     sales_rows_per_month: Optional[np.ndarray]     # int64[T]: rows per month
@@ -200,13 +213,26 @@ SHARED_FIELDS: List[str] = [
     "customer_base_weight",
     "customer_discovery_month",
     "customer_first_eff_start_by_key",
+    "customer_last_eff_end_by_key",
+    "customer_loyalty_tier_by_key",
+    "customer_income_score_by_key",
+    "customer_is_organization_by_key",
+    "customer_org_scale_score_by_key",
+    "customer_org_procurement_score_by_key",
+    "customer_org_preferred_category_mask_by_key",
     "product_subcat_key",
     "product_popularity",
+    "product_return_risk_by_key",
+    "product_defect_risk_by_key",
+    "product_price_score",
+    "product_category_key",
     "date_pool",
     "date_prob",
     "promo_keys_all",
     "promo_start_all",
     "promo_end_all",
+    "promo_discount_pct_all",
+    "promo_audience_group",
     "employee_assign_store_key",
     "employee_assign_employee_key",
     "employee_assign_start_date",

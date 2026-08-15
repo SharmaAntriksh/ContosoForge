@@ -68,13 +68,13 @@ CITIES = [
     ("Vienna", "Vienna", "Austria", "Europe", "EUR", 48.2082, 16.3738, "Europe/Vienna", 1911191),
 
     # === Europe — Switzerland (1) ===
-    ("Zurich", "Zurich", "Switzerland", "Europe", "EUR", 47.3769, 8.5417, "Europe/Zurich", 421878),
+    ("Zurich", "Zurich", "Switzerland", "Europe", "CHF", 47.3769, 8.5417, "Europe/Zurich", 421878),
 
     # === Europe — Sweden (1) ===
-    ("Stockholm", "Stockholm", "Sweden", "Europe", "EUR", 59.3293, 18.0686, "Europe/Stockholm", 975904),
+    ("Stockholm", "Stockholm", "Sweden", "Europe", "SEK", 59.3293, 18.0686, "Europe/Stockholm", 975904),
 
     # === Europe — Poland (1) ===
-    ("Warsaw", "Masovia", "Poland", "Europe", "EUR", 52.2297, 21.0122, "Europe/Warsaw", 1793579),
+    ("Warsaw", "Masovia", "Poland", "Europe", "PLN", 52.2297, 21.0122, "Europe/Warsaw", 1793579),
 
     # === Europe — Ireland (1) ===
     ("Dublin", "Leinster", "Ireland", "Europe", "EUR", 53.3498, -6.2603, "Europe/Dublin", 1228179),
@@ -86,7 +86,7 @@ CITIES = [
     ("Copenhagen", "Capital Region", "Denmark", "Europe", "EUR", 55.6761, 12.5683, "Europe/Copenhagen", 794128),
 
     # === Europe — Norway (1) ===
-    ("Oslo", "Oslo", "Norway", "Europe", "EUR", 59.9139, 10.7522, "Europe/Oslo", 697549),
+    ("Oslo", "Oslo", "Norway", "Europe", "NOK", 59.9139, 10.7522, "Europe/Oslo", 697549),
 
     # === Asia — India (3) ===
     ("Mumbai", "Maharashtra", "India", "Asia", "INR", 19.0760, 72.8777, "Asia/Kolkata", 20411000),

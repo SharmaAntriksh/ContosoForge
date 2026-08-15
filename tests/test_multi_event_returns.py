@@ -60,7 +60,9 @@ def _ugly_detail(n: int = 60) -> pa.Table:
             np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32(),
         ),
         "Quantity": pa.array(np.full(n, 3, dtype=np.int32)),
-        "NetPrice": pa.array(np.full(n, 100.0)),
+        # Per-unit value deliberately has a repeating decimal so independently
+        # rounded split events can drift by a cent without reconciliation.
+        "NetPrice": pa.array(np.full(n, 100.0 / 3.0)),
         "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
         **dim_keys(n),
     })
@@ -74,7 +76,7 @@ class TestReconcileCents:
 
     def test_off_by_default_matches_legacy_rounding(self):
         # Default (reconcile_cents=False): every event is the legacy
-        # round(unit_price * event_qty, 2).
+        # round(per-unit NetPrice * event_qty, 2).
         detail = _ugly_detail()
         cfg = ReturnsConfig(**self._CFG)
         assert cfg.reconcile_cents is False
@@ -136,6 +138,33 @@ class TestBackwardCompat:
         assert "ReturnSequence" in result.schema.names
 
 
+class TestReturnNetPriceSemantics:
+    def test_amount_is_per_unit_net_price_times_return_quantity(self):
+        detail = _make_detail(100)
+        cfg = ReturnsConfig(
+            enabled=True,
+            return_rate=1.0,
+            split_return_rate=1.0,
+            max_splits=3,
+            full_line_probability=1.0,
+            reconcile_cents=True,
+        )
+        result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
+
+        order_number = result.column("OrderNumber").to_numpy()
+        return_amount = result.column("ReturnNetPrice").to_numpy()
+        return_qty = result.column("ReturnQuantity").to_numpy()
+        sold_net_price = detail.column("NetPrice").to_numpy()
+
+        for current_order in np.unique(order_number):
+            event_mask = order_number == current_order
+            row_idx = int(current_order) - 1
+            expected = np.round(
+                sold_net_price[row_idx] * return_qty[event_mask].sum(), 2)
+            actual = np.round(return_amount[event_mask].sum(), 2)
+            assert actual == expected
+
+
 class TestMultiEventReturns:
     def test_splits_produce_multiple_rows(self):
         detail = _make_detail(200)
@@ -158,7 +187,6 @@ class TestMultiEventReturns:
         result = build_sales_returns_from_detail(detail, chunk_seed=42, cfg=cfg)
 
         so = result.column("OrderNumber").to_numpy()
-        line = result.column("OrderLineNumber").to_numpy()
         ret_qty = result.column("ReturnQuantity").to_numpy()
         orig_qty = detail.column("Quantity").to_numpy()
 
@@ -321,8 +349,10 @@ class TestDimKeyCarryThrough:
         d = {c: detail.column(c).to_numpy() for c in
              ("OrderNumber", "OrderLineNumber", *self._KEYS)}
         expected = {
-            (int(o), int(l)): tuple(int(d[k][i]) for k in self._KEYS)
-            for i, (o, l) in enumerate(zip(d["OrderNumber"], d["OrderLineNumber"]))
+            (int(order), int(line)): tuple(int(d[k][i]) for k in self._KEYS)
+            for i, (order, line) in enumerate(
+                zip(d["OrderNumber"], d["OrderLineNumber"])
+            )
         }
         cols = {c: result.column(c).to_numpy() for c in
                 ("OrderNumber", "OrderLineNumber", *self._KEYS)}
@@ -342,9 +372,11 @@ class TestDimKeyCarryThrough:
         result = build_sales_returns_from_detail(detail, chunk_seed=7, cfg=cfg)
         df = result.to_pandas()
         assert (df["ReturnSequence"] > 1).any()  # splits actually occurred
-        for (o, l), g in df.groupby(["OrderNumber", "OrderLineNumber"]):
+        for (order, line), g in df.groupby(["OrderNumber", "OrderLineNumber"]):
             for col in self._KEYS:
-                assert g[col].nunique() == 1, f"{col} varies within order {(o, l)}"
+                assert g[col].nunique() == 1, (
+                    f"{col} varies within order {(order, line)}"
+                )
 
 
 class TestDeterminism:
@@ -509,6 +541,62 @@ class TestFrictionCoupling:
             cfg=ReturnsConfig(enabled=True, return_rate=0.4,
                               friction_return_boost=0.0, friction_lag_shorten=0.0))
         assert r0.equals(rf)
+
+
+class TestProductRiskCoupling:
+    def _detail(self, n):
+        product = np.where(np.arange(n) % 2 == 0, 1, 2).astype(np.int32)
+        return pa.table({
+            "OrderNumber": pa.array(np.arange(1, n + 1, dtype=np.int32)),
+            "OrderLineNumber": pa.array(np.ones(n, dtype=np.int32)),
+            "DeliveryDate": pa.array(
+                np.array(["2024-03-15"] * n, dtype="datetime64[D]"), type=pa.date32()),
+            "Quantity": pa.array(np.full(n, 2, dtype=np.int32)),
+            "NetPrice": pa.array(np.full(n, 100.0)),
+            "IsOrderDelayed": pa.array(np.zeros(n, dtype=np.int32)),
+            "CustomerKey": pa.array(np.ones(n, dtype=np.int32)),
+            "ProductKey": pa.array(product),
+            "StoreKey": pa.array(np.ones(n, dtype=np.int32)),
+            "EmployeeKey": pa.array(np.ones(n, dtype=np.int32)),
+        })
+
+    def test_return_rate_tracks_product_return_risk_and_stays_anchored(self):
+        n = 40_000
+        cfg = ReturnsConfig(
+            enabled=True,
+            return_rate=0.20,
+            product_return_risk_strength=1.0,
+            friction_return_boost=2.0,
+        )
+        risk = np.array([1.0, 0.5, 1.5], dtype=np.float64)
+        result = build_sales_returns_from_detail(
+            self._detail(n), chunk_seed=42, cfg=cfg,
+            product_return_risk_by_key=risk,
+        )
+        products = result.column("ProductKey").to_numpy()
+        low_rate = float(np.sum(products == 1)) / (n / 2)
+        high_rate = float(np.sum(products == 2)) / (n / 2)
+        overall = result.num_rows / n
+        assert high_rate > low_rate * 2.0
+        assert abs(overall - 0.20) <= 0.005
+
+    def test_defect_risk_routes_more_returns_to_quality_reason(self):
+        n = 30_000
+        cfg = ReturnsConfig(
+            enabled=True,
+            return_rate=1.0,
+            product_defect_reason_strength=1.0,
+        )
+        defect = np.array([1.0, 0.25, 4.0], dtype=np.float64)
+        result = build_sales_returns_from_detail(
+            self._detail(n), chunk_seed=7, cfg=cfg,
+            product_defect_risk_by_key=defect,
+        )
+        products = result.column("ProductKey").to_numpy()
+        reasons = result.column("ReturnReasonKey").to_numpy()
+        low_quality = float(np.mean(reasons[products == 1] == 1))
+        high_quality = float(np.mean(reasons[products == 2] == 1))
+        assert high_quality > low_quality * 3.0
 
 
 class TestDefaultsConsistency:

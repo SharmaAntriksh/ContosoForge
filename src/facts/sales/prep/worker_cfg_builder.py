@@ -87,6 +87,9 @@ def build_returns_policy(
         return None
     _ff = models_cfg.get("fulfillment", None) if models_cfg is not None else None
     _ff_on = bool(_ff.get("enabled", False)) if _ff is not None else False
+    _ret = models_cfg.get("returns", None) if models_cfg is not None else None
+    _risk = _ret.get("product_risk", None) if _ret is not None else None
+    _risk_on = bool(_risk.get("enabled", True)) if _risk is not None else False
     return ReturnsConfig(
         enabled=True,
         return_rate=float(returns_rate),
@@ -105,6 +108,12 @@ def build_returns_policy(
         logistics_keys=frozenset(returns_logistics_keys or ()),
         friction_return_boost=float(_ff.get("return_prob_boost", 0.0)) if _ff_on else 0.0,
         friction_lag_shorten=float(_ff.get("return_lag_shorten", 0.0)) if _ff_on else 0.0,
+        product_return_risk_strength=(
+            float(_risk.get("return_rate_strength", 1.0)) if _risk_on else 0.0
+        ),
+        product_defect_reason_strength=(
+            float(_risk.get("defect_reason_strength", 1.0)) if _risk_on else 0.0
+        ),
     )
 
 
@@ -165,6 +174,8 @@ def _build_worker_cfg(
         promo_keys_all=promos.promo_keys_all,
         promo_start_all=promos.promo_start_all,
         promo_end_all=promos.promo_end_all,
+        promo_discount_pct_all=promos.promo_discount_pct_all,
+        promo_audience_group=promos.promo_audience_group,
         # Per-promo salience weights (None => uniform promo draw).
         promo_salience_all=_compute_promo_salience(
             promos.promo_df, promos.promo_keys_all,
@@ -180,6 +191,15 @@ def _build_worker_cfg(
         customer_base_weight=cust.customer_base_weight,
         customer_discovery_month=month_plan.customer_discovery_month,
         customer_first_eff_start_by_key=cust.customer_first_eff_start_by_key,
+        customer_last_eff_end_by_key=cust.customer_last_eff_end_by_key,
+        customer_loyalty_tier_by_key=cust.customer_loyalty_tier_by_key,
+        customer_income_score_by_key=cust.customer_income_score_by_key,
+        customer_is_organization_by_key=cust.customer_is_organization_by_key,
+        customer_org_scale_score_by_key=cust.customer_org_scale_score_by_key,
+        customer_org_procurement_score_by_key=cust.customer_org_procurement_score_by_key,
+        customer_org_preferred_category_mask_by_key=(
+            cust.customer_org_preferred_category_mask_by_key
+        ),
 
         # Global per-month plan: tiny length-T arrays + scalars.
         sales_rows_per_month=month_plan.sales_rows_per_month,
@@ -245,6 +265,10 @@ def _build_worker_cfg(
 
         product_popularity=prod.product_popularity,
         product_seasonality=prod.product_seasonality,
+        product_return_risk_by_key=prod.product_return_risk_by_key,
+        product_defect_risk_by_key=prod.product_defect_risk_by_key,
+        product_price_score=prod.product_price_score,
+        product_category_key=prod.product_category_key,
 
         customer_geo_key=cust.customer_geo_key,
         geo_to_country_id=corr["geo_to_country_id"],

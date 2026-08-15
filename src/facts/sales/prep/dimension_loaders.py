@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as _pq
 
+from src.defaults import ORGANIZATION_INDUSTRY_CATEGORY_AFFINITY
 from src.exceptions import SalesError
 from src.utils.config_helpers import float_or as _float_or
 from src.utils.logging_utils import info, warn
@@ -56,6 +57,8 @@ def _load_customers(
     _cust_weight_cols = ["CustomerBaseWeight", "CustomerWeight"]
     # Geo column (previously a separate parquet open)
     _cust_geo_cols = ["GeographyKey"]
+    _cust_loyalty_cols = ["LoyaltyTierKey"]
+    _cust_segment_cols = ["CustomerType", "YearlyIncome"]
 
     _cust_all_cols = list(dict.fromkeys(
         _cust_load_cols
@@ -63,6 +66,8 @@ def _load_customers(
         + [c for c in _cust_scd2_cols_wanted if c in _cust_schema_names]
         + [c for c in _cust_weight_cols if c in _cust_schema_names]
         + [c for c in _cust_geo_cols if c in _cust_schema_names]
+        + [c for c in _cust_loyalty_cols if c in _cust_schema_names]
+        + [c for c in _cust_segment_cols if c in _cust_schema_names]
     ))
 
     cust_df_full = load_parquet_df(customers_path, _cust_all_cols)
@@ -94,13 +99,141 @@ def _load_customers(
     del cust_df_full
 
     customer_keys = _as_np(cust_df["CustomerKey"], np.int32)
+    _max_customer_key = int(customer_keys.max()) + 1
 
-    # CustomerKey -> first EffectiveStartDate (epoch days) lookup. Eligibility
-    # is month-granular but EffectiveStartDate is day-granular (random 0-27 day
-    # offset within CustomerStartMonth), so without a per-row clamp the chunk
-    # builder can place orders earlier in the start month than the customer's
-    # actual join date. INT64_MIN fills unknown-key slots so np.maximum against
-    # OrderDate is a natural no-op there. Used by chunk_builder.py.
+    customer_loyalty_tier_by_key = None
+    if "LoyaltyTierKey" in cust_df.columns:
+        customer_loyalty_tier_by_key = np.zeros(
+            int(customer_keys.max()) + 1, dtype=np.int32,
+        )
+        customer_loyalty_tier_by_key[customer_keys] = _as_np(
+            cust_df["LoyaltyTierKey"], np.int32,
+        )
+
+    # Segment lookups are dense by CustomerKey because the chunk builder works
+    # with keys (including sparse SCD2 key spaces), not customer-pool positions.
+    customer_income_score_by_key = np.zeros(_max_customer_key, dtype=np.float32)
+    customer_is_organization_by_key = np.zeros(_max_customer_key, dtype=np.int8)
+    customer_org_scale_score_by_key = np.zeros(_max_customer_key, dtype=np.float32)
+    customer_org_procurement_score_by_key = np.zeros(_max_customer_key, dtype=np.float32)
+    customer_org_preferred_category_mask_by_key = np.zeros(
+        _max_customer_key, dtype=np.uint32,
+    )
+
+    if "CustomerType" in cust_df.columns:
+        _org_pool_mask = (
+            cust_df["CustomerType"].fillna("").astype(str).str.casefold()
+            == "organization"
+        ).to_numpy()
+        customer_is_organization_by_key[customer_keys[_org_pool_mask]] = 1
+    else:
+        _org_pool_mask = np.zeros(len(cust_df), dtype=bool)
+
+    if "YearlyIncome" in cust_df.columns:
+        _income = pd.to_numeric(cust_df["YearlyIncome"], errors="coerce")
+        _valid_income = _income.notna().to_numpy() & ~_org_pool_mask
+        if _valid_income.any():
+            _rank = _income[_valid_income].rank(method="average", pct=True)
+            customer_income_score_by_key[customer_keys[_valid_income]] = (
+                _rank.to_numpy(dtype=np.float32) * 2.0 - 1.0
+            )
+
+    _org_path = parquet_folder_p / "organization_profile.parquet"
+    if _org_pool_mask.any() and _org_path.exists():
+        try:
+            _org_schema = set(_pq.read_schema(str(_org_path)).names)
+            _org_cols = [
+                c for c in (
+                    "CustomerKey", "Industry", "NumberOfEmployees",
+                    "NumberOfLocations", "ProcurementCycle", "IsStrategicAccount",
+                ) if c in _org_schema
+            ]
+            if "CustomerKey" in _org_cols:
+                _org_df = load_parquet_df(_org_path, _org_cols).drop_duplicates(
+                    "CustomerKey", keep="first",
+                )
+                _org_keys = pd.to_numeric(
+                    _org_df["CustomerKey"], errors="coerce",
+                ).fillna(-1).to_numpy(dtype=np.int64)
+                _valid_org_keys = (
+                    (_org_keys >= 0) & (_org_keys < _max_customer_key)
+                )
+                _org_keys = _org_keys[_valid_org_keys].astype(np.int32, copy=False)
+                _org_df = _org_df.loc[_valid_org_keys].reset_index(drop=True)
+
+                if "Industry" in _org_df.columns:
+                    _industry = _org_df["Industry"].fillna("Unknown").astype(str)
+                    # Category keys come from product_category.parquet. These
+                    # explicit affinities make industry behavior interpretable:
+                    # e.g. Education prefers computers/TV/office supplies while
+                    # Construction prefers tools/automotive/office supplies.
+                    _masks = []
+                    for _name in _industry.str.casefold():
+                        _mask = 0
+                        for _category_key in ORGANIZATION_INDUSTRY_CATEGORY_AFFINITY.get(
+                            _name, (3, 14),
+                        ):
+                            _mask |= 1 << (int(_category_key) - 1)
+                        _masks.append(_mask)
+                    customer_org_preferred_category_mask_by_key[_org_keys] = np.asarray(
+                        _masks, dtype=np.uint32,
+                    )
+
+                _employee_rank = np.full(len(_org_df), 0.5, dtype=np.float64)
+                if "NumberOfEmployees" in _org_df.columns:
+                    _employees = pd.to_numeric(
+                        _org_df["NumberOfEmployees"], errors="coerce",
+                    )
+                    if _employees.notna().any():
+                        _employee_rank = _employees.rank(
+                            method="average", pct=True,
+                        ).fillna(0.5).to_numpy(dtype=np.float64)
+
+                _location_rank = np.full(len(_org_df), 0.5, dtype=np.float64)
+                if "NumberOfLocations" in _org_df.columns:
+                    _locations = pd.to_numeric(
+                        _org_df["NumberOfLocations"], errors="coerce",
+                    )
+                    if _locations.notna().any():
+                        _location_rank = _locations.rank(
+                            method="average", pct=True,
+                        ).fillna(0.5).to_numpy(dtype=np.float64)
+
+                _strategic = np.zeros(len(_org_df), dtype=np.float64)
+                if "IsStrategicAccount" in _org_df.columns:
+                    _strategic = _org_df["IsStrategicAccount"].fillna(False).astype(
+                        bool,
+                    ).to_numpy(dtype=np.float64)
+                customer_org_scale_score_by_key[_org_keys] = np.clip(
+                    0.65 * _employee_rank + 0.25 * _location_rank + 0.10 * _strategic,
+                    0.0, 1.0,
+                ).astype(np.float32)
+
+                if "ProcurementCycle" in _org_df.columns:
+                    _procurement = (
+                        _org_df["ProcurementCycle"].fillna("").astype(str).str.casefold()
+                    )
+                    _procurement_score = _procurement.map({
+                        "weekly": 1.0,
+                        "monthly": 0.85,
+                        "quarterly": 0.55,
+                        "semi-annual": 0.30,
+                        "semiannual": 0.30,
+                        "annual": 0.10,
+                    }).fillna(0.50)
+                    customer_org_procurement_score_by_key[_org_keys] = (
+                        _procurement_score.to_numpy(dtype=np.float32)
+                    )
+        except (KeyError, ValueError, TypeError, OSError) as exc:
+            warn(
+                "Could not load organization profile segment attributes "
+                f"({type(exc).__name__}: {exc}); using organization defaults."
+            )
+
+    # Dense CustomerKey -> exact lifecycle boundary lookups (epoch days).
+    # Month-granular eligibility determines the customer pool, then the chunk
+    # builder clamps the sampled OrderDate inside these exact day boundaries.
+    # Sentinel values make unknown/open bounds natural no-ops for max/min.
     if "CustomerStartDate" in cust_df.columns:
         _cust_start_days = pd.to_datetime(
             cust_df["CustomerStartDate"], errors="coerce"
@@ -111,6 +244,23 @@ def _load_customers(
         customer_first_eff_start_by_key[customer_keys] = _cust_start_days
     else:
         customer_first_eff_start_by_key = None
+
+    if "CustomerEndDate" in cust_df.columns:
+        _cust_end_ts = pd.to_datetime(cust_df["CustomerEndDate"], errors="coerce")
+        customer_last_eff_end_by_key = np.full(
+            int(customer_keys.max()) + 1, np.iinfo(np.int64).max, dtype=np.int64,
+        )
+        _has_end_day = _cust_end_ts.notna().to_numpy()
+        if _has_end_day.any():
+            _cust_end_days = (
+                _cust_end_ts[_has_end_day]
+                .values.astype("datetime64[D]").astype(np.int64)
+            )
+            customer_last_eff_end_by_key[
+                customer_keys[_has_end_day]
+            ] = _cust_end_days
+    else:
+        customer_last_eff_end_by_key = None
 
     # --- Derive month indices from dates ---
     config_start = pd.to_datetime(start_date).to_period("M")
@@ -207,6 +357,15 @@ def _load_customers(
         customer_base_weight=customer_base_weight,
         customer_geo_key=customer_geo_key,
         customer_first_eff_start_by_key=customer_first_eff_start_by_key,
+        customer_last_eff_end_by_key=customer_last_eff_end_by_key,
+        customer_loyalty_tier_by_key=customer_loyalty_tier_by_key,
+        customer_income_score_by_key=customer_income_score_by_key,
+        customer_is_organization_by_key=customer_is_organization_by_key,
+        customer_org_scale_score_by_key=customer_org_scale_score_by_key,
+        customer_org_procurement_score_by_key=customer_org_procurement_score_by_key,
+        customer_org_preferred_category_mask_by_key=(
+            customer_org_preferred_category_mask_by_key
+        ),
         customer_scd2_active=_customer_scd2_active,
         customer_scd2_starts=_customer_scd2_starts,
         customer_scd2_keys=_customer_scd2_keys,
@@ -221,6 +380,7 @@ def _load_products(
     start_date,
     end_date,
     active_product_np=None,
+    models_cfg=None,
 ) -> ProductPool:
     """Load product dimension arrays, profile, date pool, and SCD2 versions.
 
@@ -351,13 +511,52 @@ def _load_products(
         if _need_subcat and "SubcategoryKey" in prod_df.columns:
             product_subcat_key = prod_df["SubcategoryKey"].to_numpy(dtype=np.int32)
 
+    product_category_key = None
+    if product_subcat_key is not None:
+        _subcat_path = parquet_folder_p / "product_subcategory.parquet"
+        if _subcat_path.exists():
+            try:
+                _subcat_df = load_parquet_df(
+                    _subcat_path, ["SubcategoryKey", "CategoryKey"],
+                ).drop_duplicates("SubcategoryKey", keep="first")
+                _category_by_subcat = pd.Series(
+                    _subcat_df["CategoryKey"].to_numpy(dtype=np.int16),
+                    index=_subcat_df["SubcategoryKey"].to_numpy(dtype=np.int32),
+                )
+                product_category_key = _category_by_subcat.reindex(
+                    product_subcat_key,
+                ).fillna(0).to_numpy(dtype=np.int16)
+            except (KeyError, ValueError, TypeError, OSError) as exc:
+                warn(
+                    "Could not map product subcategories to categories "
+                    f"({type(exc).__name__}: {exc}); organization category "
+                    "preferences are disabled."
+                )
+
+    # Price-percentile score is an ordinal catalog signal in [-1, 1]. It is
+    # deliberately rank-based so a few luxury outliers cannot dominate the
+    # income-conditioned product preference.
+    _price_series = pd.Series(np.asarray(product_np[:, 1], dtype=np.float64))
+    product_price_score = (
+        _price_series.rank(method="average", pct=True).to_numpy(dtype=np.float32)
+        * 2.0 - 1.0
+    )
+
     # PopularityScore + SeasonalityProfile from ProductProfile (for weighted sampling)
     product_popularity = None
     product_seasonality = None
+    product_return_risk_by_key = None
+    product_defect_risk_by_key = None
     _profile_path = parquet_folder_p / "product_profile.parquet"
     if _profile_path.exists():
         try:
-            _pp_df = load_parquet_df(_profile_path, ["ProductKey", "PopularityScore", "SeasonalityProfile"])
+            _pp_schema = set(_pq.read_schema(str(_profile_path)).names)
+            _pp_cols = ["ProductKey", "PopularityScore", "SeasonalityProfile"]
+            _pp_cols += [
+                c for c in ("ReturnRateBase", "DefectRateBase")
+                if c in _pp_schema
+            ]
+            _pp_df = load_parquet_df(_profile_path, _pp_cols)
             _pp_df = _pp_df.drop_duplicates("ProductKey", keep="first")
             _pp_df["ProductKey"] = _pp_df["ProductKey"].astype("int32")
             active_keys = np.asarray(product_np[:, 0], dtype=np.int32)
@@ -386,6 +585,52 @@ def _load_products(
                     f"(no boost applied): {_unknown}. "
                     f"Expected one of: {sorted(_SEASON_ENCODE)}."
                 )
+
+            # ProductProfile risk fields are meaningful as relative signals, not
+            # absolute probabilities: config.yaml -> returns.return_rate remains
+            # the portfolio anchor. Normalize against the popularity-weighted
+            # active catalog so the expected multiplier is 1.0 and then publish
+            # dense ProductKey lookups (including historical SCD2 keys when the
+            # profile contains them).
+            _risk_cfg = getattr(getattr(models_cfg, "returns", None), "product_risk", None)
+            _risk_on = bool(getattr(_risk_cfg, "enabled", True))
+            _risk_clip = getattr(_risk_cfg, "multiplier_clip", [0.25, 4.0])
+            _risk_lo, _risk_hi = float(_risk_clip[0]), float(_risk_clip[1])
+            _weights = np.maximum(product_popularity, 0.0)
+            if not np.isfinite(_weights).all() or float(_weights.sum()) <= 0.0:
+                _weights = np.ones(len(active_keys), dtype=np.float64)
+
+            def _dense_risk_lookup(column: str):
+                if not _risk_on or column not in _pp_df.columns:
+                    return None
+                _series = pd.Series(
+                    pd.to_numeric(_pp_df[column], errors="coerce").to_numpy(dtype=np.float64),
+                    index=_pp_df["ProductKey"].to_numpy(dtype=np.int32),
+                )
+                _active_raw = _series.reindex(active_keys).to_numpy(dtype=np.float64)
+                _valid = np.isfinite(_active_raw) & (_active_raw > 0.0)
+                _fallback = (
+                    float(np.average(_active_raw[_valid], weights=_weights[_valid]))
+                    if _valid.any() else 1.0
+                )
+                _active_raw = np.where(_valid, _active_raw, _fallback)
+                _anchor = float(np.average(_active_raw, weights=_weights))
+                _active_mult = np.clip(_active_raw / max(_anchor, 1e-12), _risk_lo, _risk_hi)
+                _renorm = float(np.average(_active_mult, weights=_weights))
+
+                _all_raw = _series.to_numpy(dtype=np.float64)
+                _all_raw = np.where(
+                    np.isfinite(_all_raw) & (_all_raw > 0.0), _all_raw, _anchor,
+                )
+                _all_mult = np.clip(_all_raw / max(_anchor, 1e-12), _risk_lo, _risk_hi)
+                _all_mult = np.clip(_all_mult / max(_renorm, 1e-12), _risk_lo, _risk_hi)
+                _all_keys = _series.index.to_numpy(dtype=np.int32)
+                _dense = np.ones(int(_all_keys.max()) + 1, dtype=np.float64)
+                _dense[_all_keys] = _all_mult
+                return _dense
+
+            product_return_risk_by_key = _dense_risk_lookup("ReturnRateBase")
+            product_defect_risk_by_key = _dense_risk_lookup("DefectRateBase")
         except (KeyError, ValueError, TypeError, OSError) as exc:
             info(f"Could not load product profile ({type(exc).__name__}: {exc}); using uniform product sampling.")
             product_popularity = None
@@ -445,6 +690,10 @@ def _load_products(
         product_subcat_key=product_subcat_key,
         product_popularity=product_popularity,
         product_seasonality=product_seasonality,
+        product_return_risk_by_key=product_return_risk_by_key,
+        product_defect_risk_by_key=product_defect_risk_by_key,
+        product_price_score=product_price_score,
+        product_category_key=product_category_key,
         date_pool=date_pool,
         date_prob=date_prob,
         product_scd2_active=_product_scd2_active,
@@ -550,11 +799,14 @@ def _load_stores(parquet_folder_p, end_date, weight_cfg=None) -> StorePool:
     geo_df = geo_df.merge(currency_df, left_on="ISOCode", right_on="CurrencyCode", how="left")
     if geo_df["CurrencyKey"].isna().any():
         n_missing = int(geo_df["CurrencyKey"].isna().sum())
-        missing_isos = geo_df.loc[geo_df["CurrencyKey"].isna(), "ISOCode"].unique().tolist()
-        default_currency = int(currency_df.iloc[0]["CurrencyKey"])
-        geo_df["CurrencyKey"] = geo_df["CurrencyKey"].fillna(default_currency)
-        info(f"WARNING: {n_missing} geography row(s) have no currency match (ISOs: {missing_isos}); "
-             f"defaulting to CurrencyKey={default_currency}.")
+        missing_isos = sorted(
+            geo_df.loc[geo_df["CurrencyKey"].isna(), "ISOCode"].astype(str).unique().tolist()
+        )
+        raise SalesError(
+            f"{n_missing} geography row(s) have no matching CurrencyKey for "
+            f"ISOCode(s) {missing_isos}. Regenerate Geography, Currency, ExchangeRates, "
+            "and Stores together; local currencies must never silently fall back."
+        )
 
     geo_to_currency = dict(zip(_as_np(geo_df["GeographyKey"], np.int32), _as_np(geo_df["CurrencyKey"], np.int32)))
 
@@ -584,6 +836,8 @@ def _load_promotions(parquet_folder_p, promo_df=None) -> PromoPool:
             promo_keys_all=np.array([], dtype=np.int32),
             promo_start_all=np.array([], dtype="datetime64[D]"),
             promo_end_all=np.array([], dtype="datetime64[D]"),
+            promo_discount_pct_all=np.array([], dtype=np.float64),
+            promo_audience_group=np.array([], dtype=np.int8),
             new_customer_promo_keys=np.array([], dtype=np.int32),
         )
 
@@ -593,6 +847,19 @@ def _load_promotions(parquet_folder_p, promo_df=None) -> PromoPool:
     promo_keys_all = _as_np(promo_df["PromotionKey"], np.int32)
     promo_start_all = _as_np(promo_start, "datetime64[D]")
     promo_end_all = _as_np(promo_end, "datetime64[D]")
+    promo_discount_pct_all = np.clip(
+        pd.to_numeric(promo_df.get("DiscountPct", 0.0), errors="coerce")
+        .fillna(0.0).to_numpy(dtype=np.float64),
+        0.0, 1.0,
+    )
+
+    # Audience encoding aligned with promo_keys_all: 0=general, 1=loyalty,
+    # 2=new customer. PromotionType is a stable dimension contract.
+    promo_audience_group = np.zeros(len(promo_df), dtype=np.int8)
+    if "PromotionType" in promo_df.columns:
+        _ptype = promo_df["PromotionType"].astype(str).to_numpy()
+        promo_audience_group[_ptype == "Loyalty Exclusive"] = 1
+        promo_audience_group[_ptype == "New Customer"] = 2
 
     if "PromotionType" in promo_df.columns:
         nc_mask = promo_df["PromotionType"].astype(str) == "New Customer"
@@ -605,6 +872,8 @@ def _load_promotions(parquet_folder_p, promo_df=None) -> PromoPool:
         promo_keys_all=promo_keys_all,
         promo_start_all=promo_start_all,
         promo_end_all=promo_end_all,
+        promo_discount_pct_all=promo_discount_pct_all,
+        promo_audience_group=promo_audience_group,
         new_customer_promo_keys=new_customer_promo_keys,
     )
 

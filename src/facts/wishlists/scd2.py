@@ -15,7 +15,10 @@ def build_scd2_price_lookup(
     all_products_df: pd.DataFrame,
     prod_ids_current: Optional[np.ndarray],
     prod_prices_current: np.ndarray,
-) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    prod_keys_current: Optional[np.ndarray] = None,
+    *,
+    include_product_keys: bool = False,
+) -> Optional[Tuple[np.ndarray, ...]]:
     """Build SCD2 version lookup tables for wishlist price resolution.
 
     Versions are grouped by **ProductID** (the version-family identifier, stable
@@ -38,7 +41,12 @@ def build_scd2_price_lookup(
     if prod_ids_current is None or "ProductID" not in all_products_df.columns:
         return None  # cannot resolve version families without ProductID
 
-    all_df = all_products_df[["ProductID", "ListPrice", "EffectiveStartDate"]].copy()
+    lookup_columns = ["ProductID", "ListPrice", "EffectiveStartDate"]
+    if include_product_keys:
+        if prod_keys_current is None or "ProductKey" not in all_products_df.columns:
+            return None
+        lookup_columns.append("ProductKey")
+    all_df = all_products_df[lookup_columns].copy()
 
     # SCD2 active only if some family has >1 version (more rows than ProductIDs).
     n_families = all_df["ProductID"].nunique()
@@ -64,12 +72,18 @@ def build_scd2_price_lookup(
     pidx = pidx[mask]
     eff_start = all_df["eff_start_days"].to_numpy()[mask]
     lprice = all_df["ListPrice"].to_numpy(dtype=np.float64)[mask]
+    product_keys = (
+        all_df["ProductKey"].to_numpy(dtype=np.int64)[mask]
+        if include_product_keys else None
+    )
 
     # Sort by (product_index, eff_start)
     order = np.lexsort((eff_start, pidx))
     pidx = pidx[order]
     eff_start = eff_start[order]
     lprice = lprice[order]
+    if product_keys is not None:
+        product_keys = product_keys[order]
 
     # Compute per-product version slot indices
     group_starts = np.concatenate([[0], np.where(pidx[1:] != pidx[:-1])[0] + 1])
@@ -81,6 +95,10 @@ def build_scd2_price_lookup(
     # Initialize with current-version defaults
     starts = np.full((n_products, max_ver), np.iinfo(np.int64).max, dtype=np.int64)
     prices = np.tile(prod_prices_current[:, np.newaxis], (1, max_ver))
+    keys = (
+        np.tile(prod_keys_current[:, np.newaxis], (1, max_ver))
+        if include_product_keys else None
+    )
 
     # Scatter historical versions
     valid = slot < max_ver
@@ -88,11 +106,15 @@ def build_scd2_price_lookup(
     si = slot[valid]
     starts[pi, si] = eff_start[valid]
     prices[pi, si] = lprice[valid]
+    if keys is not None and product_keys is not None:
+        keys[pi, si] = product_keys[valid]
 
     # First version covers all time before second version
     starts[pi, 0] = 0
 
     _log.debug("Wishlist SCD2 price lookup: %d products, %d max versions", n_products, max_ver)
+    if keys is not None:
+        return starts, prices, keys
     return starts, prices
 
 
@@ -118,3 +140,17 @@ def resolve_scd2_prices(
     ver_idx = np.sum(p_starts <= epoch_days[:, np.newaxis], axis=1) - 1
     ver_idx = np.clip(ver_idx, 0, scd2_starts.shape[1] - 1)
     return scd2_prices[prod_idx, ver_idx]
+
+
+def resolve_scd2_product_keys(
+    prod_idx: np.ndarray,
+    date_ns: np.ndarray,
+    scd2_starts: np.ndarray,
+    scd2_product_keys: np.ndarray,
+) -> np.ndarray:
+    """Resolve the ProductKey version valid on each wishlist AddedDate."""
+    epoch_days = date_ns // (24 * 3600 * 10**9)
+    p_starts = scd2_starts[prod_idx]
+    ver_idx = np.sum(p_starts <= epoch_days[:, np.newaxis], axis=1) - 1
+    ver_idx = np.clip(ver_idx, 0, scd2_starts.shape[1] - 1)
+    return scd2_product_keys[prod_idx, ver_idx]
