@@ -104,6 +104,13 @@ def _enrich_employee_hr_columns(
     salaried = org_level <= 5
     df["SalariedFlag"] = salaried.astype(bool)
     df["PayFrequency"] = np.where(salaried, 1, 2).astype(np.int32)
+    # Human-readable analytical contract for the legacy AdventureWorks-style
+    # numeric code (1 = monthly, 2 = biweekly). Keep the code in the raw
+    # operational table for compatibility, but publish this label in semantic
+    # models and analytical SQL views.
+    df["PayFrequencyLabel"] = np.where(
+        salaried, "Monthly", "Biweekly",
+    ).astype(object)
 
     _default_band = EMPLOYEE_SALARY_BAND_BY_LEVEL[5]
     lo_ann = np.array(
@@ -126,9 +133,15 @@ def _enrich_employee_hr_columns(
     term = pd.to_datetime(df["TerminationDate"])
     tenure_end = term.where(term.notna(), global_end).dt.normalize()
     tenure_days = (tenure_end - hire).dt.days.clip(lower=0)
-    base_vac = np.where(salaried, 80, 40) + (tenure_days / 365.0 * np.where(salaried, 6.0, 3.0))
+    fte = pd.to_numeric(
+        df.get("FTE", pd.Series(1.0, index=df.index)), errors="coerce"
+    ).fillna(1.0).clip(lower=0.0, upper=1.0).to_numpy(dtype=np.float64)
+    base_vac = (
+        np.where(salaried, 80, 40)
+        + tenure_days / 365.0 * np.where(salaried, 6.0, 3.0)
+    ) * fte
     df["VacationHours"] = np.clip(
-        base_vac + rng.normal(0, 10, size=n), 0, 240,
+        base_vac + rng.normal(0, 10, size=n) * fte, 0, 240,
     ).round(0).astype(np.int32)
 
     # Status
@@ -167,7 +180,15 @@ def _enrich_employee_hr_columns(
                 np.where(
                     title.isin(["Stock Associate"]),
                     "Inventory",
-                    np.where(title.isin(["Fulfillment Associate"]), "Fulfillment", "Corporate"),
+                    np.where(
+                        title.isin(["Customer Support"]),
+                        "Customer Service",
+                        np.where(
+                            title.isin(["Fulfillment Associate"]),
+                            "Fulfillment",
+                            "Corporate",
+                        ),
+                    ),
                 ),
             ),
         ),
@@ -180,11 +201,10 @@ def _enrich_employee_hr_columns(
 def _assert_identity_keys(df: pd.DataFrame) -> None:
     """Raise on a NaN identity key rather than silently coercing it to 0.
 
-    A null ``EmployeeKey`` or (for store-level rows) ``StoreKey`` indicates
+    A null ``EmployeeKey`` or (for store-level rows) ``HomeStoreKey`` indicates
     upstream corruption; ``fillna(0)`` would hide it behind a duplicate 0 key
     and break every key-band decode and FK join. Corporate/region/district
-    rows (``OrgUnitType != "Store"``) legitimately have no store, so their NaN
-    ``StoreKey`` is left for the intentional 0-fill.
+    rows (``OrgUnitType != "Store"``) legitimately have no home store.
     """
     if df.empty:
         return
@@ -195,13 +215,13 @@ def _assert_identity_keys(df: pd.DataFrame) -> None:
             "EmployeeKey; an identity key cannot be NaN (upstream corruption). "
             "Refusing to coerce to 0."
         )
-    if "OrgUnitType" in df.columns and "StoreKey" in df.columns:
+    if "OrgUnitType" in df.columns and "HomeStoreKey" in df.columns:
         store_row = df["OrgUnitType"].astype(str) == "Store"
-        bad_sk = store_row & pd.to_numeric(df["StoreKey"], errors="coerce").isna()
+        bad_sk = store_row & pd.to_numeric(df["HomeStoreKey"], errors="coerce").isna()
         if bad_sk.any():
             raise DimensionError(
                 f"{int(bad_sk.sum())} store-level employee row(s) have a "
-                "null/non-numeric StoreKey; a store employee must reference a "
+                "null/non-numeric HomeStoreKey; a store employee must reference a "
                 "concrete store. Refusing to coerce to 0."
             )
 
@@ -235,10 +255,9 @@ def _finalize_employee_integer_cols(df: pd.DataFrame) -> pd.DataFrame:
     _to_int("IsSalesperson", bool)
     _to_int("SalariedFlag", bool)
     _to_int("IsActive", bool)
-    _to_int("RegionId", np.int32)
-    _to_int("DistrictId", np.int32)
-    _to_int("StoreKey", np.int32)
-    _to_int("GeographyKey", np.int32)
+    for col in ("RegionId", "DistrictId", "HomeStoreKey", "GeographyKey"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int32")
     _to_int("PayFrequency", np.int32)
 
     return df

@@ -196,6 +196,24 @@ class TestAttributeAccess:
         app = AppConfig.from_raw_dict(normalized_config)
         assert isinstance(app.defaults.dates.start, str)
 
+    def test_transfer_eligible_roles_are_typed(self):
+        app = AppConfig.from_raw_dict({
+            "employees": {
+                "transfers": {
+                    "eligible_roles": ["Cashier", "Stock Associate"],
+                },
+            },
+        })
+        assert app.employees.transfers.eligible_roles == [
+            "Cashier",
+            "Stock Associate",
+        ]
+
+    def test_transfer_defaults_include_non_sales_store_roles(self):
+        roles = AppConfig().employees.transfers.eligible_roles
+        assert "Cashier" in roles
+        assert "Stock Associate" in roles
+
     def test_hasattr_existing(self, normalized_config):
         app = AppConfig.from_raw_dict(normalized_config)
         assert hasattr(app, "sales")

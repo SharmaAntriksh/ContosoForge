@@ -54,7 +54,7 @@ table EmployeeStoreAssignment
 		annotation PBI_FormatHint = {"isCustom":true}
 
 	column FTE
-		dataType: int64
+		dataType: double
 		lineageTag: f99cdc08-1a77-4981-af24-6cce8198f111
 		summarizeBy: sum
 		sourceColumn: FTE
@@ -75,18 +75,19 @@ table EmployeeStoreAssignment
 
 		annotation SummarizationSetBy = Automatic
 
-	column IsPrimary
+	column IsCurrentAssignment
 		dataType: int64
 		formatString: 0
 		lineageTag: 2dba3339-4950-4115-ad05-1509751bd9dd
 		summarizeBy: sum
-		sourceColumn: IsPrimary
+		sourceColumn: IsCurrentAssignment
 
 		changedProperty = IsHidden
 
 		annotation SummarizationSetBy = Automatic
 
 	column AssignmentSequence
+		isHidden
 		dataType: int64
 		formatString: 0
 		lineageTag: 84c9528d-96ad-4b64-af58-5be3b02047f4
@@ -114,11 +115,11 @@ table EmployeeStoreAssignment
 
 		annotation SummarizationSetBy = Automatic
 
-	column Status
+	column AssignmentStatus
 		dataType: string
 		lineageTag: 77796edd-1c24-41a1-80e7-9fc517584e40
 		summarizeBy: none
-		sourceColumn: Status
+		sourceColumn: AssignmentStatus
 
 		annotation SummarizationSetBy = Automatic
 
@@ -128,7 +129,7 @@ table EmployeeStoreAssignment
 		source =
 				let
 				    Source = FxReadCSVFile ( "dimensions", "employee_store_assignments" ),
-				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"AssignmentKey", Int64.Type}, {"EmployeeKey", Int64.Type}, {"AssignmentSequence", Int64.Type}, {"StoreKey", Int64.Type}, {"StartDate", type date}, {"EndDate", type date}, {"FTE", Int64.Type}, {"RoleAtStore", type text}, {"IsPrimary", Int64.Type}, {"TransferReason", type text}, {"Status", type text}})
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"AssignmentKey", Int64.Type}, {"EmployeeKey", Int64.Type}, {"AssignmentSequence", Int64.Type}, {"StoreKey", Int64.Type}, {"StartDate", type date}, {"EndDate", type date}, {"FTE", type number}, {"RoleAtStore", type text}, {"IsCurrentAssignment", Int64.Type}, {"TransferReason", type text}, {"AssignmentStatus", type text}})
 				in
 				    #"Changed Type"
 

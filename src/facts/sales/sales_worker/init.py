@@ -16,7 +16,6 @@ from ..output_paths import (
 from ..sales_logic import bind_globals, State
 from ..sales_logic.chunk_builder import reset_worker_caches
 from .schemas import build_worker_schemas_from_cfg
-from src.defaults import SALESPERSON_PRIMARY_BOOST
 from src.exceptions import ConfigError, SalesError
 from src.utils.config_helpers import int_or, float_or, str_or
 from src.utils.logging_utils import warn as _warn
@@ -260,20 +259,19 @@ def _normalize_assignment_arrays(
     assign_start: Any,
     assign_end: Any,
     assign_fte: Any = None,
-    assign_is_primary: Any = None,
-) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]]:
+) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]]:
     """
     Normalize and validate employee assignment arrays.
 
     Returns:
-      (assign_store_i64, assign_emp_i32, start_D, end_D, fte_f64, is_primary_bool, max_store_key)
+      (assign_store_i64, assign_emp_i32, start_D, end_D, fte_f64, max_store_key)
 
     Notes:
       - NaT start -> FAR_PAST
       - NaT end   -> FAR_FUTURE
       - Filters invalid store keys outside [0, max_store_key]
       - Filters invalid windows where start > end
-      - Keeps fte/is_primary aligned with filtered rows
+      - Keeps FTE aligned with filtered rows
     """
     if assign_store is None or assign_emp is None or assign_start is None or assign_end is None:
         return None
@@ -300,14 +298,6 @@ def _normalize_assignment_arrays(
     if fte.shape[0] != a_store.shape[0]:
         raise SalesError("employee_assign_fte must align with employee assignments")
 
-    is_primary = (
-        np.zeros(a_store.shape[0], dtype=bool)
-        if assign_is_primary is None
-        else np.asarray(assign_is_primary, dtype=bool)
-    )
-    if is_primary.shape[0] != a_store.shape[0]:
-        raise SalesError("employee_assign_is_primary must align with employee assignments")
-
     FAR_FUTURE = np.datetime64("2262-04-11", "D")
     FAR_PAST = np.datetime64("1900-01-01", "D")
 
@@ -330,7 +320,6 @@ def _normalize_assignment_arrays(
         start_fixed = start_fixed[valid_store]
         end_fixed = end_fixed[valid_store]
         fte = fte[valid_store]
-        is_primary = is_primary[valid_store]
         if a_store.size == 0:
             return None
 
@@ -342,11 +331,10 @@ def _normalize_assignment_arrays(
         start_fixed = start_fixed[ok_window]
         end_fixed = end_fixed[ok_window]
         fte = fte[ok_window]
-        is_primary = is_primary[ok_window]
         if a_store.size == 0:
             return None
 
-    return a_store, a_emp, start_fixed, end_fixed, fte, is_primary, max_store_key
+    return a_store, a_emp, start_fixed, end_fixed, fte, max_store_key
 
 
 def _salesperson_perf_multiplier(
@@ -386,8 +374,9 @@ def _build_salesperson_effective_by_store(
     assign_start: Any,
     assign_end: Any,
     assign_fte: Any = None,
+    # Backwards-compatible input only. This latest-segment snapshot must not
+    # influence historical salesperson probability.
     assign_is_primary: Any = None,
-    primary_boost: float = SALESPERSON_PRIMARY_BOOST,
     perf_spread: float = 0.0,
     perf_seed: int = 0,
 ) -> Optional[dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]:
@@ -408,19 +397,21 @@ def _build_salesperson_effective_by_store(
         assign_start=assign_start,
         assign_end=assign_end,
         assign_fte=assign_fte,
-        assign_is_primary=assign_is_primary,
     )
     if norm is None:
         return None
 
-    a_store, a_emp, start_fixed, end_fixed, fte, is_primary, max_store_key = norm
+    a_store, a_emp, start_fixed, end_fixed, fte, max_store_key = norm
 
     # Validate FTE bounds — negative or extreme values indicate data corruption
     bad_fte = (fte < 0.0) | (fte > 2.0)
     if np.any(bad_fte):
         fte = np.clip(fte, 0.0, 2.0)
 
-    weights = fte * np.where(is_primary, float(primary_boost), 1.0)
+    # Effective dates decide participation. Weight depends only on effective FTE
+    # and the stable per-employee performance latent; dataset-end/latest-row
+    # flags cannot leak backward into historical periods.
+    weights = fte.copy()
     # Per-employee performance spread: some reps sell more than others within a
     # store. Keyed on EmployeeKey so it's stable across stores/chunks/workers.
     if perf_spread and float(perf_spread) > 0.0:
@@ -603,8 +594,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         employee_assign_start_date = worker_cfg.get("employee_assign_start_date")
         employee_assign_end_date = worker_cfg.get("employee_assign_end_date")
         employee_assign_fte = worker_cfg.get("employee_assign_fte")
-        employee_assign_is_primary = worker_cfg.get("employee_assign_is_primary")
-        employee_primary_boost = float(worker_cfg.get("employee_primary_boost", 2.0))
         salesperson_perf_spread = float_or(worker_cfg.get("salesperson_perf_spread"), 0.0)
         salesperson_perf_seed = int_or(worker_cfg.get("salesperson_perf_seed"), 0)
         employee_assign_role = worker_cfg.get("employee_assign_role")
@@ -845,8 +834,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
 
             if employee_assign_fte is not None:
                 employee_assign_fte = np.asarray(employee_assign_fte, dtype=np.float64)[mask]
-            if employee_assign_is_primary is not None:
-                employee_assign_is_primary = np.asarray(employee_assign_is_primary, dtype=bool)[mask]
 
             salesperson_global_pool = np.unique(employee_assign_employee_key).astype(np.int32, copy=False)
         else:
@@ -859,8 +846,6 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             assign_start=employee_assign_start_date,
             assign_end=employee_assign_end_date,
             assign_fte=employee_assign_fte,
-            assign_is_primary=employee_assign_is_primary,
-            primary_boost=employee_primary_boost,
             perf_spread=salesperson_perf_spread,
             perf_seed=salesperson_perf_seed,
         )

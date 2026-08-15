@@ -218,6 +218,12 @@ employees:
     annual_rate: 0.40                  # fraction of eligible staff that transfer per year
     min_tenure_months: 6               # minimum months at current store before eligible
     same_region_pref: 0.70             # probability transfer stays within the same region
+    eligible_roles:                    # physical-store roles allowed to transfer
+      - "Sales Associate"
+      - "Cashier"
+      - "Stock Associate"
+      - "Customer Support"
+      - "Fulfillment Associate"
   hr:
     email_domain: "contoso.com"
 

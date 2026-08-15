@@ -1643,12 +1643,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column StoreKey
+		column HomeStoreKey
 			dataType: int64
 			formatString: 0
 			lineageTag: d2c6eb98-c601-4edb-a72b-86a21fa153cb
 			summarizeBy: count
-			sourceColumn: StoreKey
+			sourceColumn: HomeStoreKey
 
 			annotation SummarizationSetBy = Automatic
 
@@ -1966,12 +1966,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column IsPrimary
+		column IsCurrentAssignment
 			dataType: boolean
 			formatString: """TRUE"";""TRUE"";""FALSE"""
 			lineageTag: 30f3cb85-77cc-4f0c-a70a-deeed32a5e10
 			summarizeBy: none
-			sourceColumn: IsPrimary
+			sourceColumn: IsCurrentAssignment
 
 			annotation SummarizationSetBy = Automatic
 
@@ -1983,11 +1983,11 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column Status
+		column AssignmentStatus
 			dataType: string
 			lineageTag: fdd0d62d-4d17-4d1f-b02c-f7339fc24905
 			summarizeBy: none
-			sourceColumn: Status
+			sourceColumn: AssignmentStatus
 
 			annotation SummarizationSetBy = Automatic
 

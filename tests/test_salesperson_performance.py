@@ -107,6 +107,28 @@ class TestBuilderAppliesPerf:
         )
         assert np.isclose(eff[0][3][0], eff[1][3][0])
 
+    def test_historical_assignment_is_not_deweighted_by_latest_flag(self):
+        """IsPrimary is a latest-segment snapshot, not an effective-date weight.
+
+        A future transfer must not halve the employee's salesperson weight on
+        the historical segment that preceded it.
+        """
+        store_keys = np.array([0, 1], dtype=np.int32)
+        assign_store = np.array([0, 1], dtype=np.int32)
+        assign_emp = np.array([40_555_000, 40_555_000], dtype=np.int32)
+        start = np.array(["2021-01-01", "2023-01-01"], dtype="datetime64[D]")
+        end = np.array(["2022-12-31", "2025-12-31"], dtype="datetime64[D]")
+        eff = _build_salesperson_effective_by_store(
+            store_keys=store_keys,
+            assign_store=assign_store,
+            assign_emp=assign_emp,
+            assign_start=start,
+            assign_end=end,
+            assign_is_primary=np.array([False, True]),
+            perf_spread=0.0,
+        )
+        assert eff[0][3][0] == eff[1][3][0] == 1.0
+
 
 class TestSalespersonPerformanceConfig:
     def test_valid_parses(self):

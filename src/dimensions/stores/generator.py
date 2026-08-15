@@ -30,7 +30,6 @@ from src.dimensions.stores.columns import (
     _build_ownership_type,
     _build_hierarchy,
     _build_emails,
-    _build_analytical,
     _build_phone,
 )
 from src.dimensions.stores.lifecycle import (
@@ -82,13 +81,15 @@ def generate_store_table(
       StoreKey, StoreNumber, StoreName, StoreType, StoreFormat, OwnershipType,
       RevenueClass, Status, GeographyKey, StoreZone, StoreDistrict, StoreRegion,
       StoreDistrictId, StoreRegionId,
-      OpeningDate, ClosingDate, OpenFlag, SquareFootage, EmployeeCount,
+      OpeningDate, ClosingDate, SquareFootage, EmployeeCount,
       StoreManager, Phone, StoreEmail, StoreDescription, CloseReason,
-      AvgTransactionValue, CustomerSatisfactionScore, InventoryTurnoverTarget,
-      LastAuditScore, ShrinkageRatePct
+      SuccessorStoreKey
     """
     # Unpack geo context
-    geo_keys = geo.geo_keys
+    # GeographyKey is a stable identity; canonicalize its input order so an
+    # equivalent, differently ordered geography parquet cannot change sampling
+    # or the resulting organizational hierarchy for the same seed.
+    geo_keys = np.sort(np.asarray(geo.geo_keys, dtype=np.int64))
     geo_loc_short = geo.geo_loc_short
     geo_loc_full = geo.geo_loc_full
     iso_by_geo = geo.iso_by_geo
@@ -210,6 +211,7 @@ def generate_store_table(
     # than reverse-parsing the display strings.
     zones, districts, regions, district_id, region_id = _build_hierarchy(
         geo_keys=df["GeographyKey"].to_numpy(dtype=np.int64),
+        store_keys=df["StoreKey"].to_numpy(dtype=np.int64),
         iso_by_geo=iso_by_geo,
         country_by_geo=country_by_geo,
         district_size=int_or(district_size, 10),
@@ -310,8 +312,6 @@ def generate_store_table(
 
     assign_renovation_dates(df, rng, dataset_start=dataset_start, dataset_end=dataset_end)
 
-    df["OpenFlag"] = (df["Status"] == "Open").astype(bool)
-
     df["SquareFootage"] = _square_footage_from_cfg(
         rng=rng,
         store_type=df["StoreType"],
@@ -326,6 +326,9 @@ def generate_store_table(
     df["EmployeeCount"] = _employee_count_by_store_type(
         rng=rng,
         store_type=df["StoreType"],
+        square_footage=df["SquareFootage"],
+        store_format=df["StoreFormat"],
+        ownership_type=df["OwnershipType"],
         staffing_overrides=as_dict(staffing_overrides),
     )
 
@@ -352,19 +355,6 @@ def generate_store_table(
 
     build_store_descriptions(df, stype=stype, status=status, loc_full=loc_full)
 
-    # Analytical columns
-    avg_txn, csat, inv_turn, audit, shrink = _build_analytical(
-        rng=rng,
-        store_type=df["StoreType"],
-        revenue_class=df["RevenueClass"].to_numpy(),
-        n=num_stores,
-    )
-    df["AvgTransactionValue"]      = avg_txn
-    df["CustomerSatisfactionScore"] = csat
-    df["InventoryTurnoverTarget"]   = inv_turn
-    df["LastAuditScore"]            = audit
-    df["ShrinkageRatePct"]          = shrink
-
     # Reorder columns to match the static schema (CREATE TABLE column order).
     # StoreName is built late (needs geography lookups) so the DataFrame
     # insertion order diverges from the canonical schema order.
@@ -375,13 +365,11 @@ def generate_store_table(
         "StoreDistrictId", "StoreRegionId",
         "OpeningDate", "ClosingDate",
         "RenovationStartDate", "RenovationEndDate",
-        "OpenFlag", "SquareFootage",
+        "SquareFootage",
         "EmployeeCount", "StoreManager",
         "StoreManagerFirstName", "StoreManagerLastName",
         "Phone", "StoreEmail",
-        "StoreDescription", "CloseReason",
-        "AvgTransactionValue", "CustomerSatisfactionScore",
-        "InventoryTurnoverTarget", "LastAuditScore", "ShrinkageRatePct",
+        "StoreDescription", "CloseReason", "SuccessorStoreKey",
     ]
     df = df[_SCHEMA_ORDER]
 

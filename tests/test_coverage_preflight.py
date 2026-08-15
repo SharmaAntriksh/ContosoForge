@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -40,8 +39,8 @@ def _bridge(intervals):
         rows.append({
             "AssignmentKey": i, "EmployeeKey": SA, "AssignmentSequence": i,
             "StoreKey": 1, "StartDate": pd.Timestamp(s), "EndDate": pd.Timestamp(e),
-            "FTE": 1.0, "RoleAtStore": "Sales Associate", "IsPrimary": True,
-            "TransferReason": "Initial", "Status": "Active",
+            "FTE": 1.0, "RoleAtStore": "Sales Associate", "IsCurrentAssignment": True,
+            "TransferReason": "Initial", "AssignmentStatus": "Active",
         })
     return pd.DataFrame(rows)
 
@@ -102,8 +101,8 @@ class TestAnalyzeCoverage:
             "AssignmentKey": 99, "EmployeeKey": 50_010_001, "AssignmentSequence": 1,
             "StoreKey": 10_001, "StartDate": pd.Timestamp("2020-06-01"),
             "EndDate": pd.Timestamp("2021-12-31"), "FTE": 1.0,
-            "RoleAtStore": "Online Sales Representative", "IsPrimary": True,
-            "TransferReason": "Initial", "Status": "Active",
+            "RoleAtStore": "Online Sales Representative", "IsCurrentAssignment": True,
+            "TransferReason": "Initial", "AssignmentStatus": "Active",
         }])], ignore_index=True)
         rep = analyze_coverage(stores, b, *WIN, ROLES)
         gap_stores = {s for s, *_ in rep.gap_cells}
@@ -134,8 +133,8 @@ class TestRepair:
             "RenovationEndDate": [pd.NaT] * 2,
         })
         E = 40_001_001
-        common = dict(FTE=1.0, RoleAtStore="Sales Associate", IsPrimary=True,
-                      TransferReason="Initial", Status="Active")
+        common = dict(FTE=1.0, RoleAtStore="Sales Associate", IsCurrentAssignment=True,
+                      TransferReason="Initial", AssignmentStatus="Active")
         bridge = pd.DataFrame([
             {"AssignmentKey": 1, "EmployeeKey": E, "AssignmentSequence": 1, "StoreKey": 1,
              "StartDate": pd.Timestamp("2021-01-01"), "EndDate": pd.Timestamp("2021-06-30"), **common},

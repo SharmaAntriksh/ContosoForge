@@ -97,7 +97,9 @@ def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
         )
 
     version_cfg = as_dict(emp_cfg)
-    version_cfg["schema_version"] = 15  # v15: opaque sequential EmployeeKeys (was semantic-encoded)
+    # v20: publish a readable pay-frequency label while retaining the numeric
+    # compatibility code in the raw operational table.
+    version_cfg["schema_version"] = 20
     version_cfg["seed"] = int(seed)
     version_cfg["_stores_sig"] = _stores_signature(stores)
     version_cfg["_stores_cfg"] = as_dict(cfg.stores)
@@ -169,12 +171,20 @@ def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
 
     # Build StoreKey → ClosingDate mapping for store-closure termination
     store_closing_dates: dict[int, pd.Timestamp] | None = None
+    store_close_reasons: dict[int, str] | None = None
     if "ClosingDate" in stores.columns:
         _cd = pd.to_datetime(stores["ClosingDate"], errors="coerce").dt.normalize()
         _sk_cd = stores["StoreKey"].astype(np.int32).to_numpy()
         store_closing_dates = {
             int(sk): ts for sk, ts in zip(_sk_cd, _cd) if pd.notna(ts)
         }
+        if "CloseReason" in stores.columns:
+            _reason = stores["CloseReason"].fillna("").astype(str).to_numpy()
+            store_close_reasons = {
+                int(sk): reason
+                for sk, reason in zip(_sk_cd, _reason)
+                if int(sk) in store_closing_dates
+            }
         stores = stores.drop(columns=["ClosingDate", "CloseReason"], errors="ignore")
 
     with stage("Generating Employees"):
@@ -195,6 +205,7 @@ def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
             store_manager_names=store_manager_names,
             store_opening_dates=store_opening_dates,
             store_closing_dates=store_closing_dates,
+            store_close_reasons=store_close_reasons,
         )
 
         hr_cfg = emp_cfg.hr
@@ -214,13 +225,14 @@ def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
         _SCHEMA_ORDER = [
             "EmployeeKey", "ParentEmployeeKey", "EmployeeName", "Title",
             "OrgLevel", "OrgUnitType", "RegionId", "DistrictId",
-            "StoreKey", "GeographyKey",
+            "HomeStoreKey", "GeographyKey",
             "HireDate", "TerminationDate", "TerminationReason", "IsActive",
             "EmploymentType", "FTE",
             "Gender", "FirstName", "LastName", "MiddleName",
             "BirthDate", "MaritalStatus", "EmailAddress", "Phone",
             "EmergencyContactName", "EmergencyContactPhone",
-            "SalariedFlag", "PayFrequency", "BaseRate", "VacationHours",
+            "SalariedFlag", "PayFrequency", "PayFrequencyLabel",
+            "BaseRate", "VacationHours",
             "Status",
             "IsSalesperson", "DepartmentName",
         ]

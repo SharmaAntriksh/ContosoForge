@@ -16,6 +16,7 @@ from src.defaults import (
     MID_WINDOW_MANAGER_LEAD_MIN_DAYS,
     MID_WINDOW_MANAGER_LEAD_MAX_DAYS,
     MID_WINDOW_STAFF_RAMP_DAYS,
+    STORE_CLOSE_TRANSFER_SHARE_BY_REASON,
     is_online_store_key,
 )
 from src.dimensions.employees.names import _apply_deterministic_names
@@ -375,6 +376,7 @@ def assign_employment_dates_status(
     global_end,
     store_opening_dates,
     store_closing_dates,
+    store_close_reasons=None,
 ):
     # ------------------------------------------------------------------
     # EmploymentType & FTE — determined at hire based on role
@@ -382,7 +384,7 @@ def assign_employment_dates_status(
     n_all = len(df)
     titles_np = df["Title"].astype(str).to_numpy()
     pt_prob = np.array(
-        [EMPLOYEE_PART_TIME_RATE_BY_ROLE.get(t, 0.10) for t in titles_np],
+        [EMPLOYEE_PART_TIME_RATE_BY_ROLE.get(t, 0.0) for t in titles_np],
         dtype=np.float64,
     )
     is_part_time = rng.random(n_all) < pt_prob
@@ -535,7 +537,9 @@ def assign_employment_dates_status(
     df["IsActive"] = True
     df["TerminationReason"] = pd.array([pd.NA] * n, dtype="object")
 
-    # Store closures: terminate all employees at the closing store (vectorized)
+    # Store closures: a reason-specific share remains active for reassignment
+    # through the effective-dated bridge; the rest terminate on ClosingDate-1.
+    # Selection is exact-count and deterministic on this dimension RNG.
     if store_closing_dates:
         sk_all_np = pd.to_numeric(df["StoreKey"], errors="coerce").fillna(0).astype(np.int32).to_numpy()
         for close_sk, close_date in store_closing_dates.items():
@@ -547,6 +551,23 @@ def assign_employment_dates_status(
             df.loc[mask, "TerminationDate"] = last_day
             df.loc[mask, "IsActive"] = False
             df.loc[mask, "TerminationReason"] = "Store Closure"
+
+            reason = str((store_close_reasons or {}).get(int(close_sk), ""))
+            retain_share = float(
+                STORE_CLOSE_TRANSFER_SHARE_BY_REASON.get(reason, 0.0)
+            )
+            # Use index labels rather than mask positions so this remains correct
+            # if assembly ever supplies a non-RangeIndex frame.
+            store_idx = df.index.to_numpy()[mask]
+            n_retain = min(
+                len(store_idx),
+                max(0, int(round(len(store_idx) * retain_share))),
+            )
+            if n_retain > 0:
+                retained_idx = rng.choice(store_idx, size=n_retain, replace=False)
+                df.loc[retained_idx, "TerminationDate"] = pd.NaT
+                df.loc[retained_idx, "IsActive"] = True
+                df.loc[retained_idx, "TerminationReason"] = pd.NA
 
 
 def finalize_employees(
@@ -600,7 +621,9 @@ def finalize_employees(
     df["EmployeeKey"] = pd.to_numeric(df["EmployeeKey"], errors="coerce").fillna(0).astype(np.int32)
     df["ParentEmployeeKey"] = pd.to_numeric(df["ParentEmployeeKey"], errors="coerce").astype("Int32")
     df["OrgLevel"] = pd.to_numeric(df["OrgLevel"], errors="coerce").fillna(0).astype(np.int32)
-    df["RegionId"] = pd.to_numeric(df["RegionId"], errors="coerce").fillna(0).astype(np.int32)
-    df["DistrictId"] = pd.to_numeric(df["DistrictId"], errors="coerce").fillna(0).astype(np.int32)
-    df["StoreKey"] = pd.to_numeric(df["StoreKey"], errors="coerce").fillna(0).astype(np.int32)
-    df["GeographyKey"] = pd.to_numeric(df["GeographyKey"], errors="coerce").fillna(0).astype(np.int32)
+    # Organizational/location keys are genuinely absent above their applicable
+    # grain. Preserve nullable Int32 values rather than publishing synthetic 0
+    # members that do not exist in the referenced dimensions.
+    for col in ("RegionId", "DistrictId", "StoreKey", "GeographyKey"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int32")
+    df.rename(columns={"StoreKey": "HomeStoreKey"}, inplace=True)

@@ -118,8 +118,10 @@ def run_stores(cfg: AppConfig, parquet_folder: Path) -> None:
     wh_min_sow = int(wh_cfg.get("min_stores_for_own_warehouse", 5))
 
     version_cfg = dict(store_cfg)
-    version_cfg["schema_version"] = 12  # v12: minimum 1-year operating window (opening cap + closing floor)
-    version_cfg["_geography_sig"] = _geography_signature(geo_keys)
+    # v15: Status is the sole store snapshot indicator; redundant OpenFlag was
+    # removed from Stores and downstream analytical schemas.
+    version_cfg["schema_version"] = 16
+    version_cfg["_geography_sig"] = _geography_signature(geo_df)
     version_cfg["seed"] = int(seed)
     version_cfg["_warehouses"] = {
         "schema_version": WAREHOUSES_SCHEMA_VERSION,

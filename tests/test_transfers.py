@@ -9,6 +9,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.dimensions.employees.transfers import (
+    _build_open_store_candidates,
+    _classify_transfer_reason,
+    _pick_destination,
+    apply_transfers,
+)
+from src.dimensions.stores.lifecycle import build_region_store_map
+
 from src.dimensions.employees.assignment_core import (
     _adjust_budget,
     _budget_violations,
@@ -52,8 +60,8 @@ def _assignments(rows):
             "EndDate": pd.Timestamp(r[3]),
             "FTE": 1.0,
             "RoleAtStore": "Sales Associate",
-            "IsPrimary": True,
-            "Status": "Active",
+            "IsCurrentAssignment": True,
+            "AssignmentStatus": "Active",
         }
         for r in rows
     ])
@@ -367,7 +375,7 @@ class TestRollbackChain:
     Only store 1's coverage collapses (its lone salesperson left), so the greedy
     picker on its own would roll back just the first hop (1->2) — restoring the
     full-length row at store 1 while the primary row at store 3 still exists,
-    i.e. two primaries and an overlapping window. The chain-aware rollback must
+    i.e. two current segments and an overlapping window. The chain-aware rollback must
     cascade and unwind the whole chain from its tail.
     """
 
@@ -391,7 +399,7 @@ class TestRollbackChain:
             return {
                 "EmployeeKey": ek, "StoreKey": sk, "StartDate": start, "EndDate": end,
                 "FTE": 1.0, "RoleAtStore": "Sales Associate",
-                "IsPrimary": primary, "Status": status,
+                "IsCurrentAssignment": primary, "AssignmentStatus": status,
             }
 
         # Post-transfer bridge state for employee 101 (source rows truncated).
@@ -437,11 +445,11 @@ class TestRollbackChain:
         # Whole chain unwound: employee restored to a single full-length row at store 1.
         assert len(emp) == 1
         assert int(emp["StoreKey"].iloc[0]) == 1
-        assert bool(emp["IsPrimary"].iloc[0]) is True
+        assert bool(emp["IsCurrentAssignment"].iloc[0]) is True
         assert pd.Timestamp(emp["EndDate"].iloc[0]) == pd.Timestamp("2024-12-31")
         # Exactly one primary per employee, no overlaps left behind.
         for _ek, grp in df.groupby("EmployeeKey"):
-            assert int(grp["IsPrimary"].astype(bool).sum()) == 1
+            assert int(grp["IsCurrentAssignment"].astype(bool).sum()) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -474,3 +482,231 @@ class TestCheckCoverageInvariant:
         months = {m for _, m in violations}
         assert "2024-06" in months
         assert "2024-12" in months
+
+
+class TestPointInTimeTransferEligibility:
+    def test_destination_must_stay_open_through_assignment_window(self):
+        stores = pd.concat([
+            _stores([2], reno=("2024-04-01", "2024-06-30")),
+            _stores([3]),
+        ], ignore_index=True)
+        open_d, close_d, reno_start, reno_end = _date_dicts(stores)
+
+        region_open, all_open = _build_open_store_candidates(
+            {"R": [2, 3]},
+            [2, 3],
+            pd.Timestamp("2024-02-01"),
+            pd.Timestamp("2024-12-31"),
+            open_d,
+            close_d,
+            reno_start,
+            reno_end,
+        )
+
+        assert all_open.tolist() == [3]
+        assert region_open["R"].tolist() == [3]
+
+    def test_non_sales_store_role_can_be_configured_for_transfer(self):
+        stores = _stores([1, 2])
+        stores["EmployeeCount"] = [2, 2]
+        assigns = _assignments([
+            (101, 1, "2024-01-01", "2024-12-31"),
+            (102, 1, "2024-01-01", "2024-12-31"),
+            (201, 2, "2024-01-01", "2024-12-31"),
+        ])
+        assigns.loc[assigns["EmployeeKey"] == 101, "RoleAtStore"] = "Cashier"
+
+        out = apply_transfers(
+            assigns,
+            stores,
+            seed=9,
+            global_start=pd.Timestamp("2024-01-01"),
+            global_end=pd.Timestamp("2024-12-31"),
+            annual_rate=1.0,
+            min_tenure_months=0,
+            same_region_pref=1.0,
+            salesperson_roles=ROLE,
+            eligible_roles=["Cashier"],
+        )
+
+        cashier = out[out["EmployeeKey"] == 101].sort_values("StartDate")
+        assert len(cashier) == 2
+        assert int(cashier.iloc[-1]["StoreKey"]) == 2
+        assert cashier.iloc[-1]["TransferReason"] == "Backfill"
+        assert out[out["EmployeeKey"].isin([102, 201])].groupby("EmployeeKey").size().eq(1).all()
+
+    def test_new_store_reason_is_emitted_only_inside_opening_window(self):
+        stores = pd.concat([
+            _stores([1], opening="2020-01-01"),
+            _stores([2], opening="2024-01-01"),
+        ], ignore_index=True)
+        stores["EmployeeCount"] = [2, 2]
+        assigns = _assignments([
+            (101, 1, "2024-01-01", "2024-04-30"),
+            (102, 1, "2024-01-01", "2024-04-30"),
+            (201, 2, "2024-01-01", "2024-04-30"),
+        ])
+        assigns.loc[assigns["EmployeeKey"] == 101, "RoleAtStore"] = "Cashier"
+
+        out = apply_transfers(
+            assigns,
+            stores,
+            seed=9,
+            global_start=pd.Timestamp("2024-01-01"),
+            global_end=pd.Timestamp("2024-04-30"),
+            annual_rate=1.0,
+            min_tenure_months=0,
+            same_region_pref=1.0,
+            salesperson_roles=ROLE,
+            eligible_roles=["Cashier"],
+        )
+
+        transferred = out[
+            (out["EmployeeKey"] == 101)
+            & out["TransferReason"].notna()
+        ]
+        assert transferred.iloc[0]["TransferReason"] == "New Store Opening"
+
+    def test_transfer_reason_requires_business_precondition(self):
+        opening_dates = {
+            2: pd.Timestamp("2024-02-01"),
+            3: pd.Timestamp("2020-01-01"),
+            4: pd.Timestamp("2020-01-01"),
+        }
+        planned = {2: 5, 3: 5, 4: 5}
+        transfer_date = pd.Timestamp("2024-03-15")
+
+        assert _classify_transfer_reason(
+            2, transfer_date, opening_dates, planned, 5
+        ) == "New Store Opening"
+        assert _classify_transfer_reason(
+            3, transfer_date, opening_dates, planned, 3
+        ) == "Backfill"
+        assert _classify_transfer_reason(
+            4, transfer_date, opening_dates, planned, 5
+        ) == "Employee Request"
+
+    def test_completed_snapshot_can_transfer_before_assignment_end(self):
+        """A future termination must not block an earlier effective transfer."""
+        stores = _stores([1, 2])
+        assigns = _assignments([
+            (101, 1, "2024-01-01", "2024-12-31"),
+            (102, 1, "2024-01-01", "2024-12-31"),
+            (200, 2, "2024-01-01", "2024-12-31"),
+        ])
+        # Employee 101 is known to complete at the end of the window. That is a
+        # snapshot outcome, not evidence that the employee is inactive earlier.
+        assigns.loc[assigns["EmployeeKey"] == 101, "AssignmentStatus"] = "Completed"
+        # Employee 102 supplies source-store coverage but is not itself a
+        # transfer candidate.
+        assigns.loc[assigns["EmployeeKey"] == 102, "IsCurrentAssignment"] = False
+
+        out = apply_transfers(
+            assigns,
+            stores,
+            seed=9,
+            global_start=pd.Timestamp("2024-01-01"),
+            global_end=pd.Timestamp("2024-12-31"),
+            annual_rate=1.0,
+            min_tenure_months=0,
+            same_region_pref=1.0,
+            salesperson_roles=ROLE,
+        )
+
+        emp = out[out["EmployeeKey"] == 101].sort_values("StartDate")
+        assert len(emp) == 2
+        assert int(emp.iloc[-1]["StoreKey"]) == 2
+        assert bool(emp.iloc[-1]["IsCurrentAssignment"]) is True
+
+    def test_same_region_preference_cannot_cross_region_boundary(self):
+        stores = _stores([1, 2, 3, 4])
+        stores["StoreRegion"] = ["Alpha Region", "Alpha Region", "Beta Region", "Beta Region"]
+        assigns = _assignments([
+            (101, 1, "2024-01-01", "2024-12-31"),
+            (102, 1, "2024-01-01", "2024-12-31"),
+            (201, 2, "2024-01-01", "2024-12-31"),
+            (202, 2, "2024-01-01", "2024-12-31"),
+            (301, 3, "2024-01-01", "2024-12-31"),
+            (302, 3, "2024-01-01", "2024-12-31"),
+            (401, 4, "2024-01-01", "2024-12-31"),
+            (402, 4, "2024-01-01", "2024-12-31"),
+        ])
+        # Keep one non-candidate salesperson at each source so all four primary
+        # employees can move without violating the coverage invariant.
+        assigns.loc[assigns["EmployeeKey"].isin([102, 202, 302, 402]), "IsCurrentAssignment"] = False
+        source_store = dict(zip(assigns["EmployeeKey"], assigns["StoreKey"]))
+        store_region = dict(zip(stores["StoreKey"], stores["StoreRegion"]))
+
+        out = apply_transfers(
+            assigns,
+            stores,
+            seed=17,
+            global_start=pd.Timestamp("2024-01-01"),
+            global_end=pd.Timestamp("2024-12-31"),
+            annual_rate=1.0,
+            min_tenure_months=0,
+            same_region_pref=1.0,
+            salesperson_roles=ROLE,
+        )
+
+        destinations = out[out["AssignmentSequence"] == 2]
+        assert len(destinations) == 4
+        assert all(
+            store_region[int(row.StoreKey)]
+            == store_region[int(source_store[int(row.EmployeeKey)])]
+            for row in destinations.itertuples()
+        )
+
+    def test_structured_region_id_is_authoritative(self):
+        stores = _stores([1, 2])
+        stores["StoreRegion"] = "Duplicate Display Label"
+        stores["StoreRegionId"] = [11, 12]
+
+        assert build_region_store_map(stores) == {
+            "id:11": [1],
+            "id:12": [2],
+        }
+
+    def test_full_same_region_preference_is_a_hard_boundary(self):
+        destination = _pick_destination(
+            rng=np.random.default_rng(3),
+            source_sk=1,
+            source_region="id:11",
+            region_open={
+                "id:11": np.array([1], dtype=np.int32),
+                "id:12": np.array([2], dtype=np.int32),
+            },
+            all_open=np.array([1, 2], dtype=np.int32),
+            same_region_pref=1.0,
+        )
+        assert destination is None
+
+
+class TestClosureReassignment:
+    def test_retained_employee_moves_when_home_store_closes(self):
+        from src.dimensions.employees.employee_store_assignments import (
+            _apply_store_closure_reassignments,
+        )
+
+        stores = pd.concat([
+            _stores([1], closing="2024-07-01"),
+            _stores([2]),
+        ], ignore_index=True)
+        stores["CloseReason"] = ["Lease Ended", ""]
+        assigns = _assignments([
+            (101, 1, "2024-01-01", "2024-12-31"),
+            (200, 2, "2024-01-01", "2024-12-31"),
+        ])
+        assigns["AssignmentKey"] = np.arange(1, len(assigns) + 1, dtype=np.int32)
+        assigns["AssignmentSequence"] = 1
+        assigns["TransferReason"] = "Initial"
+
+        out = _apply_store_closure_reassignments(assigns, stores, seed=13)
+        emp = out[out["EmployeeKey"] == 101].sort_values("StartDate")
+
+        assert len(emp) == 2
+        assert int(emp.iloc[0]["StoreKey"]) == 1
+        assert pd.Timestamp(emp.iloc[0]["EndDate"]) == pd.Timestamp("2024-06-30")
+        assert int(emp.iloc[1]["StoreKey"]) == 2
+        assert pd.Timestamp(emp.iloc[1]["StartDate"]) == pd.Timestamp("2024-07-01")
+        assert emp.iloc[1]["TransferReason"] == "Store Closure: Lease Ended"

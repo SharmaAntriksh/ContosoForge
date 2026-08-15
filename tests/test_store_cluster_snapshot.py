@@ -36,6 +36,10 @@ import pytest
 
 from src.defaults import ONLINE_STORE_KEY_BASE
 from src.engine.config.config_schema import AppConfig
+from src.engine.quality_report import (
+    QualityReport,
+    _check_current_headcount_reconciliation,
+)
 from src.dimensions.stores import run_stores
 from src.dimensions.stores.lifecycle import build_store_date_maps
 from src.dimensions.warehouses.generator import run_warehouses
@@ -334,12 +338,12 @@ class TestWarehouses:
 
 
 class TestBridgeInvariants:
-    def test_exactly_one_primary_per_employee(self, cluster):
+    def test_exactly_one_current_assignment_per_employee(self, cluster):
         esa = cluster["employee_store_assignments"]
-        primaries = esa[esa["IsPrimary"].astype(bool)].groupby("EmployeeKey").size()
-        assert (primaries == 1).all(), "every employee must have exactly one IsPrimary=True"
-        # And every employee that appears has at least one primary.
-        assert set(primaries.index) == set(esa["EmployeeKey"].unique())
+        current = esa[esa["IsCurrentAssignment"].astype(bool)].groupby("EmployeeKey").size()
+        assert (current == 1).all(), "every employee must have exactly one current assignment"
+        # And every employee that appears has one current segment.
+        assert set(current.index) == set(esa["EmployeeKey"].unique())
 
     def test_start_before_end_everywhere(self, cluster):
         esa = cluster["employee_store_assignments"]
@@ -362,6 +366,22 @@ class TestBridgeInvariants:
                     f"employee {ek}: segment {i} starts {starts[i]} but previous ends "
                     f"{ends[i - 1]} (expected contiguous +1 day, got {gap})"
                 )
+
+    def test_dataset_end_headcount_reconciles_to_active_employees(self, cluster):
+        report = QualityReport()
+
+        _check_current_headcount_reconciliation(
+            report,
+            cluster["employees"],
+            cluster["employee_store_assignments"],
+        )
+
+        check = next(
+            result for result in report.checks
+            if result.name
+            == "Current assignment headcount reconciles to active employees"
+        )
+        assert check.passed, check.message
 
 
 class TestKeyIntegrity:
@@ -554,7 +574,7 @@ class TestMidWindowCluster:
         emp = cluster_midwindow["employees"]
         esa = cluster_midwindow["employee_store_assignments"]
         store_level = set(
-            emp.loc[pd.to_numeric(emp["StoreKey"], errors="coerce").fillna(0).astype(int) > 0,
+            emp.loc[pd.to_numeric(emp["HomeStoreKey"], errors="coerce").fillna(0).astype(int) > 0,
                     "EmployeeKey"].astype(int)
         )
         missing = store_level - set(esa["EmployeeKey"].astype(int))
@@ -565,13 +585,8 @@ class TestMidWindowCluster:
 # Shared home-store helper (opaque keys carry no home store — read the column)
 # ---------------------------------------------------------------------------
 def _home_store(employees: pd.DataFrame) -> pd.Series:
-    """Home StoreKey per employee, from the authoritative StoreKey column.
-
-    0 / corporate rows (CEO/VP/region/district have no store) map to NaN so they
-    drop out of roster counts, matching the old decode's NaN-for-corporate.
-    """
-    sk = pd.to_numeric(employees["StoreKey"], errors="coerce")
-    return sk.where(sk != 0)
+    """Nullable home-store identity from the explicit employee column."""
+    return pd.to_numeric(employees["HomeStoreKey"], errors="coerce")
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +628,7 @@ def test_bugpin_2_renovation_temp_store_must_be_open(tmp_path):
     # One manager whose home store (1) renovates mid-window.
     employees = pd.DataFrame({
         "EmployeeKey": [1],
-        "StoreKey": [1],
+        "HomeStoreKey": [1],
         "HireDate": [gstart],
         "TerminationDate": [pd.NaT],
         "Title": ["Store Manager"],
@@ -654,7 +669,7 @@ def test_bugpin_3_renovation_missing_columns_is_graceful(tmp_path):
     gstart, gend = pd.Timestamp(DATE_START), pd.Timestamp(DATE_END)
     employees = pd.DataFrame({
         "EmployeeKey": [1],
-        "StoreKey": [1],
+        "HomeStoreKey": [1],
         "HireDate": [gstart],
         "TerminationDate": [pd.NaT],
         "Title": ["Store Manager"],
@@ -742,11 +757,11 @@ def _assert_bridge_invariants(frames: dict[str, pd.DataFrame], seed: int) -> Non
 
     assert (esa["StartDate"] <= esa["EndDate"]).all(), f"seed {seed}: StartDate > EndDate"
 
-    # Exactly one IsPrimary=True per employee, and every employee has one.
-    primaries = esa[esa["IsPrimary"].astype(bool)].groupby("EmployeeKey").size()
-    assert (primaries == 1).all(), f"seed {seed}: employee(s) without exactly one primary"
-    assert set(primaries.index) == set(esa["EmployeeKey"].unique()), (
-        f"seed {seed}: an employee has no primary assignment"
+    # Exactly one current assignment per employee, and every employee has one.
+    current = esa[esa["IsCurrentAssignment"].astype(bool)].groupby("EmployeeKey").size()
+    assert (current == 1).all(), f"seed {seed}: employee(s) without exactly one current assignment"
+    assert set(current.index) == set(esa["EmployeeKey"].unique()), (
+        f"seed {seed}: an employee has no current assignment"
     )
 
     # Consecutive segments meet at exactly +1 day (no gap, no overlap).

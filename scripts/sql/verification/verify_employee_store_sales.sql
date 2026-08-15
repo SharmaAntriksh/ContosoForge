@@ -183,18 +183,18 @@ FROM (SELECT TransferReason, COUNT(*) AS Cnt FROM dbo.EmployeeStoreAssignments G
 INSERT INTO #R VALUES ('ESA-Bridge', 'TransferReason distribution', 'INFO', ISNULL(@tr_info, '(empty)'));
 
 DECLARE @ip_true INT, @ip_false INT;
-SELECT @ip_true  = SUM(CASE WHEN IsPrimary = 1 THEN 1 ELSE 0 END),
-       @ip_false = SUM(CASE WHEN IsPrimary = 0 THEN 1 ELSE 0 END)
+SELECT @ip_true  = SUM(CASE WHEN IsCurrentAssignment = 1 THEN 1 ELSE 0 END),
+       @ip_false = SUM(CASE WHEN IsCurrentAssignment = 0 THEN 1 ELSE 0 END)
 FROM dbo.EmployeeStoreAssignments;
-INSERT INTO #R VALUES ('ESA-Bridge', 'IsPrimary distribution', 'INFO',
+INSERT INTO #R VALUES ('ESA-Bridge', 'IsCurrentAssignment distribution', 'INFO',
     'True:' + CAST(@ip_true AS VARCHAR) + ', False:' + CAST(@ip_false AS VARCHAR));
 
 DECLARE @st_info VARCHAR(200);
-SELECT @st_info = STRING_AGG(CAST(Status AS VARCHAR(30)) + ':' + CAST(Cnt AS VARCHAR), ', ')
-FROM (SELECT Status, COUNT(*) AS Cnt FROM dbo.EmployeeStoreAssignments GROUP BY Status) x;
-INSERT INTO #R VALUES ('ESA-Bridge', 'Status distribution', 'INFO', ISNULL(@st_info, '(empty)'));
+SELECT @st_info = STRING_AGG(CAST(AssignmentStatus AS VARCHAR(30)) + ':' + CAST(Cnt AS VARCHAR), ', ')
+FROM (SELECT AssignmentStatus, COUNT(*) AS Cnt FROM dbo.EmployeeStoreAssignments GROUP BY AssignmentStatus) x;
+INSERT INTO #R VALUES ('ESA-Bridge', 'AssignmentStatus distribution', 'INFO', ISNULL(@st_info, '(empty)'));
 
--- 20. Renovation Reassignment IsPrimary rules
+-- 20. Renovation Reassignment current-assignment rules
 --     Temp (store reopened) must be False; Permanent (store closed) must be True
 DECLARE @bad_temp_ip INT = 0, @bad_perm_ip INT = 0;
 DECLARE @n_temp INT = 0, @n_perm INT = 0;
@@ -202,9 +202,9 @@ IF @n_reno > 0
 BEGIN
     SELECT
         @n_temp      = ISNULL(SUM(CASE WHEN s.ClosingDate IS NULL THEN 1 ELSE 0 END), 0),
-        @bad_temp_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NULL  AND rr.IsPrimary = 1 THEN 1 ELSE 0 END), 0),
+        @bad_temp_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NULL  AND rr.IsCurrentAssignment = 1 THEN 1 ELSE 0 END), 0),
         @n_perm      = ISNULL(SUM(CASE WHEN s.ClosingDate IS NOT NULL THEN 1 ELSE 0 END), 0),
-        @bad_perm_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NOT NULL AND rr.IsPrimary = 0 THEN 1 ELSE 0 END), 0)
+        @bad_perm_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NOT NULL AND rr.IsCurrentAssignment = 0 THEN 1 ELSE 0 END), 0)
     FROM dbo.EmployeeStoreAssignments rr
     JOIN dbo.EmployeeStoreAssignments init
       ON init.EmployeeKey = rr.EmployeeKey AND init.TransferReason = 'Initial'
@@ -212,7 +212,7 @@ BEGIN
     WHERE rr.TransferReason = 'Renovation Reassignment'
       AND s.RenovationStartDate IS NOT NULL;
 
-    INSERT INTO #R VALUES ('ESA-Bridge', 'Renovation Reassignment IsPrimary rules',
+    INSERT INTO #R VALUES ('ESA-Bridge', 'Renovation Reassignment current-assignment rules',
         CASE WHEN @bad_temp_ip = 0 AND @bad_perm_ip = 0 THEN 'PASS' ELSE 'FAIL' END,
         CAST(@n_temp AS VARCHAR) + ' temp (bad:' + CAST(@bad_temp_ip AS VARCHAR) + '), '
         + CAST(@n_perm AS VARCHAR) + ' perm (bad:' + CAST(@bad_perm_ip AS VARCHAR) + ')');
@@ -307,7 +307,7 @@ DECLARE @zombie INT;
 SELECT @zombie = COUNT(*)
 FROM dbo.EmployeeStoreAssignments esa
 JOIN dbo.Employees e ON e.EmployeeKey = esa.EmployeeKey
-WHERE e.IsActive = 0 AND esa.Status = 'Active';
+WHERE e.IsActive = 0 AND esa.AssignmentStatus = 'Active';
 INSERT INTO #R VALUES ('ESA-Bridge', 'No Active assignments for terminated employees',
     CASE WHEN @zombie = 0 THEN 'PASS' ELSE 'FAIL' END,
     CAST(@zombie AS VARCHAR) + ' zombie assignment(s)');

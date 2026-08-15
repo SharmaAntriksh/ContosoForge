@@ -33,6 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from src.tools.sql.identifier_case import to_case
 from src.tools.sql.sql_helpers import sql_escape_literal
 
 if TYPE_CHECKING:
@@ -49,13 +50,23 @@ if TYPE_CHECKING:
 PASS_THROUGH_VIEWS: tuple[str, ...] = (
     "Currency", "Customers", "CustomerProfile", "OrganizationProfile",
     "CustomerAcquisitionChannels", "CustomerWishlists", "Complaints",
-    "CustomerSubscriptions", "Plans", "Dates", "Time", "Employees",
-    "EmployeeStoreAssignments", "ExchangeRates", "ExchangeRatesMonthly",
+    "CustomerSubscriptions", "Plans", "Dates", "Time",
+    "ExchangeRates", "ExchangeRatesMonthly",
     "Geography", "LoyaltyTiers", "ProductCategory", "Products", "ProductProfile",
-    "ProductSubcategory", "Promotions", "ReturnReason", "Channels", "Stores",
+    "ProductSubcategory", "Promotions", "ReturnReason", "Channels",
     "Warehouses", "Suppliers",
     # Budget + inventory fact tables are also plain pass-throughs.
     "BudgetYearly", "BudgetMonthly", "InventorySnapshot",
+)
+
+# Business-facing workforce views. Unlike pass-through views, these expose the
+# effective-dated bridge semantics analysts otherwise have to reconstruct.
+WORKFORCE_VIEWS: tuple[str, ...] = (
+    "EmployeeAssignmentHistory",
+    "CurrentEmployeesByStore",
+    "EffectiveSalespersonAssignment",
+    "CurrentStoreManager",
+    "StoreStaffingActualVsPlan",
 )
 
 
@@ -108,6 +119,47 @@ PROJECTION_VIEWS: tuple[ProjectionView, ...] = (
     ProjectionView("Returns", "Returns", _RETURNS_COLS),
 )
 
+
+# Curated analytical dimension contracts. The raw tables intentionally retain
+# a small operational/compatibility surface (contact fields, manager display
+# names, legacy status/code columns, AssignmentSequence), while these generated
+# views expose only fields with a documented analytical purpose.
+PUBLISHED_DIMENSION_VIEWS: tuple[ProjectionView, ...] = (
+    ProjectionView(
+        "Stores",
+        "Stores",
+        tuple(ViewCol(column) for column in (
+            "StoreKey", "StoreNumber", "StoreName", "StoreType", "StoreFormat",
+            "OwnershipType", "RevenueClass", "Status", "GeographyKey",
+            "StoreZone", "StoreDistrict", "StoreRegion", "StoreDistrictId",
+            "StoreRegionId", "OpeningDate", "ClosingDate",
+            "RenovationStartDate", "RenovationEndDate", "SquareFootage",
+            "EmployeeCount", "CloseReason", "SuccessorStoreKey", "WarehouseKey",
+        )),
+    ),
+    ProjectionView(
+        "Employees",
+        "Employees",
+        tuple(ViewCol(column) for column in (
+            "EmployeeKey", "ParentEmployeeKey", "EmployeeName", "Title",
+            "OrgLevel", "OrgUnitType", "RegionId", "DistrictId", "HomeStoreKey",
+            "GeographyKey", "HireDate", "TerminationDate", "TerminationReason",
+            "IsActive", "EmploymentType", "FTE", "Gender", "BirthDate",
+            "SalariedFlag", "PayFrequencyLabel", "BaseRate", "VacationHours",
+            "IsSalesperson", "DepartmentName",
+        )),
+    ),
+    ProjectionView(
+        "EmployeeStoreAssignments",
+        "EmployeeStoreAssignments",
+        tuple(ViewCol(column) for column in (
+            "AssignmentKey", "EmployeeKey", "StoreKey", "StartDate", "EndDate",
+            "FTE", "RoleAtStore", "IsCurrentAssignment", "TransferReason",
+            "AssignmentStatus",
+        )),
+    ),
+)
+
 # vw_Sales unified column list. Join aliases: header cols "h", detail cols "d".
 # The two order-key columns are conditional in the flat-Sales variant
 # (skip_order_cols) but always present (from detail) in the join variant.
@@ -156,9 +208,16 @@ _DIALECT = {
 
 
 class _ViewWriter:
-    def __init__(self, dialect: "Dialect", resolve, view_schema: str) -> None:
+    def __init__(
+        self,
+        dialect: "Dialect",
+        resolve,
+        resolve_view,
+        view_schema: str,
+    ) -> None:
         self.d = dialect
         self.resolve = resolve
+        self.resolve_view = resolve_view
         self.cfg = _DIALECT[dialect.name]
         self.table_schema = self.cfg["default_schema"]
         self.view_schema = view_schema
@@ -172,9 +231,12 @@ class _ViewWriter:
         return self.d.qualify(self.table_schema, self.resolve(table))
 
     def view_ref(self, base: str) -> str:
-        name = self.resolve(base)
+        name = self.resolve_view(base)
         view_name = name if self.custom_schema else f"vw_{name}"
         return self.d.qualify(self.view_schema, view_name)
+
+    def col_ref(self, alias: str, column: str) -> str:
+        return f"{alias}.{self.q(self.resolve(column))}"
 
     def _proj(self, c: ViewCol) -> str:
         ref = (f"{c.alias}." if c.alias else "") + self.q(self.resolve(c.column))
@@ -255,6 +317,182 @@ class _ViewWriter:
         body = self._select(exprs, from_clause)
         return self._block(["OrderHeader", "OrderDetail"], body)
 
+    def workforce(self, view_base: str) -> str:
+        """Render one effective-dated workforce view from the declared roster."""
+        self._current_base = view_base
+        assignment = f"{self.table_ref('EmployeeStoreAssignments')} AS a"
+        employees = f"{self.table_ref('Employees')} AS e"
+        stores = f"{self.table_ref('Stores')} AS s"
+        employee_join = (
+            f"{self.col_ref('a', 'EmployeeKey')} = "
+            f"{self.col_ref('e', 'EmployeeKey')}"
+        )
+        store_join = (
+            f"{self.col_ref('a', 'StoreKey')} = "
+            f"{self.col_ref('s', 'StoreKey')}"
+        )
+        from_clause = (
+            f"{assignment}\n"
+            f"JOIN {employees}\n  ON {employee_join}\n"
+            f"JOIN {stores}\n  ON {store_join}"
+        )
+        bool_true = "TRUE" if self.d.name == "postgres" else "1"
+        active = "'Active'" if self.d.name == "postgres" else "N'Active'"
+        store_manager = "'Store Manager'" if self.d.name == "postgres" else "N'Store Manager'"
+        guards = ["EmployeeStoreAssignments", "Employees", "Stores"]
+        group_by: list[str] | None = None
+
+        def output_alias(expression: str, alias: str) -> str:
+            return f"{expression} AS {self.q(self.resolve_view(alias))}"
+
+        if view_base == "EmployeeAssignmentHistory":
+            columns = (
+                ("a", "AssignmentKey"), ("a", "EmployeeKey"),
+                ("e", "EmployeeName"), ("e", "Title"),
+                ("a", "StoreKey"),
+                ("s", "StoreName"), ("s", "StoreRegion"),
+                ("a", "StartDate"), ("a", "EndDate"), ("a", "FTE"),
+                ("a", "RoleAtStore"), ("a", "IsCurrentAssignment"),
+                ("a", "TransferReason"), ("a", "AssignmentStatus"),
+            )
+            exprs = [self.col_ref(alias, column) for alias, column in columns]
+            where = None
+        elif view_base == "CurrentEmployeesByStore":
+            columns = (
+                ("a", "EmployeeKey"), ("e", "EmployeeName"),
+                ("e", "Title"), ("a", "StoreKey"), ("s", "StoreName"),
+                ("s", "StoreRegion"), ("a", "RoleAtStore"),
+                ("a", "FTE"), ("a", "StartDate"), ("a", "EndDate"),
+                ("a", "AssignmentStatus"),
+            )
+            exprs = [self.col_ref(alias, column) for alias, column in columns]
+            where = (
+                f"{self.col_ref('a', 'IsCurrentAssignment')} = {bool_true} AND "
+                f"{self.col_ref('a', 'AssignmentStatus')} = {active}"
+            )
+        elif view_base == "EffectiveSalespersonAssignment":
+            columns = (
+                ("a", "EmployeeKey"), ("e", "EmployeeName"),
+                ("a", "StoreKey"), ("s", "StoreName"),
+                ("a", "StartDate"), ("a", "EndDate"),
+                ("a", "RoleAtStore"), ("a", "FTE"),
+            )
+            exprs = [self.col_ref(alias, column) for alias, column in columns]
+            where = f"{self.col_ref('e', 'IsSalesperson')} = {bool_true}"
+        elif view_base == "CurrentStoreManager":
+            exprs = [
+                self.col_ref("s", "StoreKey"),
+                self.col_ref("s", "StoreName"),
+                output_alias(self.col_ref("a", "EmployeeKey"), "ManagerEmployeeKey"),
+                self.col_ref("e", "EmployeeName"),
+                self.col_ref("a", "StartDate"),
+                self.col_ref("a", "EndDate"),
+            ]
+            where = (
+                f"{self.col_ref('a', 'IsCurrentAssignment')} = {bool_true} AND "
+                f"{self.col_ref('a', 'AssignmentStatus')} = {active} AND "
+                f"{self.col_ref('a', 'RoleAtStore')} = {store_manager}"
+            )
+        elif view_base == "StoreStaffingActualVsPlan":
+            planned_count = self.col_ref("s", "EmployeeCount")
+            actual_count = f"COUNT({self.col_ref('a', 'EmployeeKey')})"
+            current_fte = f"COALESCE(SUM({self.col_ref('a', 'FTE')}), 0.0)"
+
+            store_columns = (
+                "StoreKey", "StoreNumber", "StoreName", "StoreType", "Status",
+            )
+            store_exprs = [self.col_ref("s", column) for column in store_columns]
+            exprs = [
+                *store_exprs,
+                output_alias(planned_count, "PlannedEmployeeCount"),
+                output_alias(actual_count, "CurrentEmployeeCount"),
+                output_alias(current_fte, "CurrentFTE"),
+                output_alias(
+                    f"{actual_count} - {planned_count}",
+                    "HeadcountVariance",
+                ),
+            ]
+            current_assignment = (
+                f"{self.col_ref('a', 'IsCurrentAssignment')} = {bool_true} AND "
+                f"{self.col_ref('a', 'AssignmentStatus')} = {active}"
+            )
+            from_clause = (
+                f"{stores}\n"
+                f"LEFT JOIN {assignment}\n"
+                f"  ON {store_join} AND {current_assignment}"
+            )
+            where = None
+            group_by = [*store_exprs, planned_count]
+            guards = ["Stores", "EmployeeStoreAssignments"]
+        else:  # pragma: no cover - roster and dispatcher are co-located
+            raise ValueError(f"unknown workforce view: {view_base}")
+
+        body = self._select(exprs, from_clause)
+        if where:
+            body += f"\nWHERE {where}"
+        if group_by:
+            body += "\nGROUP BY " + ", ".join(group_by)
+        return self._block(guards, body)
+
+    def store_sales_actuals(
+        self,
+        *,
+        mode: str,
+        skip_order_cols: bool,
+    ) -> str | None:
+        """Render fact-derived store order value metrics when order grain exists."""
+        self._current_base = "StoreSalesActuals"
+        use_order_split = mode == "sales_order" or (mode == "both" and skip_order_cols)
+        if not use_order_split and skip_order_cols:
+            return None
+
+        store_key = self.q(self.resolve("StoreKey"))
+        order_number = self.q(self.resolve("OrderNumber"))
+        net_price = self.q(self.resolve("NetPrice"))
+        quantity = self.q(self.resolve("Quantity"))
+        transaction_amount = self.q(self.resolve_view("TransactionAmount"))
+
+        if use_order_split:
+            header = f"{self.table_ref('OrderHeader')} AS h"
+            detail = f"{self.table_ref('OrderDetail')} AS d"
+            line_source = (
+                f"{header}\nJOIN {detail}\n"
+                f"  ON h.{order_number} = d.{order_number}"
+            )
+            key_ref = f"h.{store_key}"
+            order_ref = f"h.{order_number}"
+            amount_ref = f"d.{net_price} * d.{quantity}"
+            guards = ["OrderHeader", "OrderDetail"]
+        else:
+            line_source = f"{self.table_ref('Sales')} AS f"
+            key_ref = f"f.{store_key}"
+            order_ref = f"f.{order_number}"
+            amount_ref = f"f.{net_price} * f.{quantity}"
+            guards = ["Sales"]
+
+        order_rollup = (
+            "SELECT\n"
+            f"    {key_ref} AS {store_key},\n"
+            f"    {order_ref} AS {order_number},\n"
+            f"    SUM({amount_ref}) AS {transaction_amount}\n"
+            f"FROM {line_source}\n"
+            f"GROUP BY {key_ref}, {order_ref}"
+        )
+        order_count = self.q(self.resolve_view("OrderCount"))
+        gross_sales = self.q(self.resolve_view("GrossSalesAmount"))
+        average_transaction = self.q(self.resolve_view("AvgTransactionValue"))
+        body = (
+            f"{self.cfg['create']} {self.view_ref('StoreSalesActuals')} AS\n"
+            "SELECT\n"
+            f"    o.{store_key},\n"
+            f"    COUNT(*) AS {order_count},\n"
+            f"    SUM(o.{transaction_amount}) AS {gross_sales},\n"
+            f"    AVG(o.{transaction_amount}) AS {average_transaction}\n"
+            f"FROM (\n{order_rollup}\n) AS o\n"
+            f"GROUP BY o.{store_key}"
+        )
+        return self._block(guards, body)
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -276,7 +514,12 @@ def render_views_sql(
     custom schema drops it). ``name_map`` transforms identifiers (None = default).
     """
     resolve = name_map.resolve if name_map is not None else (lambda s: s)
-    w = _ViewWriter(dialect, resolve, view_schema)
+    resolve_view = (
+        (lambda s: to_case(s, name_map.case))
+        if name_map is not None
+        else (lambda s: s)
+    )
+    w = _ViewWriter(dialect, resolve, resolve_view, view_schema)
     mode = (mode or "sales").strip().lower()
 
     parts: list[str] = [
@@ -290,6 +533,12 @@ def render_views_sql(
 
     parts.append("-- Pass-through views")
     parts.extend(w.pass_through(t) for t in PASS_THROUGH_VIEWS)
+
+    parts.append("-- Curated analytical dimension views")
+    parts.extend(w.projection(view) for view in PUBLISHED_DIMENSION_VIEWS)
+
+    parts.append("-- Effective-dated workforce views")
+    parts.extend(w.workforce(view) for view in WORKFORCE_VIEWS)
 
     # Order-split projection views only when that model is emitted.
     if mode in {"sales_order", "both"}:
@@ -305,5 +554,13 @@ def render_views_sql(
         parts.append(w.sales_from_join())
     else:
         parts.append(w.sales_from_flat(include_order_cols=not skip_order_cols))
+
+    store_actuals = w.store_sales_actuals(
+        mode=mode,
+        skip_order_cols=skip_order_cols,
+    )
+    if store_actuals:
+        parts.append("-- Fact-derived store actuals")
+        parts.append(store_actuals)
 
     return "\n\n".join(parts) + "\n"

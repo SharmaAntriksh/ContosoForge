@@ -103,3 +103,9 @@ class TestRosterIntegrity:
         for i in INDEXES:
             assert i.table in nm.tables, f"{i.table} not in name map"
             assert i.column in nm.columns, f"{i.column} not in name map"
+
+    def test_employee_home_store_is_indexed(self) -> None:
+        assert any(
+            i.table == "Employees" and i.column == "HomeStoreKey"
+            for i in INDEXES
+        )

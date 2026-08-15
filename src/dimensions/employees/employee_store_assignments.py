@@ -7,7 +7,8 @@ transfers, producing multiple rows per transferred employee.
 
 Output columns:
   AssignmentKey, EmployeeKey, AssignmentSequence, StoreKey, StartDate,
-  EndDate, FTE, RoleAtStore, IsPrimary, TransferReason, Status
+  EndDate, FTE, RoleAtStore, IsCurrentAssignment, TransferReason,
+  AssignmentStatus
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from src.defaults import is_online_store_key, is_physical_store_key
+from src.exceptions import DimensionError
 from src.utils.logging_utils import info, skip, stage, warn
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning import should_regenerate, save_version, frame_content_hash
@@ -35,8 +37,149 @@ from src.utils.config_precedence import resolve_seed
 # Columns the bridge reads from employees.parquet — the version signature hashes
 # exactly this consumed set.
 _ESA_EMP_READ_COLS = [
-    "EmployeeKey", "HireDate", "TerminationDate", "Title", "FTE", "IsActive", "StoreKey",
+    "EmployeeKey", "HireDate", "TerminationDate", "Title", "FTE", "IsActive", "HomeStoreKey",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Store-closure reassignment
+# ---------------------------------------------------------------------------
+
+def _apply_store_closure_reassignments(
+    assignments: pd.DataFrame,
+    stores: pd.DataFrame,
+    seed: int,
+    same_region_pref: float = 0.7,
+) -> pd.DataFrame:
+    """Move retained employees away from a store on its closing date.
+
+    Employee generation decides which people are retained after a closure by
+    leaving their employment window open. This bridge-layer pass expresses the
+    operational consequence: the source assignment ends the day before closure
+    and a new assignment begins at an open physical store. Employees selected
+    for termination already end before the closing date and are untouched.
+    """
+    from src.dimensions.employees.assignment_core import split_primary_assignment
+    from src.dimensions.stores.lifecycle import (
+        build_region_store_map,
+        build_store_region_lookup,
+        build_store_date_maps,
+        store_open_through_window,
+    )
+
+    if assignments.empty:
+        return assignments
+    if "ClosingDate" not in stores.columns:
+        warn(
+            "stores frame lacks ClosingDate; skipping store-closure "
+            "reassignments. Regenerate stores to enable them."
+        )
+        return assignments
+
+    open_dates, close_dates, _, _ = build_store_date_maps(stores)
+    if not close_dates:
+        return assignments
+
+    physical = stores[is_physical_store_key(stores["StoreKey"])]
+    physical_keys = physical["StoreKey"].astype(int).tolist()
+    region_store_map = build_region_store_map(stores)
+    region_map = build_store_region_lookup(stores)
+    close_reason_map: dict[int, str] = {}
+    if "CloseReason" in stores.columns:
+        close_reason_map = {
+            int(sk): str(reason)
+            for sk, reason in zip(stores["StoreKey"], stores["CloseReason"])
+            if pd.notna(reason) and str(reason).strip()
+        }
+
+    assignment_store = assignments["StoreKey"].astype(int)
+    assignment_close = assignment_store.map(close_dates)
+    affected = assignment_close.notna() & (
+        pd.to_datetime(assignments["EndDate"]).dt.normalize()
+        >= pd.to_datetime(assignment_close).dt.normalize()
+    )
+    if not affected.any():
+        return assignments
+
+    rng = np.random.default_rng(seed)
+    same_region_pref = float(np.clip(same_region_pref, 0.0, 1.0))
+    keep_rows = assignments[~affected]
+    new_rows: list[dict] = []
+
+    for row in assignments[affected].itertuples(index=False):
+        row_d = dict(row._asdict())
+        source_key = int(row.StoreKey)
+        close_date = close_dates[source_key]
+        assignment_start = pd.Timestamp(row.StartDate).normalize()
+        assignment_end = pd.Timestamp(row.EndDate).normalize()
+
+        candidates = [
+            sk for sk in physical_keys
+            if sk != source_key
+            and store_open_through_window(
+                sk, max(close_date, assignment_start), assignment_end,
+                open_dates, close_dates,
+            )
+        ]
+        if not candidates:
+            raise DimensionError(
+                "Cannot reassign retained employee "
+                f"{int(row.EmployeeKey)} when store {source_key} closes on "
+                f"{close_date.date()}: no physical store remains open through "
+                f"{assignment_end.date()}"
+            )
+
+        source_region = region_map.get(source_key, "")
+        regional_keys = set(region_store_map.get(source_region, []))
+        regional = [sk for sk in candidates if sk in regional_keys]
+        pool = (
+            regional
+            if regional and rng.random() < same_region_pref
+            else candidates
+        )
+        destination_key = int(rng.choice(np.asarray(pool, dtype=np.int32)))
+        reason = close_reason_map.get(source_key, "Closure")
+        transfer_reason = f"Store Closure: {reason}"
+
+        if assignment_start >= close_date:
+            # Defensive handling for stale input whose assignment already begins
+            # after the source store closed: move the whole row without creating
+            # an impossible pre-closure segment.
+            destination = row_d.copy()
+            destination["StoreKey"] = destination_key
+            destination["TransferReason"] = transfer_reason
+            destination["IsCurrentAssignment"] = True
+            new_rows.append(destination)
+            continue
+
+        source, destination = split_primary_assignment(
+            row_d,
+            close_date,
+            dest_key=destination_key,
+            dest_end=assignment_end,
+            transfer_reason=transfer_reason,
+            dest_status=row_d["AssignmentStatus"],
+        )
+        if source is not None:
+            new_rows.append(source)
+        new_rows.append(destination)
+
+    result = pd.concat([keep_rows, pd.DataFrame(new_rows)], ignore_index=True)
+    result = result.sort_values(["EmployeeKey", "StartDate"]).reset_index(drop=True)
+    result["EmployeeKey"] = result["EmployeeKey"].astype(np.int32)
+    result["StoreKey"] = result["StoreKey"].astype(np.int32)
+    result["IsCurrentAssignment"] = result["IsCurrentAssignment"].astype(bool)
+    result["AssignmentKey"] = np.arange(1, len(result) + 1, dtype=np.int32)
+    result["AssignmentSequence"] = (
+        result.groupby("EmployeeKey").cumcount() + 1
+    ).astype(np.int32)
+
+    info(
+        f"Store-closure reassignments: {int(affected.sum())} retained "
+        f"assignment(s) moved from {assignment_store[affected].nunique()} "
+        "closed store(s)"
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +204,7 @@ def _apply_renovation_reassignments(
     """
     from src.dimensions.stores.lifecycle import (
         build_region_store_map,
+        build_store_region_lookup,
         build_store_date_maps,
         store_open_through_window,
     )
@@ -96,10 +240,7 @@ def _apply_renovation_reassignments(
 
     # Build region→[store_keys] map for same-region preference
     region_store_map = build_region_store_map(stores)
-    region_map: dict[int, str] = {}
-    if "StoreRegion" in stores.columns:
-        for sk, reg in zip(stores["StoreKey"].astype(int), stores["StoreRegion"].astype(str)):
-            region_map[int(sk)] = reg
+    region_map = build_store_region_lookup(stores)
     candidates_set = set(candidates.tolist())
     region_candidates = {
         r: np.array([sk for sk in sks if sk in candidates_set], dtype=np.int32)
@@ -161,7 +302,8 @@ def _apply_renovation_reassignments(
             temp_sk = int(rng.choice(global_open)) if global_open.size > 0 else sk
 
         has_return = (not store_closed_permanently) and (re <= a_end)
-        orig_status = row_d["Status"]
+        orig_status = row_d["AssignmentStatus"]
+        orig_is_current = bool(row_d["IsCurrentAssignment"])
 
         # Displacement hop: home[a_start, temp_start-1] is superseded and the
         # employee works at temp[temp_start, temp_end].
@@ -170,6 +312,10 @@ def _apply_renovation_reassignments(
             dest_key=temp_sk, dest_end=temp_end,
             transfer_reason="Renovation Reassignment", dest_status=orig_status,
         )
+        if not orig_is_current:
+            if home_pre is not None:
+                home_pre["IsCurrentAssignment"] = False
+            temp["IsCurrentAssignment"] = False
         if home_pre is not None:
             new_rows.append(home_pre)
         if has_return:
@@ -180,6 +326,9 @@ def _apply_renovation_reassignments(
                 dest_key=sk, dest_end=a_end,
                 transfer_reason="Renovation Return", dest_status=orig_status,
             )
+            if not orig_is_current:
+                temp["IsCurrentAssignment"] = False
+                ret["IsCurrentAssignment"] = False
             new_rows.append(temp)
             new_rows.append(ret)
         else:
@@ -188,13 +337,13 @@ def _apply_renovation_reassignments(
     result = pd.concat([keep_rows, pd.DataFrame(new_rows)], ignore_index=True)
     result = result.sort_values(["EmployeeKey", "StartDate"]).reset_index(drop=True)
 
-    # Each split sets IsPrimary explicitly (superseded segments non-primary, the
-    # latest segment primary), so exactly one row per employee is primary without
+    # Each split sets IsCurrentAssignment explicitly (superseded segments false,
+    # latest segment true), so exactly one row per employee is current without
     # a post-hoc recompute. Keys/dtypes are normalised to match the transfer
     # engine and static schema (int32 keys regardless of the split path).
     result["EmployeeKey"] = result["EmployeeKey"].astype(np.int32)
     result["StoreKey"] = result["StoreKey"].astype(np.int32)
-    result["IsPrimary"] = result["IsPrimary"].astype(bool)
+    result["IsCurrentAssignment"] = result["IsCurrentAssignment"].astype(bool)
     result["AssignmentKey"] = np.arange(1, len(result) + 1, dtype=np.int32)
     result["AssignmentSequence"] = (result.groupby("EmployeeKey").cumcount() + 1).astype(np.int32)
 
@@ -210,17 +359,8 @@ def _apply_renovation_reassignments(
 # ---------------------------------------------------------------------------
 
 def _infer_home_store_key(employees: pd.DataFrame) -> pd.Series:
-    """Home StoreKey per employee, read from the authoritative ``StoreKey`` column.
-
-    Corporate rows (CEO/VP/region/district) carry ``StoreKey == 0`` (the
-    ``fillna(0)`` int cast in the generator), which is not a real store key — map
-    it to NA so those rows drop from the bridge. Valid store keys are 1..N
-    (physical) and > ONLINE_STORE_KEY_BASE (online); 0 never occurs for a
-    store-level employee. With opaque EmployeeKeys the key can no longer be
-    decoded, so the StoreKey column is the sole source of home store.
-    """
-    sk = employees["StoreKey"].astype("Int32")
-    return sk.where(sk != 0)
+    """Return the employee snapshot's explicit, nullable home-store key."""
+    return employees["HomeStoreKey"].astype("Int32")
 
 
 def _verify_coverage_postcondition(
@@ -282,7 +422,8 @@ def generate_employee_store_assignments(
     out_cols = [
         "AssignmentKey", "EmployeeKey", "AssignmentSequence",
         "StoreKey", "StartDate", "EndDate",
-        "FTE", "RoleAtStore", "IsPrimary", "TransferReason", "Status",
+        "FTE", "RoleAtStore", "IsCurrentAssignment", "TransferReason",
+        "AssignmentStatus",
     ]
 
     if employees.empty:
@@ -350,9 +491,9 @@ def generate_employee_store_assignments(
         "EndDate": end,
         "FTE": emp["FTE"].fillna(1.0).astype(np.float64),
         "RoleAtStore": emp["Title"].astype(str),
-        "IsPrimary": True,
+        "IsCurrentAssignment": True,
         "TransferReason": "Initial",
-        "Status": np.where(is_terminated, "Completed", "Active"),
+        "AssignmentStatus": np.where(is_terminated, "Completed", "Active"),
     })
 
     out["StartDate"] = pd.to_datetime(out["StartDate"]).dt.normalize()
@@ -405,6 +546,19 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
 
     employees = pd.read_parquet(employees_path, columns=_ESA_EMP_READ_COLS)
 
+    stores_path = parquet_folder / "stores.parquet"
+    stores_df = None
+    _stores_cols = [
+        "StoreKey", "StoreType", "Status", "StoreRegion", "StoreRegionId",
+        "OpeningDate", "ClosingDate", "CloseReason",
+        "RenovationStartDate", "RenovationEndDate",
+    ]
+    if stores_path.exists():
+        try:
+            stores_df = pd.read_parquet(stores_path, columns=_stores_cols)
+        except (KeyError, ValueError):
+            stores_df = pd.read_parquet(stores_path)
+
     # Transfer config
     transfers_cfg = emp_cfg.transfers
     transfers_enabled = transfers_cfg.enabled
@@ -417,9 +571,10 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
     base_seed = resolve_seed(cfg, as_dict(emp_cfg), fallback=42)
 
     version_cfg = dict(sa_cfg)
-    # renovation runs through the shared split primitive: superseded segments are
-    # Transferred (was Completed) and key columns are int32 regardless of split path
-    version_cfg["schema_version"] = 21
+    # Closure and renovation moves run through the shared split primitive:
+    # superseded segments are Transferred and key columns stay int32.
+    # v25: configurable role mobility and causally classified transfer reasons.
+    version_cfg["schema_version"] = 25
     version_cfg["seed"] = int(base_seed)
     version_cfg["_stores_cfg"] = dict(cfg.stores)
     version_cfg["_transfers"] = as_dict(transfers_cfg)
@@ -428,6 +583,11 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
     # bridge. Replaces the old _emp_key_min/max/sum + _hire_min/max fingerprint,
     # which two different employee frames could collide on.
     version_cfg["_employees_sig"] = frame_content_hash(employees, _ESA_EMP_READ_COLS)
+    version_cfg["_stores_sig"] = (
+        frame_content_hash(stores_df, _stores_cols)
+        if stores_df is not None
+        else "missing"
+    )
     version_cfg["_global_dates"] = {
         "start": str(global_start.date()),
         "end": str(global_end.date()),
@@ -441,19 +601,6 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
         # Load stores up front: the bridge clamps each assignment's start to its
         # store's OpeningDate (mid-window openings), and renovation + transfers
         # need the same frame downstream.
-        stores_path = parquet_folder / "stores.parquet"
-        stores_df = None
-        if stores_path.exists():
-            _stores_cols = [
-                "StoreKey", "StoreType", "Status", "StoreRegion",
-                "OpeningDate", "ClosingDate",
-                "RenovationStartDate", "RenovationEndDate",
-            ]
-            try:
-                stores_df = pd.read_parquet(stores_path, columns=_stores_cols)
-            except (KeyError, ValueError):
-                stores_df = pd.read_parquet(stores_path)
-
         store_opening_dates: dict[int, pd.Timestamp] | None = None
         if stores_df is not None and "OpeningDate" in stores_df.columns:
             _od = pd.to_datetime(stores_df["OpeningDate"], errors="coerce")
@@ -469,6 +616,16 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
             global_end=global_end,
             store_opening_dates=store_opening_dates,
         )
+
+        # Employees retained through a closure move on the closing date. This
+        # precedes renovation and voluntary transfers so subsequent lifecycle
+        # events can split the newly created destination assignment normally.
+        if stores_df is not None:
+            df = _apply_store_closure_reassignments(
+                df, stores_df,
+                seed=base_seed ^ 0x32D1,
+                same_region_pref=transfers_cfg.same_region_pref,
+            )
 
         # Handle renovation reassignments (split assignments at
         # renovating stores into pre/during/post segments)
@@ -503,6 +660,7 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
                 min_tenure_months=transfers_cfg.min_tenure_months,
                 same_region_pref=transfers_cfg.same_region_pref,
                 salesperson_roles=[emp_cfg.store_assignments.primary_sales_role],
+                eligible_roles=list(transfers_cfg.eligible_roles),
             )
 
         if stores_df is not None:

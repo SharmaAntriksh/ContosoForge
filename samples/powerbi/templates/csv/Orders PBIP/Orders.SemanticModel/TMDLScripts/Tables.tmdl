@@ -1709,12 +1709,12 @@ createOrReplace
 
 			annotation SummarizationSetBy = Automatic
 
-		column IsPrimary
+		column IsCurrentAssignment
 			dataType: int64
 			formatString: 0
 			lineageTag: 2dba3339-4950-4115-ad05-1509751bd9dd
 			summarizeBy: sum
-			sourceColumn: IsPrimary
+			sourceColumn: IsCurrentAssignment
 
 			changedProperty = IsHidden
 
@@ -1746,7 +1746,7 @@ createOrReplace
 					            { "EndDate", type date },
 					            { "FTE", type number },
 					            { "RoleAtStore", type text },
-					            { "IsPrimary", Int64.Type },
+					            { "IsCurrentAssignment", Int64.Type },
 					            { "AssignmentSequence", Int64.Type }
 					        }
 					    )

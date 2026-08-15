@@ -196,8 +196,10 @@ def test_promotion_guard_checks_active_dates_and_channel_groups() -> None:
     })
     channels = pd.DataFrame({
         "ChannelKey": [1, 2],
-        "IsPhysical": [True, False],
-        "IsDigital": [False, True],
+        # CSV/Arrow loads flags as integers; this used to crash when combined
+        # with a bool[pyarrow] category mask in the quality report.
+        "IsPhysical": pd.Series([1, 0], dtype="int64[pyarrow]"),
+        "IsDigital": pd.Series([0, 1], dtype="int64[pyarrow]"),
     })
     sales = pd.DataFrame({
         "PromotionKey": [2, 3],

@@ -30,7 +30,7 @@ Sections mirror the old file layout so the mode/feature gating is unchanged:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable
 
 __all__ = [
@@ -205,6 +205,10 @@ _DIMENSIONS: tuple[Constraint, ...] = (
     ),
     PrimaryKey("PK_Promotions", "Promotions", ("PromotionKey",), guard_columns=("PromotionKey",)),
     PrimaryKey("PK_Employees", "Employees", ("EmployeeKey",), guard_columns=("EmployeeKey",)),
+    ForeignKey(
+        "FK_Employees_HomeStore", "Employees", ("HomeStoreKey",),
+        "Stores", ("StoreKey",), guard_columns=("HomeStoreKey",),
+    ),
     PrimaryKey(
         "PK_EmployeeStoreAssignments", "EmployeeStoreAssignments", ("AssignmentKey",),
         guard_columns=("AssignmentKey",),
@@ -278,6 +282,10 @@ _DIMENSIONS: tuple[Constraint, ...] = (
     ForeignKey(
         "FK_Stores_Warehouses", "Stores", ("WarehouseKey",),
         "Warehouses", ("WarehouseKey",), guard_columns=("WarehouseKey",),
+    ),
+    ForeignKey(
+        "FK_Stores_Successor", "Stores", ("SuccessorStoreKey",),
+        "Stores", ("StoreKey",), guard_columns=("SuccessorStoreKey",),
     ),
     ForeignKey(
         "FK_ExchangeRates_FromCurrency", "ExchangeRates", ("FromCurrencyKey",),
@@ -616,6 +624,7 @@ def _brin(table: str, column: str, *, guarded: bool = False) -> Index:
 INDEXES: tuple[Index, ...] = (
     # --- dimension-to-dimension FK columns -------------------------------
     _btree("Warehouses", "GeographyKey", guarded=True),
+    _btree("Employees", "HomeStoreKey", guarded=True),
     _btree("EmployeeStoreAssignments", "EmployeeKey", guarded=True),
     _btree("EmployeeStoreAssignments", "StoreKey", guarded=True),
     _btree("Products", "SubcategoryKey"),
@@ -626,6 +635,7 @@ INDEXES: tuple[Index, ...] = (
     _btree("Customers", "CustomerAcquisitionChannelKey", guarded=True),
     _btree("Stores", "GeographyKey", guarded=True),
     _btree("Stores", "WarehouseKey", guarded=True),
+    _btree("Stores", "SuccessorStoreKey", guarded=True),
     _btree("ExchangeRates", "FromCurrencyKey"),
     _btree("ExchangeRates", "ToCurrencyKey"),
     _btree("CustomerSubscriptions", "CustomerKey", guarded=True),

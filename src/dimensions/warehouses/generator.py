@@ -25,6 +25,11 @@ import pandas as pd
 from src.defaults import (
     ONLINE_WAREHOUSE_KEY,
     US_STATE_REGIONS,
+    WAREHOUSE_SHRINKAGE_AUDIT_PENALTY_PCT,
+    WAREHOUSE_SHRINKAGE_BASE_PCT,
+    WAREHOUSE_SHRINKAGE_BASE_PCT_DEFAULT,
+    WAREHOUSE_TURNOVER_TARGET_DEFAULT,
+    WAREHOUSE_TURNOVER_TARGET_RANGES,
     WAREHOUSE_TYPES,
     WAREHOUSE_TYPES_P,
     is_online_store_key,
@@ -43,6 +48,43 @@ def _rep_geo_key(geo_series: pd.Series) -> int:
     if geo_series.empty:
         return 0
     return int(geo_series.astype(np.int64).mode().iloc[0])
+
+
+def _add_operating_targets(
+    warehouses: pd.DataFrame,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """Add inventory targets at the warehouse grain where they are consumed."""
+    out = warehouses.copy()
+    warehouse_type = out["WarehouseType"].astype(str)
+    turnover = np.zeros(len(out), dtype=np.float64)
+    for value in warehouse_type.unique():
+        mask = warehouse_type.eq(value).to_numpy()
+        low, high = WAREHOUSE_TURNOVER_TARGET_RANGES.get(
+            value,
+            WAREHOUSE_TURNOVER_TARGET_DEFAULT,
+        )
+        turnover[mask] = rng.uniform(low, high, int(mask.sum()))
+
+    # Higher audit scores imply stronger controls and therefore lower target
+    # shrinkage. This target is consumed by the inventory engine rather than
+    # presented as an observed loss rate.
+    audit = np.rint(65.0 + 35.0 * rng.beta(5.0, 2.0, size=len(out))).astype(np.int32)
+    base_shrinkage = warehouse_type.map(
+        lambda value: WAREHOUSE_SHRINKAGE_BASE_PCT.get(
+            value,
+            WAREHOUSE_SHRINKAGE_BASE_PCT_DEFAULT,
+        )
+    ).to_numpy(dtype=np.float64)
+    shrinkage = base_shrinkage + (
+        (100.0 - audit.astype(np.float64))
+        * WAREHOUSE_SHRINKAGE_AUDIT_PENALTY_PCT
+    )
+
+    out["TargetInventoryTurnover"] = np.round(turnover, 1)
+    out["LastAuditScore"] = audit
+    out["TargetShrinkageRatePct"] = np.round(shrinkage, 2)
+    return out
 
 
 def _enrich_with_geography(
@@ -391,7 +433,7 @@ def generate_warehouse_table(
         else:
             _seen_names[nm] = 1
 
-    warehouses_df = pd.DataFrame(all_rows)
+    warehouses_df = _add_operating_targets(pd.DataFrame(all_rows), rng)
     n_physical = len(warehouses_df) - 1
     info(
         f"Warehouses: {n_physical} physical + 1 online = "

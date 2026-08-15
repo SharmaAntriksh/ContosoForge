@@ -66,6 +66,13 @@ table Inventory
 
 		annotation SummarizationSetBy = Automatic
 
+	column ShrinkageQuantity
+		dataType: int64
+		formatString: 0
+		summarizeBy: sum
+		sourceColumn: ShrinkageQuantity
+
+		annotation SummarizationSetBy = Automatic
 	column ReorderFlag
 		dataType: int64
 		formatString: 0
@@ -112,7 +119,7 @@ table Inventory
 				        "Transform File",
 				        Table.ColumnNames ( Transform_Inventory_File ( Sample_File_Inventory ) )
 				    ),
-				    ChangedType = Table.TransformColumnTypes(CombineTables,{{"ProductKey", Int64.Type}, {"WarehouseKey", Int64.Type}, {"SnapshotDate", type date}, {"QuantityOnHand", Int64.Type}, {"QuantityOnOrder", Int64.Type}, {"QuantitySold", Int64.Type}, {"QuantityReceived", Int64.Type}, {"ReorderFlag", Int64.Type}, {"StockoutFlag", Int64.Type}, {"DaysOutOfStock", Int64.Type}})
+				    ChangedType = Table.TransformColumnTypes(CombineTables,{{"ProductKey", Int64.Type}, {"WarehouseKey", Int64.Type}, {"SnapshotDate", type date}, {"QuantityOnHand", Int64.Type}, {"QuantityOnOrder", Int64.Type}, {"QuantitySold", Int64.Type}, {"QuantityReceived", Int64.Type}, {"ShrinkageQuantity", Int64.Type}, {"ReorderFlag", Int64.Type}, {"StockoutFlag", Int64.Type}, {"DaysOutOfStock", Int64.Type}})
 				in 
 				    ChangedType
 				```

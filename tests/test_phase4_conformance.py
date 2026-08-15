@@ -220,4 +220,24 @@ def test_all_bundled_pbip_templates_package_without_external_paths(
 
     attach_pbip_project(final, template, pbip_dst_name="Project")
 
-    assert not list((final / "Project").rglob("TMDLScripts"))
+    project = final / "Project"
+    assert not list(project.rglob("TMDLScripts"))
+
+    stale_open_flag_metadata = [
+        str(path.relative_to(project))
+        for path in project.rglob("*.tmdl")
+        if "OpenFlag" in path.read_text(encoding="utf-8")
+    ]
+    assert not stale_open_flag_metadata
+
+    relationship_files = list(project.rglob("relationships.tmdl"))
+    assert len(relationship_files) == 1
+    relationships = relationship_files[0].read_text(encoding="utf-8")
+    assert (
+        "fromColumn: EmployeeStoreAssignment.EmployeeKey\n"
+        "\ttoColumn: Employee.EmployeeKey"
+    ) in relationships
+    assert (
+        "fromColumn: EmployeeStoreAssignment.StoreKey\n"
+        "\ttoColumn: Store.StoreKey"
+    ) in relationships

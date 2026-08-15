@@ -77,13 +77,34 @@ table Warehouse
 
 		annotation SummarizationSetBy = Automatic
 
+	column TargetInventoryTurnover
+		dataType: double
+		summarizeBy: none
+		sourceColumn: TargetInventoryTurnover
+
+		annotation SummarizationSetBy = Automatic
+
+	column LastAuditScore
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: LastAuditScore
+
+		annotation SummarizationSetBy = Automatic
+
+	column TargetShrinkageRatePct
+		dataType: double
+		summarizeBy: none
+		sourceColumn: TargetShrinkageRatePct
+
+		annotation SummarizationSetBy = Automatic
 	partition Warehouse = m
 		mode: import
 		queryGroup: Dimensions
 		source =
 				let
 				    Source = FxReadCSVFile ( "dimensions", "warehouses" ),
-				    ChangedType = Table.TransformColumnTypes(Source,{{"WarehouseKey", Int64.Type}, {"WarehouseName", type text}, {"WarehouseType", type text}, {"Zone", type text}, {"Country", type text}, {"Territory", type text}, {"GeographyKey", Int64.Type}, {"Capacity", Int64.Type}, {"SquareFootage", Int64.Type}})
+				    ChangedType = Table.TransformColumnTypes(Source,{{"WarehouseKey", Int64.Type}, {"WarehouseName", type text}, {"WarehouseType", type text}, {"Zone", type text}, {"Country", type text}, {"Territory", type text}, {"GeographyKey", Int64.Type}, {"Capacity", Int64.Type}, {"SquareFootage", Int64.Type}, {"TargetInventoryTurnover", type number}, {"LastAuditScore", Int64.Type}, {"TargetShrinkageRatePct", type number}})
 				in
 				    ChangedType
 

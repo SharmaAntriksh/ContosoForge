@@ -70,12 +70,12 @@ table Employee
 
 		annotation SummarizationSetBy = Automatic
 
-	column StoreKey
+	column HomeStoreKey
 		dataType: int64
 		formatString: 0
 		lineageTag: 4fb15251-0764-4422-aa73-afb6b61ac2e2
 		summarizeBy: count
-		sourceColumn: StoreKey
+		sourceColumn: HomeStoreKey
 
 		annotation SummarizationSetBy = Automatic
 
@@ -158,6 +158,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column FirstName
+		isHidden
 		dataType: string
 		lineageTag: 4a8e05b0-4906-4b4f-9b9a-fd15ffc35ee0
 		summarizeBy: none
@@ -166,6 +167,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column LastName
+		isHidden
 		dataType: string
 		lineageTag: a1caee98-5956-4b28-8522-8201e6fc0c33
 		summarizeBy: none
@@ -174,6 +176,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column MiddleName
+		isHidden
 		dataType: string
 		lineageTag: 759b9e1e-7952-4281-ab70-3b49d7529f48
 		summarizeBy: none
@@ -195,6 +198,7 @@ table Employee
 		annotation PBI_FormatHint = {"isCustom":true}
 
 	column MaritalStatus
+		isHidden
 		dataType: string
 		lineageTag: e8e9a7da-f634-4686-bca3-0c2318057bef
 		summarizeBy: none
@@ -203,6 +207,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column EmailAddress
+		isHidden
 		dataType: string
 		lineageTag: 924a093c-a2b2-47e3-b1d0-910842b1e86b
 		summarizeBy: none
@@ -211,6 +216,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column Phone
+		isHidden
 		dataType: string
 		lineageTag: 9c0ba682-b483-4fc1-a508-39167e09d104
 		summarizeBy: none
@@ -219,6 +225,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column EmergencyContactName
+		isHidden
 		dataType: string
 		lineageTag: 65f43cea-d4c5-43c7-a132-c5769b75e34b
 		summarizeBy: none
@@ -227,6 +234,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column EmergencyContactPhone
+		isHidden
 		dataType: string
 		lineageTag: bc990207-6026-47de-ab4d-a97d0191becc
 		summarizeBy: none
@@ -244,11 +252,19 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column PayFrequency
+		isHidden
 		dataType: int64
 		formatString: 0
 		lineageTag: 934daccf-b174-4a7c-bc20-f004b3b30cf4
 		summarizeBy: sum
 		sourceColumn: PayFrequency
+
+		annotation SummarizationSetBy = Automatic
+
+	column PayFrequencyLabel
+		dataType: string
+		summarizeBy: none
+		sourceColumn: PayFrequencyLabel
 
 		annotation SummarizationSetBy = Automatic
 
@@ -272,6 +288,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column Status
+		isHidden
 		dataType: string
 		lineageTag: 83c16cd0-4d67-40bb-99d0-a587327a5725
 		summarizeBy: none

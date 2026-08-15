@@ -2,7 +2,7 @@
 close-reason backfill, and the narrative StoreDescription. Each helper mutates
 the store DataFrame in place; the RNG draw order matches the original monolith.
 
-``Status`` (and ``OpenFlag``) is an as-of-dataset-end **snapshot**: renovations
+``Status`` is an as-of-dataset-end **snapshot**: renovations
 that finish reopen the store to "Open", and closures flip it to "Closed". It is a
 display label, not a point-in-time truth. Any consumer deciding whether a store
 was open on a specific date must use the dates (``OpeningDate``/``ClosingDate``/
@@ -20,7 +20,6 @@ from src.utils.logging_utils import debug, info, warn
 from src.defaults import (
     STORE_STATUS as _STORE_STATUS,
     STORE_STATUS_P as _STORE_STATUS_P,
-    STORE_CLOSE_REASONS as _CLOSE_REASONS,
     STORE_MIN_OPERATING_DAYS,
     is_physical_store_key,
 )
@@ -75,14 +74,37 @@ def build_store_date_maps(
     return open_dates, close_dates, reno_start_dates, reno_end_dates
 
 
+def build_store_region_lookup(stores: pd.DataFrame) -> Dict[int, str]:
+    """Return StoreKey -> canonical organizational-region identity.
+
+    Structured ``StoreRegionId`` is authoritative when available. The display
+    label remains a compatibility fallback for legacy store frames.
+    """
+    if "StoreRegionId" in stores.columns:
+        region_ids = pd.to_numeric(stores["StoreRegionId"], errors="coerce")
+        return {
+            int(store_key): f"id:{int(region_id)}"
+            for store_key, region_id in zip(stores["StoreKey"], region_ids)
+            if pd.notna(region_id)
+        }
+    if "StoreRegion" in stores.columns:
+        return {
+            int(store_key): f"label:{region}"
+            for store_key, region in zip(stores["StoreKey"], stores["StoreRegion"])
+            if pd.notna(region)
+        }
+    return {}
+
+
 def build_region_store_map(stores: pd.DataFrame) -> Dict[str, List[int]]:
-    """Map StoreRegion -> list of physical StoreKeys."""
+    """Map canonical region identity -> physical StoreKeys."""
     physical = stores[is_physical_store_key(stores["StoreKey"])]
-    if "StoreRegion" not in physical.columns:
-        return {}
+    region_lookup = build_store_region_lookup(physical)
     result: Dict[str, List[int]] = {}
-    for region, grp in physical.groupby("StoreRegion"):
-        result[str(region)] = grp["StoreKey"].tolist()
+    for store_key in physical["StoreKey"].astype(int):
+        region = region_lookup.get(int(store_key))
+        if region is not None:
+            result.setdefault(region, []).append(int(store_key))
     return result
 
 
@@ -120,13 +142,14 @@ def store_open_through_window(
     w_end: pd.Timestamp,
     open_dates: Dict[int, pd.Timestamp],
     close_dates: Dict[int, pd.Timestamp],
+    reno_start_dates: Optional[Dict[int, pd.Timestamp]] = None,
+    reno_end_dates: Optional[Dict[int, pd.Timestamp]] = None,
 ) -> bool:
     """True if *store_key* was open for the whole window ``[w_start, w_end]``.
 
-    A store qualifies iff it opened on or before ``w_start`` and does not close
-    on or before ``w_end``. Renovation is deliberately not considered here — the
-    renovation reassignment excludes renovating stores from its candidate pool
-    before calling this.
+    A store qualifies iff it opened on or before ``w_start``, does not close on
+    or before ``w_end``, and (when renovation maps are supplied) has no closure
+    interval overlapping the requested window.
     """
     op = open_dates.get(store_key)
     if op is not None and pd.notna(op) and op > w_start:
@@ -134,6 +157,11 @@ def store_open_through_window(
     cl = close_dates.get(store_key)
     if cl is not None and pd.notna(cl) and cl <= w_end:
         return False
+    if reno_start_dates and reno_end_dates:
+        rs = reno_start_dates.get(store_key)
+        re = reno_end_dates.get(store_key)
+        if rs is not None and re is not None and rs <= w_end and re > w_start:
+            return False
     return True
 
 
@@ -409,31 +437,83 @@ def assign_renovation_dates(df, rng, *, dataset_start, dataset_end):
 
 
 def backfill_close_reason(df, rng, *, status):
-    closed_mask = status.to_numpy() == "Closed"
-    # CloseReason (must exist before StoreDescription references it)
-    df["CloseReason"] = ""
-    if closed_mask.any():
-        df.loc[closed_mask, "CloseReason"] = rng.choice(
-            _CLOSE_REASONS, size=int(closed_mask.sum()),
-        )
+    """Assign only closure narratives supported by generated store attributes.
 
-        # Stores closed for renovation: backfill RenovationStartDate/EndDate.
-        # Renovation began 30-90 days before ClosingDate; the store never
-        # reopened so RenovationEndDate = ClosingDate.
-        reno_closed = closed_mask & (df["CloseReason"] == "Renovation")
-        n_reno_closed = int(reno_closed.sum())
-        if n_reno_closed > 0:
-            close_ts = pd.to_datetime(df.loc[reno_closed, "ClosingDate"])
-            open_ts = pd.to_datetime(df.loc[reno_closed, "OpeningDate"])
-            lead_days = pd.to_timedelta(rng.integers(30, 91, size=n_reno_closed), unit="D")
-            reno_start_candidate = (close_ts - lead_days).dt.normalize()
-            # Floor at OpeningDate so renovation never starts before the store opens
-            # (matters for stores that closed within ~90 days of opening).
-            reno_start_floored = reno_start_candidate.where(
-                reno_start_candidate >= open_ts, open_ts,
-            )
-            df.loc[reno_closed, "RenovationStartDate"] = reno_start_floored.values
-            df.loc[reno_closed, "RenovationEndDate"] = close_ts.dt.normalize().values
+    ``Low Sales`` is restricted to RevenueClass C (the default sales demand
+    weighting makes that a sustained under-performing cohort). ``Lease Ended``
+    requires leased premises. ``Moved Location`` requires a compatible successor
+    store and records its key. ``Renovation`` creates the corresponding lifecycle
+    window. The unconditional random close-reason draw used previously could make
+    any of these claims without supporting data.
+    """
+    status_series = df["Status"].astype(str) if "Status" in df.columns else status
+    closed_mask = status_series.to_numpy() == "Closed"
+    df["CloseReason"] = ""
+    df["SuccessorStoreKey"] = pd.Series(
+        pd.array([pd.NA] * len(df), dtype="Int32"),
+        index=df.index,
+    )
+    if not closed_mask.any():
+        return
+
+    store_keys = pd.to_numeric(df["StoreKey"], errors="coerce")
+    physical = np.asarray(is_physical_store_key(store_keys.fillna(0).to_numpy()), dtype=bool)
+    opening = pd.to_datetime(df["OpeningDate"], errors="coerce")
+    closing = pd.to_datetime(df["ClosingDate"], errors="coerce")
+
+    for pos in np.flatnonzero(closed_mask):
+        row = df.iloc[pos]
+        row_label = df.index[pos]
+        reasons = ["Renovation"]
+        if str(row.get("RevenueClass", "")) == "C":
+            reasons.append("Low Sales")
+        if str(row.get("OwnershipType", "")) == "Leased":
+            reasons.append("Lease Ended")
+
+        close_date = closing.iloc[pos]
+        successor_key: int | None = None
+        if pd.notna(close_date) and physical[pos]:
+            candidate = physical.copy()
+            candidate[pos] = False
+            candidate &= df["StoreType"].astype(str).to_numpy() == str(row["StoreType"])
+            if "StoreRegionId" in df.columns:
+                candidate &= (
+                    pd.to_numeric(df["StoreRegionId"], errors="coerce").to_numpy()
+                    == pd.to_numeric(row.get("StoreRegionId"), errors="coerce")
+                )
+            elif "StoreRegion" in df.columns:
+                candidate &= df["StoreRegion"].astype(str).to_numpy() == str(row["StoreRegion"])
+
+            candidate &= opening.notna().to_numpy()
+            candidate &= (opening >= close_date - pd.Timedelta(days=365)).to_numpy()
+            candidate &= (opening <= close_date + pd.Timedelta(days=180)).to_numpy()
+            candidate &= (closing.isna() | (closing > close_date)).to_numpy()
+            candidate_pos = np.flatnonzero(candidate)
+            if candidate_pos.size:
+                # Closest opening to the closure, then lowest StoreKey. Stable
+                # ordering avoids an extra RNG draw and survives row reordering.
+                ranked = sorted(
+                    candidate_pos,
+                    key=lambda i: (
+                        abs((opening.iloc[i] - close_date).days),
+                        int(store_keys.iloc[i]),
+                    ),
+                )
+                successor_key = int(store_keys.iloc[ranked[0]])
+                reasons.append("Moved Location")
+
+        reason = reasons[int(rng.integers(0, len(reasons)))]
+        df.at[row_label, "CloseReason"] = reason
+        if reason == "Moved Location":
+            df.at[row_label, "SuccessorStoreKey"] = successor_key
+        elif reason == "Renovation":
+            lead_days = int(rng.integers(30, 91))
+            open_date = opening.iloc[pos]
+            renovation_start = close_date - pd.Timedelta(days=lead_days)
+            if pd.notna(open_date):
+                renovation_start = max(renovation_start, open_date)
+            df.at[row_label, "RenovationStartDate"] = renovation_start.normalize()
+            df.at[row_label, "RenovationEndDate"] = close_date.normalize()
 
 
 def build_store_descriptions(df, *, stype, status, loc_full):

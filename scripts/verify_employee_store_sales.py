@@ -453,29 +453,33 @@ def check_esa(
          f"{inv} violation(s)",
          _sample(esa[sd > ed], ["EmployeeKey", "StoreKey", "StartDate", "EndDate", "TransferReason"]))
 
-    # --- TransferReason / IsPrimary / Status distribution ---
+    # --- TransferReason / current-segment / assignment-status distribution ---
     tr_vc = esa["TransferReason"].value_counts().to_dict()
     _add(cat, "TransferReason distribution", True, str(tr_vc))
 
-    ip_vc = esa["IsPrimary"].value_counts().to_dict()
-    _add(cat, "IsPrimary distribution", True, str(ip_vc))
+    current_vc = esa["IsCurrentAssignment"].value_counts().to_dict()
+    _add(cat, "IsCurrentAssignment distribution", True, str(current_vc))
 
-    # --- Exactly one IsPrimary=True (current/home assignment) per employee ---
-    # "Current store per employee" DAX patterns rely on a single primary row:
-    #   CALCULATE(VALUES(ESA[StoreKey]), ESA[IsPrimary]=TRUE())
-    # A second primary at a different store makes VALUES return >1 row and errors.
-    prim = esa[esa["IsPrimary"].astype(bool)].groupby("EmployeeKey")
-    multi_primary = int((prim.size() > 1).sum())
-    multi_primary_store = int((prim["StoreKey"].nunique() > 1).sum())
-    _add(cat, "Exactly one IsPrimary=True per employee",
-         multi_primary == 0,
-         f"{multi_primary} employee(s) with >1 primary row "
-         f"({multi_primary_store} at >1 distinct store)")
+    # --- Exactly one latest effective segment per employee ---
+    # "Current store per employee" DAX patterns rely on a single current row:
+    #   CALCULATE(VALUES(ESA[StoreKey]), ESA[IsCurrentAssignment]=TRUE())
+    # A second current row at a different store makes VALUES return >1 row and errors.
+    current = esa[esa["IsCurrentAssignment"].astype(bool)].groupby("EmployeeKey")
+    current_counts = current.size()
+    invalid_current = int((current_counts != 1).sum())
+    current_employees = set(current_counts.index)
+    missing_current = int(esa["EmployeeKey"].nunique() - len(current_employees))
+    invalid_current += missing_current
+    multi_current_store = int((current["StoreKey"].nunique() > 1).sum())
+    _add(cat, "Exactly one IsCurrentAssignment=True per employee",
+         invalid_current == 0,
+         f"{invalid_current} employee(s) without exactly one current row "
+         f"({multi_current_store} at >1 distinct store)")
 
-    st_vc = esa["Status"].astype(str).value_counts().to_dict()
-    _add(cat, "Status distribution", True, str(st_vc))
+    st_vc = esa["AssignmentStatus"].astype(str).value_counts().to_dict()
+    _add(cat, "AssignmentStatus distribution", True, str(st_vc))
 
-    # --- Shared renovation lookups for IsPrimary + segment checks ---
+    # --- Shared renovation lookups for current-segment + segment checks ---
     reno_store_keys = set(
         stores.loc[
             stores["RenovationStartDate"].notna(), "StoreKey"
@@ -505,22 +509,28 @@ def check_esa(
         """
         return _emp_to_reno_store.get(ek, -1)
 
-    # --- Renovation Reassignment IsPrimary rules ---
-    # Temporary renovation (store reopens): IsPrimary must be False.
-    # Permanent closure renovation (store closed): IsPrimary must be True.
+    # --- Renovation Reassignment current-segment rules ---
+    # Temporary renovation (store reopens): IsCurrentAssignment must be False.
+    # Permanent closure renovation (store closed): IsCurrentAssignment must be True.
     rr = esa[esa["TransferReason"] == "Renovation Reassignment"]
     if len(rr) > 0:
         rr_source = rr["EmployeeKey"].astype(int).apply(_find_source_reno_store)
         rr_from_closed = rr_source.isin(closed_reno_keys)
 
-        # Temp reno (store reopens): IsPrimary must be False
+        # Temp reno (store reopens): IsCurrentAssignment must be False
         temp_rr = rr[~rr_from_closed]
-        bad_temp = (temp_rr["IsPrimary"].astype(int) == 1).sum() if len(temp_rr) > 0 else 0
-        # Permanent reno (store closed): IsPrimary must be True
+        bad_temp = (
+            (temp_rr["IsCurrentAssignment"].astype(int) == 1).sum()
+            if len(temp_rr) > 0 else 0
+        )
+        # Permanent reno (store closed): IsCurrentAssignment must be True
         perm_rr = rr[rr_from_closed]
-        bad_perm = (perm_rr["IsPrimary"].astype(int) == 0).sum() if len(perm_rr) > 0 else 0
+        bad_perm = (
+            (perm_rr["IsCurrentAssignment"].astype(int) == 0).sum()
+            if len(perm_rr) > 0 else 0
+        )
 
-        _add(cat, "Renovation Reassignment IsPrimary rules",
+        _add(cat, "Renovation Reassignment current-segment rules",
              bad_temp == 0 and bad_perm == 0,
              f"{len(temp_rr)} temp (should be False): {bad_temp} violation(s), "
              f"{len(perm_rr)} permanent (should be True): {bad_perm} violation(s)")

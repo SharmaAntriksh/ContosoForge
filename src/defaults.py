@@ -103,16 +103,25 @@ STORE_DEFAULT_FORMATS: tuple[list[str], list[float]] = (["Standard", "Express"],
 # OwnershipType — choices and probabilities keyed by StoreType
 STORE_OWNERSHIP_TYPES: dict[str, tuple[list[str], list[float]]] = {
     "Online":      (["Corporate", "Licensed"],              [0.70, 0.30]),
-    "Hypermarket": (["Corporate", "Franchise", "Licensed"], [0.80, 0.15, 0.05]),
-    "Supermarket": (["Corporate", "Franchise", "Licensed"], [0.50, 0.35, 0.15]),
-    "Convenience": (["Corporate", "Franchise", "Licensed"], [0.30, 0.50, 0.20]),
+    "Hypermarket": (["Corporate", "Franchise", "Licensed", "Leased"], [0.70, 0.15, 0.05, 0.10]),
+    "Supermarket": (["Corporate", "Franchise", "Licensed", "Leased"], [0.45, 0.30, 0.10, 0.15]),
+    "Convenience": (["Corporate", "Franchise", "Licensed", "Leased"], [0.25, 0.45, 0.15, 0.15]),
 }
 STORE_DEFAULT_OWNERSHIP: tuple[list[str], list[float]] = (
-    ["Corporate", "Franchise", "Licensed"], [0.50, 0.35, 0.15],
+    ["Corporate", "Franchise", "Licensed", "Leased"], [0.45, 0.30, 0.10, 0.15],
 )
 
 STORE_REVENUE_CLASSES = np.array(["A", "B", "C"], dtype=object)
 STORE_REVENUE_CLASSES_P = np.array([0.20, 0.60, 0.20], dtype=float)
+
+# Physical footprint defaults by store type. Online stores are stamped to zero
+# by the generator because they have no customer-facing physical location.
+STORE_SQUARE_FOOTAGE_RANGES: Dict[str, Tuple[int, int]] = {
+    "Convenience": (1_500, 5_000),
+    "Supermarket": (15_000, 60_000),
+    "Hypermarket": (80_000, 200_000),
+}
+STORE_SQUARE_FOOTAGE_DEFAULT: Tuple[int, int] = (5_000, 60_000)
 
 # Store-type staffing ranges: (min_staff, max_staff) per store type.
 # Used by stores.py to set EmployeeCount; employees.py reads that column directly.
@@ -123,6 +132,28 @@ STORE_STAFFING_RANGES: Dict[str, Tuple[int, int]] = {
 }
 # Fallback for store types not listed above
 STORE_STAFFING_DEFAULT: Tuple[int, int] = (2, 6)
+
+# Planned staffing is driven primarily by selling area, then adjusted for the
+# operating model. Values are employees per 1,000 square feet and multiplicative
+# policy factors; the final result is clipped to STORE_STAFFING_RANGES.
+STORE_STAFFING_PER_1000_SQFT: Dict[str, float] = {
+    "Convenience": 1.20,
+    "Supermarket": 0.40,
+    "Hypermarket": 0.20,
+}
+STORE_STAFFING_DENSITY_DEFAULT: float = 0.40
+STORE_FORMAT_STAFFING_MULTIPLIER: Dict[str, float] = {
+    "Flagship": 1.12,
+    "Standard": 1.00,
+    "Express": 0.85,
+    "Drive-Thru": 1.05,
+    "Digital": 1.00,
+}
+STORE_OWNERSHIP_STAFFING_MULTIPLIER: Dict[str, float] = {
+    "Corporate": 1.08,
+    "Franchise": 1.00,
+    "Licensed": 0.92,
+}
 
 # Minimum EmployeeCount for a physical store: 1 store manager + >= 1
 # salesperson. Sales emits EmployeeKey=-1 (an orphan FK that breaks the
@@ -139,16 +170,6 @@ MIN_PHYSICAL_EMPLOYEE_COUNT: int = 2
 # or tier; classify employees by the OrgLevel/OrgUnitType/StoreKey columns.)
 ONLINE_STORE_KEY_BASE: int = 10_000
 ONLINE_SALES_REP_ROLE: str = "Online Sales Representative"
-
-# Weight multiplier applied to a store's primary ("anchor") salesperson relative
-# to non-primary staff when sampling which salesperson is credited with a sale:
-# a primary rep at FTE 1.0 is this many times as likely to be picked as a
-# non-primary rep at the same FTE. Single source for the sales salesperson
-# weighting build path (facts/sales) — both the coordinator prebuild
-# (_prebuild_shared_structures) and the worker-side builder
-# (_build_salesperson_effective_by_store) read it, so the two can never drift.
-SALESPERSON_PRIMARY_BOOST: float = 2.0
-
 
 def is_online_store_key(sk):
     """Online iff StoreKey > ONLINE_STORE_KEY_BASE (online keys start at BASE+1).
@@ -173,6 +194,23 @@ WAREHOUSE_TYPES: Tuple[str, ...] = (
     "Fulfillment Center",
 )
 WAREHOUSE_TYPES_P: Tuple[float, ...] = (0.50, 0.30, 0.20)
+
+# Warehouse operating targets live at the same grain as InventorySnapshot.
+# Target turnover controls initial stock coverage in the inventory engine;
+# audit score feeds the shrinkage target, which in turn drives emitted shrinkage.
+WAREHOUSE_TURNOVER_TARGET_RANGES: Dict[str, Tuple[float, float]] = {
+    "Distribution Center": (5.0, 8.0),
+    "Regional Hub": (6.0, 10.0),
+    "Fulfillment Center": (8.0, 14.0),
+}
+WAREHOUSE_TURNOVER_TARGET_DEFAULT: Tuple[float, float] = (5.0, 10.0)
+WAREHOUSE_SHRINKAGE_BASE_PCT: Dict[str, float] = {
+    "Distribution Center": 0.70,
+    "Regional Hub": 0.90,
+    "Fulfillment Center": 0.45,
+}
+WAREHOUSE_SHRINKAGE_BASE_PCT_DEFAULT: float = 0.75
+WAREHOUSE_SHRINKAGE_AUDIT_PENALTY_PCT: float = 0.035
 
 # Sub-national region labels for warehouse naming (US states -> region name)
 US_STATE_REGIONS: Dict[str, str] = {
@@ -315,16 +353,14 @@ if abs(EMPLOYEE_TERMINATION_REASON_PROBS.sum() - 1.0) > 1e-9:
         f"EMPLOYEE_TERMINATION_REASON_PROBS must sum to 1.0, got {EMPLOYEE_TERMINATION_REASON_PROBS.sum()}"
     )
 
-# Transfer reasons for non-primary (away) assignments
+# Causal transfer reasons emitted by the mobility engine. Unsupported narrative
+# labels (seasonal support and performance) are deliberately not emitted until
+# the generator has a temporary-return segment or a published performance signal.
 EMPLOYEE_TRANSFER_REASON_LABELS = np.array(
-    ["Seasonal Support", "New Store Opening", "Backfill", "Employee Request", "Performance"],
+    ["New Store Opening", "Backfill", "Employee Request"],
     dtype=object,
 )
-EMPLOYEE_TRANSFER_REASON_PROBS = np.array([0.30, 0.20, 0.25, 0.15, 0.10], dtype=np.float64)
-if abs(EMPLOYEE_TRANSFER_REASON_PROBS.sum() - 1.0) > 1e-9:
-    raise ValidationError(
-        f"EMPLOYEE_TRANSFER_REASON_PROBS must sum to 1.0, got {EMPLOYEE_TRANSFER_REASON_PROBS.sum()}"
-    )
+EMPLOYEE_NEW_STORE_TRANSFER_WINDOW_DAYS = 90
 
 
 # =================================================================

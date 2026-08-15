@@ -69,6 +69,42 @@ model or validating a generated dataset.
   and capped at 30 for monthly grain (90 after quarterly aggregation).
 - A stockout always has at least one out-of-stock day; a non-stockout has zero.
 
+## Stores and workforce
+
+- `Stores.StoreDistrictId` and `Stores.StoreRegionId` are the authoritative
+  organizational identities. `StoreDistrict` and `StoreRegion` are display
+  labels derived from those integer IDs. A district and region never cross a
+  country-within-zone boundary.
+- `Employees.HomeStoreKey` is the employee's dataset-end home-location
+  snapshot. It is not a historical join key. Use
+  `EmployeeStoreAssignments.StoreKey` with the inclusive condition
+  `StartDate <= AsOfDate <= EndDate` for point-in-time location, role, and FTE.
+- An assigned employee has exactly one `IsCurrentAssignment = true` segment.
+  Consecutive inclusive assignment segments are contiguous: the next segment
+  starts one day after the previous segment ends.
+- Corporate employees have null region, district, home-store, and geography
+  keys. Regional managers carry only a region; district managers carry region
+  and district; store-level employees carry the full home-store hierarchy.
+- `Stores.EmployeeCount` remains the planned roster size for compatibility.
+  Actual current headcount and FTE come from current active assignment rows and
+  are published separately by `vw_StoreStaffingActualVsPlan`.
+- Store transaction actuals are fact-derived in `vw_StoreSalesActuals`.
+  Warehouse `TargetInventoryTurnover` and `TargetShrinkageRatePct` are targets;
+  `InventorySnapshot.ShrinkageQuantity` is the observed generated outcome.
+
+Generated SQL publishes `vw_EmployeeAssignmentHistory`,
+`vw_CurrentEmployeesByStore`, `vw_EffectiveSalespersonAssignment`,
+`vw_CurrentStoreManager`, and `vw_StoreStaffingActualVsPlan` for both SQL Server
+and PostgreSQL. The PascalCase and snake_case import bundles are rendered from
+the same view roster. CSV and Parquet Power BI models relate the assignment
+bridge to Employee and Store so home-store and effective-store analysis remain
+distinct.
+
+The packaged quality report enforces the assignment timeline and salesperson
+as-of joins, workforce hierarchy/location contracts, country-bounded store
+rollups, management/FTE/department policies, employee lifecycle consistency,
+store closure causality, and the associated primary and foreign keys.
+
 ## Currency and geography
 
 - Geography `ISOCode` contains the local three-letter currency code used to join

@@ -59,7 +59,6 @@ class EmployeeBridge:
     employee_assign_end_date: np.ndarray
     employee_assign_role: np.ndarray
     employee_assign_fte: Optional[np.ndarray]
-    employee_assign_is_primary: Optional[np.ndarray]
     salesperson_roles: List[str]
 
 

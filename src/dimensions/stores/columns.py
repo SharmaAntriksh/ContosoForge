@@ -6,11 +6,17 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from src.utils.logging_utils import debug, warn
+from src.utils.logging_utils import debug
 from src.utils.config_helpers import range2
 from src.defaults import (
     STORE_STAFFING_RANGES as _STAFFING_RANGES,
     STORE_STAFFING_DEFAULT as _STAFFING_DEFAULT,
+    STORE_SQUARE_FOOTAGE_RANGES as _SQUARE_FOOTAGE_RANGES,
+    STORE_SQUARE_FOOTAGE_DEFAULT as _SQUARE_FOOTAGE_DEFAULT,
+    STORE_STAFFING_PER_1000_SQFT as _STAFFING_DENSITY,
+    STORE_STAFFING_DENSITY_DEFAULT as _STAFFING_DENSITY_DEFAULT,
+    STORE_FORMAT_STAFFING_MULTIPLIER as _FORMAT_STAFFING_MULTIPLIER,
+    STORE_OWNERSHIP_STAFFING_MULTIPLIER as _OWNERSHIP_STAFFING_MULTIPLIER,
     MIN_PHYSICAL_EMPLOYEE_COUNT as _MIN_PHYSICAL_EMP,
     STORE_ISO_TO_ZONE as _ISO_TO_ZONE,
     STORE_EU_COUNTRY_CODES as _EU_COUNTRY_CODES,
@@ -59,14 +65,25 @@ def _square_footage_from_cfg(
           Supermarket: [15000, 80000]
           ...
     """
-    default_lo, default_hi = range2(sqft_cfg.get("default"), 5000.0, 60000.0)
+    explicit_default = sqft_cfg.get("default")
+    default_lo, default_hi = range2(
+        explicit_default,
+        float(_SQUARE_FOOTAGE_DEFAULT[0]),
+        float(_SQUARE_FOOTAGE_DEFAULT[1]),
+    )
 
     # Use zeros so the missing-mask fallback (`out == 0`) is reliable
     out = np.zeros(n, dtype=np.int64)
     st = store_type.astype(str).to_numpy()
 
     for t in np.unique(st):
-        lo, hi = range2(sqft_cfg.get(t), default_lo, default_hi)
+        if t in sqft_cfg:
+            lo, hi = range2(sqft_cfg.get(t), default_lo, default_hi)
+        elif explicit_default is not None:
+            lo, hi = default_lo, default_hi
+        else:
+            built_in = _SQUARE_FOOTAGE_RANGES.get(t, _SQUARE_FOOTAGE_DEFAULT)
+            lo, hi = float(built_in[0]), float(built_in[1])
         mask = st == t
         if mask.any():
             vals = rng.uniform(lo, hi, size=int(mask.sum()))
@@ -84,12 +101,17 @@ def _employee_count_by_store_type(
     *,
     rng: np.random.Generator,
     store_type: pd.Series,
+    square_footage: Optional[pd.Series] = None,
+    store_format: Optional[pd.Series] = None,
+    ownership_type: Optional[pd.Series] = None,
     staffing_overrides: Optional[Dict] = None,
 ) -> np.ndarray:
-    """Assign EmployeeCount based on store type staffing ranges.
+    """Assign planned EmployeeCount from footprint and operating model.
 
     Uses ``STORE_STAFFING_RANGES`` from defaults, with optional per-type
-    overrides from ``stores.staffing_ranges`` in config.yaml.
+    overrides from ``stores.staffing_ranges`` in config.yaml. Within those
+    guardrails, square footage is the primary driver; StoreFormat and
+    OwnershipType apply modest, documented operating-model adjustments.
     Online stores are always 1 (one online sales representative).
     Closed stores keep their operational count so employees exist
     during the store's open period.
@@ -108,10 +130,51 @@ def _employee_count_by_store_type(
     n = len(st)
     out = np.zeros(n, dtype=np.int64)
 
+    sqft = (
+        pd.to_numeric(square_footage, errors="coerce").fillna(0).to_numpy(dtype=np.float64)
+        if square_footage is not None
+        else None
+    )
+    formats = (
+        store_format.astype(str).to_numpy()
+        if store_format is not None
+        else np.full(n, "Standard", dtype=object)
+    )
+    ownership = (
+        ownership_type.astype(str).to_numpy()
+        if ownership_type is not None
+        else np.full(n, "Franchise", dtype=object)
+    )
+
     for stype in np.unique(st):
         mask = st == stype
         lo, hi = ranges.get(stype, _STAFFING_DEFAULT)
-        out[mask] = rng.integers(lo, hi + 1, size=int(mask.sum()))
+        count = int(mask.sum())
+        if stype == "Online":
+            out[mask] = 1
+            continue
+        if sqft is None:
+            out[mask] = rng.integers(lo, hi + 1, size=count)
+            continue
+
+        density = float(_STAFFING_DENSITY.get(stype, _STAFFING_DENSITY_DEFAULT))
+        format_mult = np.array(
+            [_FORMAT_STAFFING_MULTIPLIER.get(str(value), 1.0) for value in formats[mask]],
+            dtype=np.float64,
+        )
+        ownership_mult = np.array(
+            [_OWNERSHIP_STAFFING_MULTIPLIER.get(str(value), 1.0) for value in ownership[mask]],
+            dtype=np.float64,
+        )
+        operating_noise = np.clip(rng.normal(1.0, 0.04, size=count), 0.90, 1.10)
+        target = (
+            sqft[mask] / 1_000.0
+            * density
+            * format_mult
+            * ownership_mult
+            * operating_noise
+        )
+        out[mask] = np.clip(np.rint(target), lo, hi).astype(np.int64)
 
     # Physical stores must have >= MIN_PHYSICAL_EMPLOYEE_COUNT (manager + >= 1
     # salesperson) so every store keeps salesperson coverage and EmployeeCount
@@ -188,15 +251,18 @@ def _build_hierarchy(
     country_by_geo: Optional[dict[int, str]] = None,
     district_size: int = 10,
     districts_per_region: int = 8,
+    store_keys: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Derive (StoreZone, StoreDistrict, StoreRegion, district_id, region_id)
     from GeographyKey + ISOCode.
 
-    Districts are assigned per *country within zone* so that stores in
+    Districts and regions are assigned per *country within zone* so stores in
     different countries (e.g. China vs Australia) never share a district,
-    even when they belong to the same zone ("Asia Pacific").  Region IDs
-    roll up districts using ``districts_per_region``.
+    or a region, even when they belong to the same zone ("Asia Pacific").
+    Within each country, stores are ordered by ``(GeographyKey, StoreKey)`` so
+    input row order cannot silently redefine the management hierarchy. Region
+    and district IDs remain globally unique integer surrogate identities.
 
     The ``district_id`` / ``region_id`` int32 arrays are the structured truth;
     the ``StoreDistrict`` / ``StoreRegion`` strings are display renderings of
@@ -204,6 +270,13 @@ def _build_hierarchy(
     reverse-parsing the strings.
     """
     n = len(geo_keys)
+    geo_keys = np.asarray(geo_keys, dtype=np.int64)
+    if store_keys is None:
+        store_keys = np.arange(1, n + 1, dtype=np.int64)
+    else:
+        store_keys = np.asarray(store_keys, dtype=np.int64)
+        if len(store_keys) != n:
+            raise ValueError("store_keys must align with geo_keys")
     zones = np.empty(n, dtype=object)
 
     if iso_by_geo:
@@ -222,7 +295,9 @@ def _build_hierarchy(
 
     # Assign districts: iterate zone → country within zone → sequential IDs
     district_id = np.zeros(n, dtype=np.int32)
+    region_id = np.zeros(n, dtype=np.int32)
     next_did = 1
+    next_rid = 1
     for z in sorted(np.unique(zones)):
         z_mask = zones == z
         z_countries = countries[z_mask]
@@ -231,11 +306,22 @@ def _build_hierarchy(
         for c in sorted(np.unique(z_countries)):
             c_local = z_countries == c
             idx = z_idx[c_local]
+            idx = idx[np.lexsort((store_keys[idx], geo_keys[idx]))]
             local_did = np.arange(len(idx)) // district_size
             district_id[idx] = (local_did + next_did).astype(np.int32)
-            next_did += int(local_did.max()) + 1 if len(idx) > 0 else 1
-
-    region_id = ((district_id - 1) // districts_per_region + 1).astype(np.int32)
+            n_districts = int(local_did.max()) + 1 if len(idx) > 0 else 0
+            local_rid_by_district = (
+                np.arange(n_districts, dtype=np.int32) // districts_per_region
+            )
+            region_id[idx] = (
+                local_rid_by_district[local_did] + next_rid
+            ).astype(np.int32)
+            next_did += n_districts
+            next_rid += (
+                int(local_rid_by_district.max()) + 1
+                if n_districts > 0
+                else 0
+            )
 
     store_districts = np.char.add("District ", district_id.astype(str))
     store_regions   = np.char.add("Region ", region_id.astype(str))
@@ -266,78 +352,3 @@ def _build_emails(
     return out
 
 
-def _build_analytical(
-    rng: np.random.Generator,
-    store_type: pd.Series,
-    revenue_class: np.ndarray,
-    n: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Generate five analytical columns:
-      AvgTransactionValue, CustomerSatisfactionScore,
-      InventoryTurnoverTarget, LastAuditScore, ShrinkageRatePct
-
-    All values are correlated with StoreType and/or RevenueClass.
-    """
-    st = store_type.astype(str).to_numpy()
-    rc = np.asarray(revenue_class, dtype=object)
-
-    # AvgTransactionValue — base ranges by type, then adjusted for revenue class
-    atv_base = np.zeros(n, dtype=np.float64)
-    for t in np.unique(st):
-        mask = st == t
-        cnt = int(mask.sum())
-        if t == "Hypermarket":
-            atv_base[mask] = rng.uniform(80.0, 250.0, cnt)
-        elif t == "Supermarket":
-            atv_base[mask] = rng.uniform(40.0, 120.0, cnt)
-        elif t == "Convenience":
-            atv_base[mask] = rng.uniform(10.0, 30.0, cnt)
-        elif t == "Online":
-            atv_base[mask] = rng.uniform(50.0, 200.0, cnt)
-        else:
-            warn(f"Unknown StoreType {t!r} in AvgTransactionValue; using Supermarket range.")
-            atv_base[mask] = rng.uniform(40.0, 120.0, cnt)
-
-    rc_mult = np.where(rc == "A", 1.30, np.where(rc == "C", 0.80, 1.00))
-    avg_transaction = np.round(atv_base * rc_mult, 2)
-
-    # CustomerSatisfactionScore — 1.0-10.0, positive skew via beta distribution
-    raw_csat = rng.beta(a=6, b=2, size=n)
-    csat = np.round(1.0 + raw_csat * 9.0, 1)
-
-    # InventoryTurnoverTarget — turns/year, varies by store type
-    inv_turn = np.zeros(n, dtype=np.float64)
-    for t in np.unique(st):
-        mask = st == t
-        cnt = int(mask.sum())
-        if t == "Hypermarket":
-            inv_turn[mask] = rng.uniform(15.0, 25.0, cnt)
-        elif t == "Supermarket":
-            inv_turn[mask] = rng.uniform(18.0, 30.0, cnt)
-        elif t == "Convenience":
-            inv_turn[mask] = rng.uniform(30.0, 50.0, cnt)
-        elif t == "Online":
-            inv_turn[mask] = rng.uniform(20.0, 40.0, cnt)
-        else:
-            warn(f"Unknown StoreType {t!r} in InventoryTurnoverTarget; using Supermarket range.")
-            inv_turn[mask] = rng.uniform(18.0, 30.0, cnt)
-    inv_turn = np.round(inv_turn, 1)
-
-    # LastAuditScore — integer 50-100
-    audit = rng.integers(50, 101, size=n, dtype=np.int64)
-
-    # ShrinkageRatePct — Convenience is higher risk; Online is lower
-    shrink = np.zeros(n, dtype=np.float64)
-    for t in np.unique(st):
-        mask = st == t
-        cnt = int(mask.sum())
-        if t == "Convenience":
-            shrink[mask] = rng.uniform(1.5, 4.0, cnt)
-        elif t == "Online":
-            shrink[mask] = rng.uniform(0.2, 1.0, cnt)
-        else:  # Supermarket, Hypermarket, or any future type
-            shrink[mask] = rng.uniform(0.5, 2.5, cnt)
-    shrink = np.round(shrink, 2)
-
-    return avg_transaction, csat, inv_turn, audit, shrink

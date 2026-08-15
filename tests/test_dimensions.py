@@ -20,6 +20,8 @@ from src.exceptions import DimensionError
 # Stores
 # ---------------------------------------------------------------------------
 from src.dimensions.stores import generate_store_table
+from src.dimensions.stores.columns import _build_hierarchy
+from src.dimensions.stores.geo import _geography_signature
 from src.dimensions.stores.generator import GeoContext
 
 # ---------------------------------------------------------------------------
@@ -106,13 +108,11 @@ class TestGenerateStoreTable:
         "StoreDistrictId", "StoreRegionId",
         "OpeningDate", "ClosingDate",
         "RenovationStartDate", "RenovationEndDate",
-        "OpenFlag", "SquareFootage",
+        "SquareFootage",
         "EmployeeCount", "StoreManager",
         "StoreManagerFirstName", "StoreManagerLastName",
         "Phone", "StoreEmail",
-        "StoreDescription", "CloseReason",
-        "AvgTransactionValue", "CustomerSatisfactionScore",
-        "InventoryTurnoverTarget", "LastAuditScore", "ShrinkageRatePct",
+        "StoreDescription", "CloseReason", "SuccessorStoreKey",
     ]
 
     def test_basic_output_shape(self, geo_keys):
@@ -132,6 +132,115 @@ class TestGenerateStoreTable:
     def test_store_key_unique(self, geo_keys):
         df = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=50, seed=1)
         assert df["StoreKey"].is_unique
+
+    def test_geography_input_order_does_not_change_store_hierarchy(self):
+        geo_keys = np.arange(1, 9, dtype=np.int64)
+        iso_by_geo = {key: "EUR" for key in geo_keys}
+        country_by_geo = {
+            **{key: "Alpha" for key in geo_keys[:3]},
+            **{key: "Beta" for key in geo_keys[3:]},
+        }
+        base_geo = GeoContext(
+            geo_keys=geo_keys,
+            iso_by_geo=iso_by_geo,
+            country_by_geo=country_by_geo,
+        )
+        reordered_geo = GeoContext(
+            geo_keys=geo_keys[[5, 1, 7, 0, 3, 6, 2, 4]],
+            iso_by_geo=iso_by_geo,
+            country_by_geo=country_by_geo,
+        )
+
+        left = generate_store_table(
+            geo=base_geo,
+            num_stores=30,
+            seed=91,
+            district_size=2,
+            districts_per_region=3,
+        )
+        right = generate_store_table(
+            geo=reordered_geo,
+            num_stores=30,
+            seed=91,
+            district_size=2,
+            districts_per_region=3,
+        )
+
+        cols = [
+            "StoreKey", "GeographyKey", "StoreZone",
+            "StoreDistrictId", "StoreRegionId",
+        ]
+        pd.testing.assert_frame_equal(left[cols], right[cols])
+    def test_regions_do_not_cross_country_boundary(self):
+        geo_keys = np.arange(1, 9, dtype=np.int64)
+        store_keys = np.arange(101, 109, dtype=np.int32)
+        iso_by_geo = {key: "EUR" for key in geo_keys}
+        country_by_geo = {
+            **{key: "Alpha" for key in geo_keys[:3]},
+            **{key: "Beta" for key in geo_keys[3:]},
+        }
+
+        _, _, _, district_id, region_id = _build_hierarchy(
+            geo_keys=geo_keys,
+            store_keys=store_keys,
+            iso_by_geo=iso_by_geo,
+            country_by_geo=country_by_geo,
+            district_size=2,
+            districts_per_region=3,
+        )
+        countries = pd.Series([country_by_geo[int(key)] for key in geo_keys])
+        hierarchy = pd.DataFrame({
+            "Country": countries,
+            "DistrictId": district_id,
+            "RegionId": region_id,
+        })
+
+        assert hierarchy.groupby("DistrictId")["Country"].nunique().max() == 1
+        assert hierarchy.groupby("RegionId")["Country"].nunique().max() == 1
+
+    def test_ids_are_stable_when_store_rows_are_reordered(self):
+        geo_keys = np.array([4, 1, 5, 2, 6, 3, 7, 8], dtype=np.int64)
+        store_keys = np.arange(201, 209, dtype=np.int32)
+        iso_by_geo = {key: "EUR" for key in range(1, 9)}
+        country_by_geo = {
+            **{key: "Alpha" for key in range(1, 4)},
+            **{key: "Beta" for key in range(4, 9)},
+        }
+
+        def hierarchy_map(order: np.ndarray) -> dict[int, tuple[int, int]]:
+            _, _, _, district_id, region_id = _build_hierarchy(
+                geo_keys=geo_keys[order],
+                store_keys=store_keys[order],
+                iso_by_geo=iso_by_geo,
+                country_by_geo=country_by_geo,
+                district_size=2,
+                districts_per_region=2,
+            )
+            return {
+                int(store_key): (int(district), int(region))
+                for store_key, district, region in zip(
+                    store_keys[order], district_id, region_id,
+                )
+            }
+
+        natural = np.arange(len(store_keys))
+        shuffled = np.array([6, 1, 4, 0, 7, 3, 5, 2])
+        assert hierarchy_map(natural) == hierarchy_map(shuffled)
+
+    def test_geography_version_signature_tracks_country_identity(self):
+        geography = pd.DataFrame({
+            "GeographyKey": [1, 2],
+            "City": ["A", "B"],
+            "ISOCode": ["EUR", "EUR"],
+            "Country": ["Alpha", "Beta"],
+        })
+        changed = geography.copy()
+        changed.loc[changed["GeographyKey"] == 2, "Country"] = "Alpha"
+
+        assert _geography_signature(geography) != _geography_signature(changed)
+        assert _geography_signature(geography) == _geography_signature(
+            geography.iloc[::-1].reset_index(drop=True)
+        )
 
     def test_determinism(self, geo_keys):
         df1 = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=30, seed=99)
@@ -165,7 +274,7 @@ class TestGenerateStoreTable:
         df = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=30, seed=1)
         required = [
             "StoreKey", "StoreNumber", "StoreName", "StoreType", "Status",
-            "GeographyKey", "OpeningDate", "OpenFlag", "SquareFootage",
+            "GeographyKey", "OpeningDate", "SquareFootage",
             "EmployeeCount", "StoreManager",
         ]
         for col in required:
@@ -177,11 +286,10 @@ class TestGenerateStoreTable:
         assigned = set(df["GeographyKey"].astype(np.int64).tolist())
         assert assigned.issubset(valid_keys)
 
-    def test_open_flag_matches_status(self, geo_keys):
+    def test_status_is_the_only_store_snapshot_indicator(self, geo_keys):
         df = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=100, seed=1)
-        open_flag = df["OpenFlag"].astype(int)
-        status_open = (df["Status"] == "Open").astype(int)
-        pd.testing.assert_series_equal(open_flag, status_open, check_names=False)
+        assert "OpenFlag" not in df.columns
+        assert set(df["Status"].astype(str)).issubset({"Open", "Closed", "Renovating"})
 
     def test_closing_date_only_for_closed(self, geo_keys):
         df = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=100, seed=1)
@@ -242,6 +350,67 @@ class TestGenerateStoreTable:
         df = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=30, seed=1)
         assert (df["SquareFootage"] > 0).all()
 
+    def test_square_footage_uses_store_type_defaults(self, geo_keys):
+        df = generate_store_table(
+            geo=GeoContext(geo_keys=geo_keys),
+            num_stores=2_000,
+            seed=17,
+            online_stores=0,
+        )
+        expected_ranges = {
+            "Convenience": (1_500, 5_000),
+            "Supermarket": (15_000, 60_000),
+            "Hypermarket": (80_000, 200_000),
+        }
+        assert set(expected_ranges).issubset(set(df["StoreType"]))
+        for store_type, (low, high) in expected_ranges.items():
+            sqft = df.loc[df["StoreType"] == store_type, "SquareFootage"]
+            assert sqft.between(low, high).all(), store_type
+
+    def test_planned_staffing_correlates_with_size_within_type(self, geo_keys):
+        df = generate_store_table(
+            geo=GeoContext(geo_keys=geo_keys),
+            num_stores=2_000,
+            seed=19,
+            online_stores=0,
+        )
+        for store_type, group in df.groupby("StoreType"):
+            correlation = group["SquareFootage"].rank().corr(
+                group["EmployeeCount"].rank()
+            )
+            assert correlation > 0.55, (store_type, correlation)
+
+    def test_format_and_ownership_influence_staffing(self):
+        from src.dimensions.stores.columns import _employee_count_by_store_type
+
+        n = 400
+        store_type = pd.Series(["Supermarket"] * (n * 3))
+        square_footage = pd.Series([35_000] * (n * 3))
+
+        format_counts = _employee_count_by_store_type(
+            rng=np.random.default_rng(23),
+            store_type=store_type,
+            square_footage=square_footage,
+            store_format=pd.Series(
+                ["Flagship"] * n + ["Standard"] * n + ["Express"] * n
+            ),
+            ownership_type=pd.Series(["Franchise"] * (n * 3)),
+        )
+        assert format_counts[:n].mean() > format_counts[n:2 * n].mean()
+        assert format_counts[n:2 * n].mean() > format_counts[2 * n:].mean()
+
+        ownership_counts = _employee_count_by_store_type(
+            rng=np.random.default_rng(29),
+            store_type=store_type,
+            square_footage=square_footage,
+            store_format=pd.Series(["Standard"] * (n * 3)),
+            ownership_type=pd.Series(
+                ["Corporate"] * n + ["Franchise"] * n + ["Licensed"] * n
+            ),
+        )
+        assert ownership_counts[:n].mean() > ownership_counts[n:2 * n].mean()
+        assert ownership_counts[n:2 * n].mean() > ownership_counts[2 * n:].mean()
+
     def test_employee_count_positive(self, geo_keys):
         """All stores get positive EmployeeCount (closed stores keep operational count)."""
         df = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=30, seed=1)
@@ -267,13 +436,13 @@ class TestGenerateStoreTable:
         # Should have at least 3 distinct ISO codes
         assert len(iso_used) >= 3
 
-    def test_analytical_columns_ranges(self, geo_keys):
+    def test_disconnected_analytical_columns_are_not_published(self, geo_keys):
         df = generate_store_table(geo=GeoContext(geo_keys=geo_keys), num_stores=50, seed=1)
-        assert (df["CustomerSatisfactionScore"] >= 1.0).all()
-        assert (df["CustomerSatisfactionScore"] <= 10.0).all()
-        assert (df["LastAuditScore"] >= 50).all()
-        assert (df["LastAuditScore"] <= 100).all()
-        assert (df["ShrinkageRatePct"] >= 0).all()
+        decorative = {
+            "AvgTransactionValue", "CustomerSatisfactionScore",
+            "InventoryTurnoverTarget", "LastAuditScore", "ShrinkageRatePct",
+        }
+        assert not (decorative & set(df.columns))
 
 
 # ===================================================================
@@ -727,6 +896,24 @@ class TestGenerateEmployeeDimension:
         )
         assert df["EmployeeKey"].is_unique
 
+    def test_home_location_is_explicit_and_corporate_keys_stay_null(self, people_pools):
+        employees = generate_employee_dimension(
+            stores=self._make_stores(),
+            seed=42,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+            people_pools=people_pools,
+        )
+
+        assert "HomeStoreKey" in employees.columns
+        assert "StoreKey" not in employees.columns
+        non_store = employees[employees["OrgLevel"] <= 4]
+        assert non_store["HomeStoreKey"].isna().all()
+        assert non_store["GeographyKey"].isna().all()
+        corporate = employees[employees["OrgUnitType"] == "Corporate"]
+        assert corporate["RegionId"].isna().all()
+        assert corporate["DistrictId"].isna().all()
+
     def test_over_1000_staff_no_longer_collides(self, people_pools):
         """Opaque sequential keys have no per-store slot band, so a store with
         >1000 staff (which the old encoding rejected) now generates cleanly with
@@ -783,6 +970,53 @@ class TestGenerateEmployeeDimension:
         assert len(vp) == 1
         assert vp.iloc[0]["Title"] == "VP Operations"
 
+    def test_management_hierarchy_uses_store_region_rollup(self, people_pools):
+        stores = self._make_stores(n=8)
+        stores["StoreType"] = "Supermarket"
+        stores["GeographyKey"] = np.arange(1, 9, dtype=np.int32)
+        iso_by_geo = {key: "EUR" for key in range(1, 9)}
+        country_by_geo = {
+            **{key: "Alpha" for key in range(1, 4)},
+            **{key: "Beta" for key in range(4, 9)},
+        }
+        zones, districts, regions, district_id, region_id = _build_hierarchy(
+            geo_keys=stores["GeographyKey"].to_numpy(),
+            store_keys=stores["StoreKey"].to_numpy(),
+            iso_by_geo=iso_by_geo,
+            country_by_geo=country_by_geo,
+            district_size=2,
+            districts_per_region=3,
+        )
+        stores["StoreZone"] = zones
+        stores["StoreDistrict"] = districts
+        stores["StoreRegion"] = regions
+        stores["StoreDistrictId"] = district_id
+        stores["StoreRegionId"] = region_id
+
+        employees = generate_employee_dimension(
+            stores=stores,
+            seed=42,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+            people_pools=people_pools,
+        )
+
+        expected = dict(zip(district_id.tolist(), region_id.tolist()))
+        district_managers = employees[employees["OrgUnitType"] == "District"]
+        assert dict(zip(
+            district_managers["DistrictId"].astype(int),
+            district_managers["RegionId"].astype(int),
+        )) == expected
+
+        region_manager_keys = {
+            int(row.RegionId): int(row.EmployeeKey)
+            for row in employees[employees["OrgUnitType"] == "Region"].itertuples()
+        }
+        assert all(
+            int(row.ParentEmployeeKey) == region_manager_keys[int(row.RegionId)]
+            for row in district_managers.itertuples()
+        )
+
     def test_store_managers_exist(self, people_pools):
         stores = self._make_stores(n=3)
         df = generate_employee_dimension(
@@ -794,6 +1028,43 @@ class TestGenerateEmployeeDimension:
         )
         mgrs = df[df["Title"] == "Store Manager"]
         assert len(mgrs) == 3  # one per store
+
+    def test_corporate_and_management_roles_are_full_time(self, people_pools):
+        stores = self._make_stores(n=60)
+        employees = generate_employee_dimension(
+            stores=stores,
+            seed=42,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+            people_pools=people_pools,
+        )
+
+        management = employees[employees["OrgLevel"] <= 5]
+        assert len(management) > 0
+        assert management["EmploymentType"].eq("Full-Time").all()
+        assert management["FTE"].eq(1.0).all()
+
+    def test_customer_support_maps_to_customer_service(self, people_pools):
+        from src.dimensions.employees.hr import _enrich_employee_hr_columns
+
+        employees = pd.DataFrame({
+            "EmployeeKey": [1],
+            "Title": ["Customer Support"],
+            "OrgLevel": [6],
+            "HireDate": [pd.Timestamp("2020-01-01")],
+            "TerminationDate": [pd.NaT],
+            "IsActive": [True],
+            "FTE": [1.0],
+            "FirstName": ["Test"],
+            "LastName": ["Person"],
+        })
+        out = _enrich_employee_hr_columns(
+            employees,
+            np.random.default_rng(7),
+            global_end=pd.Timestamp("2025-12-31"),
+        )
+
+        assert out.loc[0, "DepartmentName"] == "Customer Service"
 
     def test_determinism(self, people_pools):
         stores = self._make_stores()
@@ -848,6 +1119,27 @@ class TestGenerateEmployeeDimension:
         sa_open = sa[sa["TerminationDate"].isna()]
         assert len(sa_open) > 0, "No active SAs found"
 
+    def test_store_closure_retains_reason_specific_share(self, people_pools):
+        """Planned closures retain the configured share for reassignment."""
+        stores = self._make_stores(n=1)
+        stores["StoreType"] = "Supermarket"
+        stores["EmployeeCount"] = 10
+        df = generate_employee_dimension(
+            stores=stores,
+            seed=42,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+            people_pools=people_pools,
+            store_closing_dates={1: pd.Timestamp("2024-07-01")},
+            store_close_reasons={1: "Lease Ended"},
+        )
+        store_emp = df[df["HomeStoreKey"] == 1]
+        assert len(store_emp) == 10
+        assert int(store_emp["IsActive"].sum()) == 8
+        terminated = store_emp[~store_emp["IsActive"]]
+        assert len(terminated) == 2
+        assert (terminated["TerminationReason"] == "Store Closure").all()
+
     def test_every_store_has_sa_hired_before_start(self, people_pools):
         """Every store should have at least one SA hired at or before global_start."""
         global_start = pd.Timestamp("2021-01-01")
@@ -861,8 +1153,8 @@ class TestGenerateEmployeeDimension:
         )
         sa = df[df["Title"] == "Sales Associate"]
         if len(sa) > 0:
-            for sk in sa["StoreKey"].unique():
-                store_sa = sa[sa["StoreKey"] == sk]
+            for sk in sa["HomeStoreKey"].unique():
+                store_sa = sa[sa["HomeStoreKey"] == sk]
                 hire_dates = pd.to_datetime(store_sa["HireDate"])
                 assert (hire_dates <= global_start).any(), (
                     f"Store {sk}: no SA hired before {global_start}"
@@ -883,7 +1175,7 @@ class TestGenerateEmployeeDimension:
             people_pools=people_pools,
         )
         for sk in stores["StoreKey"].astype(int):
-            store_sa = df[(df["StoreKey"] == sk) & (df["Title"] == "Sales Associate")]
+            store_sa = df[(df["HomeStoreKey"] == sk) & (df["Title"] == "Sales Associate")]
             assert len(store_sa) >= 1, f"Store {sk} has no Sales Associate"
 
     def test_names_populated(self, people_pools):
@@ -901,9 +1193,9 @@ class TestGenerateEmployeeDimension:
     def test_nan_identity_key_raises(self):
         """A NaN identity key must raise DimensionError, not silently become 0.
 
-        EmployeeKey is never legitimately NaN. StoreKey is NaN only for
+        EmployeeKey is never legitimately NaN. HomeStoreKey is null for
         corporate/region/district rows (OrgUnitType != 'Store'); a store-level
-        row with a NaN StoreKey is corruption.
+        row with a null HomeStoreKey is corruption.
         """
         from src.dimensions.employees.hr import _assert_identity_keys
 
@@ -911,22 +1203,22 @@ class TestGenerateEmployeeDimension:
         with pytest.raises(DimensionError, match="EmployeeKey"):
             _assert_identity_keys(pd.DataFrame({
                 "EmployeeKey": [1.0, np.nan],
-                "StoreKey": [5, 6],
+                "HomeStoreKey": [5, 6],
                 "OrgUnitType": ["Store", "Store"],
             }))
 
-        # NaN StoreKey on a store-level row -> raises
-        with pytest.raises(DimensionError, match="StoreKey"):
+        # NaN HomeStoreKey on a store-level row -> raises
+        with pytest.raises(DimensionError, match="HomeStoreKey"):
             _assert_identity_keys(pd.DataFrame({
                 "EmployeeKey": [1, 2],
-                "StoreKey": [5.0, np.nan],
+                "HomeStoreKey": [5.0, np.nan],
                 "OrgUnitType": ["Store", "Store"],
             }))
 
-        # NaN StoreKey on a corporate row is legitimate -> no raise
+        # NaN HomeStoreKey on a corporate row is legitimate -> no raise
         _assert_identity_keys(pd.DataFrame({
             "EmployeeKey": [1, 2],
-            "StoreKey": [5.0, np.nan],
+            "HomeStoreKey": [5.0, np.nan],
             "OrgUnitType": ["Store", "Corporate"],
         }))
 
@@ -990,6 +1282,32 @@ class TestGenerateEmployeeDimension:
         assert terminated.mean() < active.mean()
         assert terminated.max() < active.min()
 
+    def test_vacation_accrual_scales_with_fte(self):
+        """Part-time vacation entitlement scales with the employee's FTE."""
+        from src.dimensions.employees.hr import _enrich_employee_hr_columns
+
+        n = 800
+        df = pd.DataFrame({
+            "EmployeeKey": np.arange(1, n + 1, dtype=np.int64),
+            "Title": ["Cashier"] * n,
+            "OrgLevel": np.full(n, 6, dtype=np.int64),
+            "HireDate": [pd.Timestamp("2020-01-01")] * n,
+            "TerminationDate": [pd.NaT] * n,
+            "IsActive": [True] * n,
+            "FTE": np.where(np.arange(n) % 2 == 0, 1.0, 0.5),
+            "FirstName": ["Test"] * n,
+            "LastName": ["Person"] * n,
+        })
+        out = _enrich_employee_hr_columns(
+            df,
+            np.random.default_rng(9),
+            global_end=pd.Timestamp("2025-12-31"),
+        )
+
+        full_time = out.loc[out["FTE"] == 1.0, "VacationHours"].mean()
+        half_time = out.loc[out["FTE"] == 0.5, "VacationHours"].mean()
+        assert half_time < full_time * 0.65
+
 
 # ===================================================================
 # SALESPERSON COVERAGE INVARIANT (employees -> bridge)
@@ -1038,6 +1356,54 @@ class TestSalespersonCoverageInvariant:
         for sk in stores["StoreKey"].astype(int):
             assert sk in covered, f"Physical store {sk} has no salesperson in bridge"
 
+    def test_assignment_columns_expose_current_segment_semantics(self, people_pools):
+        stores = self._physical_stores(n=3)
+        employees = generate_employee_dimension(
+            stores=stores,
+            seed=42,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+            people_pools=people_pools,
+        )
+        bridge = generate_employee_store_assignments(
+            employees=employees,
+            global_start=pd.Timestamp("2021-01-01"),
+            global_end=pd.Timestamp("2025-12-31"),
+        )
+
+        assert "IsCurrentAssignment" in bridge.columns
+        assert "AssignmentStatus" in bridge.columns
+        assert "IsPrimary" not in bridge.columns
+        assert "Status" not in bridge.columns
+        assert bridge.groupby("EmployeeKey")["IsCurrentAssignment"].sum().eq(1).all()
+
+    def test_as_of_assignment_lookup_uses_inclusive_dates(self):
+        from src.dimensions.employees.as_of import assignments_as_of, current_assignments
+
+        bridge = pd.DataFrame({
+            "EmployeeKey": [1, 1],
+            "StoreKey": [10, 20],
+            "StartDate": pd.to_datetime(["2024-01-01", "2024-07-01"]),
+            "EndDate": pd.to_datetime(["2024-06-30", "2024-12-31"]),
+            "IsCurrentAssignment": [False, True],
+        })
+
+        june = assignments_as_of(bridge, pd.Timestamp("2024-06-30"))
+        july = assignments_as_of(bridge, pd.Timestamp("2024-07-01"))
+        assert int(june.iloc[0]["StoreKey"]) == 10
+        assert int(july.iloc[0]["StoreKey"]) == 20
+        assert int(current_assignments(bridge).iloc[0]["StoreKey"]) == 20
+
+    def test_employee_and_assignment_fte_sql_precision_match(self):
+        from src.utils.static_schemas import STATIC_SCHEMAS
+
+        employee_schema = dict(STATIC_SCHEMAS["Employees"])
+        employees_fte = employee_schema["FTE"]
+        assignments_fte = dict(STATIC_SCHEMAS["EmployeeStoreAssignments"])["FTE"]
+        assert employees_fte == assignments_fte
+        for column in ("RegionId", "DistrictId", "HomeStoreKey", "GeographyKey"):
+            assert employee_schema[column].nullable
+
     def test_employee_count_matches_roster_size(self, people_pools):
         """Regression: through the normal store->employee path, every store's
         Stores.EmployeeCount must equal its employee-row count — the invariant
@@ -1061,7 +1427,7 @@ class TestSalespersonCoverageInvariant:
             global_end=pd.Timestamp("2025-12-31"),
             people_pools=people_pools,
         )
-        roster = emp[emp["StoreKey"] > 0].groupby("StoreKey").size()
+        roster = emp[emp["HomeStoreKey"].notna()].groupby("HomeStoreKey").size()
         for _, srow in stores.iterrows():
             sk = int(srow["StoreKey"])
             assert int(roster.get(sk, 0)) == int(srow["EmployeeCount"]), (

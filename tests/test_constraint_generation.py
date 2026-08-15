@@ -8,8 +8,6 @@ idempotency. The composer *wiring* (output paths, gating) is in
 """
 from __future__ import annotations
 
-import re
-
 import pytest
 
 from src.tools.sql.dialect import REGISTRY
@@ -23,7 +21,6 @@ from src.tools.sql.schema_model import (
     Unique,
     UniqueIndex,
     iter_all_constraints,
-    select_sections,
 )
 
 SS = REGISTRY["sqlserver"]
@@ -84,6 +81,17 @@ class TestRosterIntegrity:
             if isinstance(c, ForeignKey):
                 key = (c.ref_table, tuple(c.ref_columns))
                 assert key in keyed, f"{c.name}: FK target {key} has no PK/UQ/UX"
+
+    def test_employee_home_store_fk_uses_explicit_nullable_column(self) -> None:
+        fk = next(
+            c for c in iter_all_constraints()
+            if c.name == "FK_Employees_HomeStore"
+        )
+        assert isinstance(fk, ForeignKey)
+        assert fk.table == "Employees"
+        assert fk.columns == ("HomeStoreKey",)
+        assert fk.ref_table == "Stores"
+        assert fk.ref_columns == ("StoreKey",)
 
 
 # ---------------------------------------------------------------------------

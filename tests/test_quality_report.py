@@ -10,12 +10,20 @@ import pytest
 from src.engine.quality_report import (
     QualityReport,
     _TableCache,
+    generate_quality_report,
     _check_nulls_and_duplicates,
     _check_referential_integrity,
     _check_complaint_chronology,
     _check_subscription_lifecycle,
     _check_wishlist_conversion_chronology,
     _check_inventory_stockout_semantics,
+    _check_employee_assignment_temporal_integrity,
+    _check_salesperson_assignment_integrity,
+    _check_current_headcount_reconciliation,
+    _check_store_organizational_geography,
+    _check_employee_organizational_geography,
+    _check_workforce_policy_integrity,
+    _check_store_lifecycle_causality,
 )
 
 
@@ -200,6 +208,514 @@ class TestOrderIntegrity:
             "FK: complaints.OrderNumber → order_header.OrderNumber",
         )
         assert fk is not None and fk.passed is True
+
+
+class TestPhase7WorkforceReferentialIntegrity:
+    @pytest.fixture
+    def dims_facts(self, tmp_path):
+        dims = tmp_path / "dimensions"
+        dims.mkdir()
+        facts = tmp_path / "facts"
+        facts.mkdir()
+        return dims, facts
+
+    @staticmethod
+    def _find(report, name):
+        return next((check for check in report.checks if check.name == name), None)
+
+    def test_assignment_primary_key_duplicates_are_flagged(self, dims_facts):
+        dims, facts = dims_facts
+        pd.DataFrame({
+            "AssignmentKey": [1, 1],
+        }).to_parquet(dims / "employee_store_assignments.parquet", index=False)
+
+        report = QualityReport()
+        _check_nulls_and_duplicates(report, dims, facts, _TableCache())
+
+        duplicate = self._find(
+            report,
+            "Duplicate PK: employee_store_assignments.AssignmentKey",
+        )
+        assert duplicate is not None and duplicate.passed is False
+
+    def test_workforce_and_warehouse_foreign_keys_are_checked(self, dims_facts):
+        dims, facts = dims_facts
+        pd.DataFrame({
+            "WarehouseKey": [100],
+        }).to_parquet(dims / "warehouses.parquet", index=False)
+        pd.DataFrame({
+            "StoreKey": [10, 20],
+            "WarehouseKey": [100, 999],
+        }).to_parquet(dims / "stores.parquet", index=False)
+        pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "ParentEmployeeKey": pd.array([pd.NA, 99], dtype="Int64"),
+            "HomeStoreKey": pd.array([pd.NA, 999], dtype="Int64"),
+        }).to_parquet(dims / "employees.parquet", index=False)
+        pd.DataFrame({
+            "AssignmentKey": [1, 2],
+            "EmployeeKey": [1, 77],
+            "StoreKey": [10, 88],
+        }).to_parquet(dims / "employee_store_assignments.parquet", index=False)
+
+        report = QualityReport()
+        _check_referential_integrity(report, dims, facts, _TableCache())
+
+        expected_failures = {
+            "FK: employee_store_assignments.EmployeeKey → employees.EmployeeKey": "77",
+            "FK: employee_store_assignments.StoreKey → stores.StoreKey": "88",
+            "FK: employees.ParentEmployeeKey → employees.EmployeeKey": "99",
+            "FK: employees.HomeStoreKey → stores.StoreKey": "999",
+            "FK: stores.WarehouseKey → warehouses.WarehouseKey": "999",
+        }
+        for check_name, orphan in expected_failures.items():
+            check = self._find(report, check_name)
+            assert check is not None and check.passed is False
+            assert orphan in check.details
+
+    def test_valid_workforce_relationships_allow_nullable_employee_links(
+        self, dims_facts,
+    ):
+        dims, facts = dims_facts
+        pd.DataFrame({
+            "WarehouseKey": [100],
+        }).to_parquet(dims / "warehouses.parquet", index=False)
+        pd.DataFrame({
+            "StoreKey": [10],
+            "WarehouseKey": [100],
+        }).to_parquet(dims / "stores.parquet", index=False)
+        pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "ParentEmployeeKey": pd.array([pd.NA, 1], dtype="Int64"),
+            "HomeStoreKey": pd.array([pd.NA, 10], dtype="Int64"),
+        }).to_parquet(dims / "employees.parquet", index=False)
+        pd.DataFrame({
+            "AssignmentKey": [1],
+            "EmployeeKey": [2],
+            "StoreKey": [10],
+        }).to_parquet(dims / "employee_store_assignments.parquet", index=False)
+
+        report = QualityReport()
+        _check_referential_integrity(report, dims, facts, _TableCache())
+
+        expected_checks = (
+            "FK: employee_store_assignments.EmployeeKey → employees.EmployeeKey",
+            "FK: employee_store_assignments.StoreKey → stores.StoreKey",
+            "FK: employees.ParentEmployeeKey → employees.EmployeeKey",
+            "FK: employees.HomeStoreKey → stores.StoreKey",
+            "FK: stores.WarehouseKey → warehouses.WarehouseKey",
+        )
+        for check_name in expected_checks:
+            check = self._find(report, check_name)
+            assert check is not None and check.passed is True
+
+    def test_employee_and_warehouse_geography_foreign_keys_are_checked(
+        self, dims_facts,
+    ):
+        dims, facts = dims_facts
+        pd.DataFrame({"GeographyKey": [1]}).to_parquet(
+            dims / "geography.parquet", index=False,
+        )
+        pd.DataFrame({
+            "WarehouseKey": [100], "GeographyKey": [999],
+        }).to_parquet(dims / "warehouses.parquet", index=False)
+        pd.DataFrame({
+            "EmployeeKey": [1], "GeographyKey": [998],
+        }).to_parquet(dims / "employees.parquet", index=False)
+
+        report = QualityReport()
+        _check_referential_integrity(report, dims, facts, _TableCache())
+
+        expected_failures = {
+            "FK: warehouses.GeographyKey → geography.GeographyKey": "999",
+            "FK: employees.GeographyKey → geography.GeographyKey": "998",
+        }
+        for check_name, orphan in expected_failures.items():
+            check = self._find(report, check_name)
+            assert check is not None and check.passed is False
+            assert orphan in check.details
+
+
+class TestPhase7AssignmentTemporalIntegrity:
+    @staticmethod
+    def _find(report, name):
+        return next(check for check in report.checks if check.name == name)
+
+    def test_valid_inclusive_assignment_timeline_passes(self):
+        assignments = pd.DataFrame({
+            "EmployeeKey": [1, 1, 2],
+            "StartDate": pd.to_datetime([
+                "2024-01-01", "2024-01-11", "2024-02-01",
+            ]),
+            "EndDate": pd.to_datetime([
+                "2024-01-10", "2024-12-31", "2024-12-31",
+            ]),
+            "IsCurrentAssignment": [False, True, True],
+        })
+        report = QualityReport()
+
+        _check_employee_assignment_temporal_integrity(report, assignments)
+
+        assert self._find(report, "Assignment date order").passed
+        assert self._find(report, "Assignment segments do not overlap").passed
+        assert self._find(report, "Assignment segments are contiguous").passed
+        assert self._find(report, "Exactly one current assignment per employee").passed
+
+    def test_invalid_dates_overlaps_gaps_and_current_counts_are_flagged(self):
+        assignments = pd.DataFrame({
+            "EmployeeKey": [1, 1, 2, 2, 3, 4, 4],
+            "StartDate": pd.to_datetime([
+                "2024-01-01", "2024-01-10",
+                "2024-02-01", "2024-02-07",
+                "2024-03-05",
+                "2024-04-01", "2024-04-11",
+            ]),
+            "EndDate": pd.to_datetime([
+                "2024-01-10", "2024-01-20",
+                "2024-02-05", "2024-02-20",
+                "2024-03-04",
+                "2024-04-10", "2024-04-20",
+            ]),
+            "IsCurrentAssignment": [False, True, False, True, True, True, True],
+        })
+        report = QualityReport()
+
+        _check_employee_assignment_temporal_integrity(report, assignments)
+
+        assert not self._find(report, "Assignment date order").passed
+        assert not self._find(report, "Assignment segments do not overlap").passed
+        assert not self._find(report, "Assignment segments are contiguous").passed
+        assert not self._find(
+            report, "Exactly one current assignment per employee",
+        ).passed
+
+    def test_generated_report_checks_assignments_without_sales(self, tmp_path):
+        dims = tmp_path / "dimensions"
+        dims.mkdir()
+        pd.DataFrame({
+            "AssignmentKey": [1],
+            "EmployeeKey": [1],
+            "StoreKey": [10],
+            "StartDate": pd.to_datetime(["2024-01-01"]),
+            "EndDate": pd.to_datetime(["2024-12-31"]),
+            "IsCurrentAssignment": [True],
+        }).to_parquet(dims / "employee_store_assignments.parquet", index=False)
+
+        report_path = generate_quality_report(tmp_path)
+        report_html = report_path.read_text(encoding="utf-8")
+
+        assert "Assignment segments are contiguous" in report_html
+
+
+class TestPhase7SalespersonAndHeadcountIntegrity:
+    @staticmethod
+    def _find(report, name):
+        return next(check for check in report.checks if check.name == name)
+
+    @staticmethod
+    def _assignments():
+        return pd.DataFrame({
+            "EmployeeKey": [1, 1, 2],
+            "StoreKey": [10, 20, 10],
+            "StartDate": pd.to_datetime([
+                "2024-01-01", "2024-07-01", "2024-01-01",
+            ]),
+            "EndDate": pd.to_datetime([
+                "2024-06-30", "2024-12-31", "2024-06-30",
+            ]),
+        })
+
+    def test_salesperson_store_and_date_match_effective_assignment(self):
+        sales = pd.DataFrame({
+            "EmployeeKey": [1, 1, 2],
+            "StoreKey": [10, 20, 10],
+            "OrderDate": pd.to_datetime([
+                "2024-06-30", "2024-07-01", "2024-06-30",
+            ]),
+        })
+        report = QualityReport()
+
+        _check_salesperson_assignment_integrity(
+            report, sales, self._assignments(), chunk_size=2,
+        )
+
+        assert self._find(
+            report, "Salesperson effective assignment matches sale",
+        ).passed
+
+    def test_salesperson_wrong_store_and_out_of_period_are_flagged(self):
+        sales = pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "StoreKey": [10, 10],
+            "OrderDate": pd.to_datetime(["2024-07-01", "2024-07-01"]),
+        })
+        report = QualityReport()
+
+        _check_salesperson_assignment_integrity(
+            report, sales, self._assignments(), chunk_size=1,
+        )
+
+        check = self._find(
+            report, "Salesperson effective assignment matches sale",
+        )
+        assert not check.passed
+        assert "2 sale row(s)" in check.message
+
+    def test_current_headcount_reconciles_active_store_employees(self):
+        employees = pd.DataFrame({
+            "EmployeeKey": [1, 2, 3],
+            "HomeStoreKey": pd.array([10, 10, pd.NA], dtype="Int64"),
+            "IsActive": [True, False, True],
+        })
+        report = QualityReport()
+
+        _check_current_headcount_reconciliation(
+            report, employees, self._assignments(),
+        )
+
+        assert self._find(
+            report, "Current assignment headcount reconciles to active employees",
+        ).passed
+
+    def test_headcount_missing_active_and_includes_inactive_are_flagged(self):
+        employees = pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "HomeStoreKey": [10, 10],
+            "IsActive": [True, False],
+        })
+        assignments = pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "StoreKey": [10, 10],
+            "StartDate": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+            "EndDate": pd.to_datetime(["2024-06-30", "2024-12-31"]),
+        })
+        report = QualityReport()
+
+        _check_current_headcount_reconciliation(report, employees, assignments)
+
+        check = self._find(
+            report, "Current assignment headcount reconciles to active employees",
+        )
+        assert not check.passed
+        assert "1 missing active" in check.message
+        assert "1 inactive/unexpected" in check.message
+
+    def test_generated_report_includes_salesperson_and_headcount_checks(
+        self, tmp_path,
+    ):
+        dims = tmp_path / "dimensions"
+        facts = tmp_path / "facts"
+        dims.mkdir()
+        facts.mkdir()
+        pd.DataFrame({
+            "EmployeeKey": [1],
+            "HomeStoreKey": [10],
+            "IsActive": [True],
+        }).to_parquet(dims / "employees.parquet", index=False)
+        pd.DataFrame({
+            "EmployeeKey": [1],
+            "StoreKey": [10],
+            "StartDate": pd.to_datetime(["2024-01-01"]),
+            "EndDate": pd.to_datetime(["2024-12-31"]),
+            "IsCurrentAssignment": [True],
+        }).to_parquet(dims / "employee_store_assignments.parquet", index=False)
+        pd.DataFrame({
+            "EmployeeKey": [1],
+            "StoreKey": [10],
+            "OrderDate": pd.to_datetime(["2024-06-01"]),
+        }).to_parquet(facts / "sales.parquet", index=False)
+
+        report_path = generate_quality_report(tmp_path)
+        report_html = report_path.read_text(encoding="utf-8")
+
+        assert "Salesperson effective assignment matches sale" in report_html
+        assert (
+            "Current assignment headcount reconciles to active employees"
+            in report_html
+        )
+
+
+class TestPhase7OrganizationalQualityContract:
+    @staticmethod
+    def _find(report, name):
+        return next(check for check in report.checks if check.name == name)
+
+    @staticmethod
+    def _stores():
+        return pd.DataFrame({
+            "StoreKey": [10, 20],
+            "Status": ["Open", "Open"],
+            "GeographyKey": [100, 200],
+            "StoreZone": ["Europe", "Europe"],
+            "StoreDistrict": ["District 1", "District 2"],
+            "StoreRegion": ["Region 1", "Region 2"],
+            "StoreDistrictId": [1, 2],
+            "StoreRegionId": [1, 2],
+            "OpeningDate": pd.to_datetime(["2020-01-01", "2020-01-01"]),
+            "ClosingDate": pd.to_datetime([None, None]),
+            "CloseReason": ["", ""],
+            "RevenueClass": ["A", "B"],
+            "OwnershipType": ["Corporate", "Leased"],
+            "SuccessorStoreKey": pd.array([pd.NA, pd.NA], dtype="Int64"),
+            "RenovationStartDate": pd.to_datetime([None, None]),
+            "RenovationEndDate": pd.to_datetime([None, None]),
+        })
+
+    @staticmethod
+    def _employees():
+        return pd.DataFrame({
+            "EmployeeKey": [1, 2, 3, 4, 5, 6],
+            "ParentEmployeeKey": pd.array(
+                [pd.NA, 1, 2, 3, 4, 5], dtype="Int64",
+            ),
+            "Title": [
+                "Chief Executive Officer", "VP Operations",
+                "Regional Manager", "District Manager", "Store Manager",
+                "Customer Support",
+            ],
+            "OrgLevel": [1, 2, 3, 4, 5, 6],
+            "OrgUnitType": [
+                "Corporate", "Corporate", "Region", "District", "Store", "Store",
+            ],
+            "RegionId": pd.array([pd.NA, pd.NA, 1, 1, 1, 1], dtype="Int64"),
+            "DistrictId": pd.array(
+                [pd.NA, pd.NA, pd.NA, 1, 1, 1], dtype="Int64",
+            ),
+            "HomeStoreKey": pd.array(
+                [pd.NA, pd.NA, pd.NA, pd.NA, 10, 10], dtype="Int64",
+            ),
+            "GeographyKey": pd.array(
+                [pd.NA, pd.NA, pd.NA, pd.NA, 100, 100], dtype="Int64",
+            ),
+            "HireDate": pd.to_datetime(["2020-01-01"] * 6),
+            "TerminationDate": pd.to_datetime([None] * 6),
+            "IsActive": [True] * 6,
+            "EmploymentType": ["Full-Time"] * 5 + ["Part-Time"],
+            "FTE": [1.0] * 5 + [0.75],
+            "DepartmentName": [
+                "Executive", "Corporate", "Store Operations",
+                "Store Operations", "Store Operations", "Customer Service",
+            ],
+        })
+
+    def test_valid_country_hierarchy_and_employee_rollups_pass(self):
+        stores = self._stores()
+        geography = pd.DataFrame({
+            "GeographyKey": [100, 200],
+            "Country": ["Alpha", "Beta"],
+        })
+        employees = self._employees()
+        report = QualityReport()
+
+        _check_store_organizational_geography(report, stores, geography)
+        _check_employee_organizational_geography(report, employees, stores)
+        _check_workforce_policy_integrity(report, employees)
+        _check_store_lifecycle_causality(report, stores)
+
+        assert all(check.passed for check in report.checks)
+
+    def test_country_crossing_and_display_identity_are_flagged(self):
+        stores = self._stores()
+        stores.loc[1, ["StoreDistrictId", "StoreRegionId"]] = [1, 1]
+        stores.loc[1, ["StoreDistrict", "StoreRegion"]] = [
+            "Duplicate district label", "Duplicate region label",
+        ]
+        geography = pd.DataFrame({
+            "GeographyKey": [100, 200],
+            "Country": ["Alpha", "Beta"],
+        })
+        report = QualityReport()
+
+        _check_store_organizational_geography(report, stores, geography)
+
+        assert not self._find(report, "Store district country integrity").passed
+        assert not self._find(
+            report, "Store region country and zone integrity",
+        ).passed
+        assert not self._find(
+            report, "Store hierarchy labels match structured IDs",
+        ).passed
+
+    def test_employee_location_and_parent_rollup_mismatches_are_flagged(self):
+        employees = self._employees()
+        employees.loc[5, "RegionId"] = 2
+        employees.loc[3, "ParentEmployeeKey"] = 2
+        employees.loc[0, "HomeStoreKey"] = 10
+        report = QualityReport()
+
+        _check_employee_organizational_geography(
+            report, employees, self._stores(),
+        )
+
+        assert not self._find(
+            report, "Employee organizational location contract",
+        ).passed
+        assert not self._find(
+            report, "Employee hierarchy keys match store hierarchy",
+        ).passed
+        assert not self._find(
+            report, "Employee parent hierarchy follows organizational rollups",
+        ).passed
+
+    def test_workforce_policy_and_lifecycle_contradictions_are_flagged(self):
+        employees = self._employees()
+        employees.loc[4, ["EmploymentType", "FTE"]] = ["Part-Time", 0.5]
+        employees.loc[5, "DepartmentName"] = "Corporate"
+        employees.loc[5, "IsActive"] = False
+        report = QualityReport()
+
+        _check_workforce_policy_integrity(report, employees)
+
+        assert not self._find(
+            report, "Employee role, department, and FTE policy",
+        ).passed
+        assert not self._find(
+            report, "Employee lifecycle snapshot matches effective dates",
+        ).passed
+
+    def test_store_close_reason_prerequisites_are_flagged(self):
+        stores = self._stores()
+        stores.loc[0, [
+            "Status", "ClosingDate", "CloseReason", "RevenueClass",
+        ]] = ["Closed", pd.Timestamp("2024-01-01"), "Low Sales", "A"]
+        stores.loc[1, [
+            "Status", "ClosingDate", "CloseReason", "OwnershipType",
+        ]] = ["Closed", pd.Timestamp("2024-01-01"), "Lease Ended", "Corporate"]
+        report = QualityReport()
+
+        _check_store_lifecycle_causality(report, stores)
+
+        assert self._find(
+            report, "Store lifecycle dates match snapshot status",
+        ).passed
+        causal = self._find(
+            report, "Store close reasons satisfy causal prerequisites",
+        )
+        assert not causal.passed
+        assert "2 unsupported" in causal.message
+
+    def test_packaged_report_surfaces_geography_and_policy_failures(self, tmp_path):
+        dims = tmp_path / "dimensions"
+        dims.mkdir()
+        stores = self._stores()
+        stores.loc[1, ["StoreDistrictId", "StoreRegionId"]] = [1, 1]
+        stores.loc[1, ["StoreDistrict", "StoreRegion"]] = [
+            "District 1", "Region 1",
+        ]
+        stores.to_parquet(dims / "stores.parquet", index=False)
+        pd.DataFrame({
+            "GeographyKey": [100, 200], "Country": ["Alpha", "Beta"],
+        }).to_parquet(dims / "geography.parquet", index=False)
+        employees = self._employees()
+        employees.loc[5, "DepartmentName"] = "Corporate"
+        employees.to_parquet(dims / "employees.parquet", index=False)
+
+        report_path = generate_quality_report(tmp_path)
+        html = report_path.read_text(encoding="utf-8")
+
+        assert "Store district country integrity" in html
+        assert "Employee role, department, and FTE policy" in html
+        assert 'class="fail-count">4 failed' in html
 
 
 class TestPhase2AnalyticalIntegrity:

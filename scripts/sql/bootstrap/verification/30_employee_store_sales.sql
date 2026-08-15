@@ -161,9 +161,9 @@ BEGIN
     SELECT @zombie = COUNT(*)
     FROM dbo.EmployeeStoreAssignments esa
     JOIN dbo.Employees e ON e.EmployeeKey = esa.EmployeeKey
-    WHERE e.IsActive = 0 AND esa.Status = 'Active';
+    WHERE e.IsActive = 0 AND esa.AssignmentStatus = 'Active';
     INSERT INTO #R VALUES ('ESA-Bridge', 'No Active assignments for terminated employees',
-        'Terminated employees must not have Status=Active in ESA',
+        'Terminated employees must not have AssignmentStatus=Active in ESA',
         CASE WHEN @zombie = 0 THEN 'PASS' ELSE 'FAIL' END,
         CAST(@zombie AS VARCHAR) + ' zombie assignment(s)');
 
@@ -205,7 +205,7 @@ BEGIN
             CAST(@past_close AS VARCHAR) + ' violation(s)');
     END
 
-    -- Renovation IsPrimary rules (only if Stores has renovation columns)
+    -- Renovation current-assignment rules (only if Stores has renovation columns)
     IF OBJECT_ID(N'dbo.Stores', N'U') IS NOT NULL
        AND COL_LENGTH('dbo.Stores', 'RenovationStartDate') IS NOT NULL
     BEGIN
@@ -218,9 +218,9 @@ BEGIN
             DECLARE @n_temp INT, @bad_temp_ip INT, @n_perm INT, @bad_perm_ip INT;
             SELECT
                 @n_temp      = ISNULL(SUM(CASE WHEN s.ClosingDate IS NULL THEN 1 ELSE 0 END), 0),
-                @bad_temp_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NULL  AND rr.IsPrimary = 1 THEN 1 ELSE 0 END), 0),
+                @bad_temp_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NULL  AND rr.IsCurrentAssignment = 1 THEN 1 ELSE 0 END), 0),
                 @n_perm      = ISNULL(SUM(CASE WHEN s.ClosingDate IS NOT NULL THEN 1 ELSE 0 END), 0),
-                @bad_perm_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NOT NULL AND rr.IsPrimary = 0 THEN 1 ELSE 0 END), 0)
+                @bad_perm_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NOT NULL AND rr.IsCurrentAssignment = 0 THEN 1 ELSE 0 END), 0)
             FROM dbo.EmployeeStoreAssignments rr
             JOIN dbo.EmployeeStoreAssignments init
               ON init.EmployeeKey = rr.EmployeeKey AND init.TransferReason = 'Initial'
@@ -228,8 +228,8 @@ BEGIN
             WHERE rr.TransferReason = 'Renovation Reassignment'
               AND s.RenovationStartDate IS NOT NULL;
 
-            INSERT INTO #R VALUES ('ESA-Bridge', 'Renovation Reassignment IsPrimary rules',
-                'Temp (store reopened) = IsPrimary False; Permanent (store closed) = IsPrimary True',
+            INSERT INTO #R VALUES ('ESA-Bridge', 'Renovation Reassignment current-assignment rules',
+                'Temp (store reopened) = IsCurrentAssignment False; Permanent (store closed) = IsCurrentAssignment True',
                 CASE WHEN @bad_temp_ip = 0 AND @bad_perm_ip = 0 THEN 'PASS' ELSE 'FAIL' END,
                 CAST(@n_temp AS VARCHAR) + ' temp (bad:' + CAST(@bad_temp_ip AS VARCHAR) + '), '
                 + CAST(@n_perm AS VARCHAR) + ' perm (bad:' + CAST(@bad_perm_ip AS VARCHAR) + ')');

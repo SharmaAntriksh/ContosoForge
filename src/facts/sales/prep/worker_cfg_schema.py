@@ -138,13 +138,11 @@ class SalesWorkerCfg(TypedDict, total=False):
     # -- Employee / salesperson ----------------------------------------------
     seed_master: int
     employee_salesperson_seed: int
-    employee_primary_boost: float
     employee_assign_store_key: Optional[np.ndarray]
     employee_assign_employee_key: Optional[np.ndarray]
     employee_assign_start_date: Optional[np.ndarray]
     employee_assign_end_date: Optional[np.ndarray]
     employee_assign_fte: Optional[np.ndarray]
-    employee_assign_is_primary: Optional[np.ndarray]
     employee_assign_role: Optional[np.ndarray]
     salesperson_roles: List[str]
     salesperson_perf_spread: float    # lognormal sigma for per-rep performance; 0 = off
@@ -238,7 +236,6 @@ SHARED_FIELDS: List[str] = [
     "employee_assign_start_date",
     "employee_assign_end_date",
     "employee_assign_fte",
-    "employee_assign_is_primary",
     "product_seasonality",
     "customer_geo_key",
     "geo_to_country_id",

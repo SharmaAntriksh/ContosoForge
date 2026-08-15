@@ -107,7 +107,7 @@ Exit code 0 = all passed, 1 = failures.
 |---|---|
 | Stores (6) | Counts, renovation date sanity, closing consistency |
 | Employees (5) | Hire/termination dates, IsActive consistency, hierarchy, no manager salespeople |
-| ESA Bridge (12) | StartDate <= EndDate, renovation IsPrimary rules, segment completeness, no overlaps, FK integrity, assignment within employment, no rows past closure, salesperson coverage per store-month |
+| ESA Bridge (12) | StartDate <= EndDate, renovation current-segment rules, segment completeness, no overlaps, FK integrity, assignment within employment, no rows past closure, salesperson coverage per store-month |
 | Sales (6) | No manager keys, 100% ESA match, no sales during renovation, no sales after closure, no post-transfer leakage |
 
 ---

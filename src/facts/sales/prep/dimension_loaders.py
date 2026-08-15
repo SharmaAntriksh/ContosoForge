@@ -932,12 +932,7 @@ def _load_employees(parquet_folder_p, cfg, end_date) -> EmployeeBridge:
         "EmployeeKey", "StoreKey", "StartDate", "EndDate",
         "FTE", "RoleAtStore",
     ]
-    try:
-        emp_assign_df = load_parquet_df(
-            emp_assign_path, cols=_esa_base_cols + ["IsPrimary"],
-        )
-    except (KeyError, ValueError):
-        emp_assign_df = load_parquet_df(emp_assign_path, cols=_esa_base_cols)
+    emp_assign_df = load_parquet_df(emp_assign_path, cols=_esa_base_cols)
 
     if "RoleAtStore" in emp_assign_df.columns:
         emp_assign_df = emp_assign_df[emp_assign_df["RoleAtStore"].isin(salesperson_roles)].copy()
@@ -956,10 +951,6 @@ def _load_employees(parquet_folder_p, cfg, end_date) -> EmployeeBridge:
     end_dt_col = end_dt_col.fillna(end_dt)
 
     _fte = _as_np(emp_assign_df["FTE"], np.float64) if "FTE" in emp_assign_df.columns else None
-    _is_primary = (
-        _as_np(emp_assign_df["IsPrimary"], bool)
-        if "IsPrimary" in emp_assign_df.columns else None
-    )
     return EmployeeBridge(
         employee_assign_store_key=_as_np(emp_assign_df["StoreKey"], np.int32),
         employee_assign_employee_key=_as_np(emp_assign_df["EmployeeKey"], np.int32),
@@ -967,6 +958,5 @@ def _load_employees(parquet_folder_p, cfg, end_date) -> EmployeeBridge:
         employee_assign_end_date=_as_np(end_dt_col, "datetime64[D]"),
         employee_assign_role=_as_np(emp_assign_df["RoleAtStore"].astype(str)),
         employee_assign_fte=_fte,
-        employee_assign_is_primary=_is_primary,
         salesperson_roles=salesperson_roles,
     )

@@ -20,6 +20,7 @@ table EmployeeStoreAssignment
 		annotation SummarizationSetBy = Automatic
 
 	column AssignmentSequence
+		isHidden
 		dataType: int64
 		formatString: 0
 		lineageTag: 31f893ac-6cfb-429d-b864-8404f72ec322
@@ -81,12 +82,12 @@ table EmployeeStoreAssignment
 
 		annotation SummarizationSetBy = Automatic
 
-	column IsPrimary
+	column IsCurrentAssignment
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""
 		lineageTag: 1552cffa-79b8-425b-9dc2-400a3fc9a748
 		summarizeBy: none
-		sourceColumn: IsPrimary
+		sourceColumn: IsCurrentAssignment
 
 		annotation SummarizationSetBy = Automatic
 
@@ -98,11 +99,11 @@ table EmployeeStoreAssignment
 
 		annotation SummarizationSetBy = Automatic
 
-	column Status
+	column AssignmentStatus
 		dataType: string
 		lineageTag: 3f52f976-edb5-4f22-82b8-b5035f45eff0
 		summarizeBy: none
-		sourceColumn: Status
+		sourceColumn: AssignmentStatus
 
 		annotation SummarizationSetBy = Automatic
 

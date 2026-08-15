@@ -29,7 +29,7 @@ from src.defaults import is_physical_store_key
 
 
 # ---------------------------------------------------------------------------
-# The one row-level mutation both engines perform: split a primary assignment
+# The one row-level mutation both engines perform: split a current assignment
 # at a date and continue it at another store.
 # ---------------------------------------------------------------------------
 
@@ -47,10 +47,10 @@ def split_primary_assignment(
 
     Returns ``(source_row, dest_row)``:
       - ``source_row``: ``source`` truncated to ``EndDate = split_date - 1 day``,
-        demoted to non-primary with ``Status = source_status``. ``None`` when the
+        marked non-current with ``AssignmentStatus = source_status``. ``None`` when the
         truncated window would be empty (``split_date <= source['StartDate']``).
-      - ``dest_row``: a new primary row at ``dest_key`` spanning
-        ``[split_date, dest_end]``, ``Status = dest_status`` and the given
+      - ``dest_row``: a new current row at ``dest_key`` spanning
+        ``[split_date, dest_end]``, ``AssignmentStatus = dest_status`` and the given
         ``transfer_reason``. All other columns are carried over from ``source``.
 
     Both a voluntary transfer and a renovation displacement are this operation;
@@ -66,8 +66,8 @@ def split_primary_assignment(
         source_row = {
             **source,
             "EndDate": split_date - one_day,
-            "IsPrimary": False,
-            "Status": source_status,
+            "IsCurrentAssignment": False,
+            "AssignmentStatus": source_status,
         }
 
     dest_row = {
@@ -75,9 +75,9 @@ def split_primary_assignment(
         "StoreKey": dest_key,
         "StartDate": split_date,
         "EndDate": dest_end,
-        "IsPrimary": True,
+        "IsCurrentAssignment": True,
         "TransferReason": transfer_reason,
-        "Status": dest_status,
+        "AssignmentStatus": dest_status,
     }
     return source_row, dest_row
 
@@ -331,7 +331,7 @@ class _TransferRecord:
     tail of the employee's chain. A transfer's destination row is the *source*
     row of its successor, so rolling back an inner hop while a later hop survives
     would restore the inner source to full length even though a later
-    destination row still exists — two primaries and an overlapping window. The
+    destination row still exists — two current segments and an overlapping window. The
     rollback logic follows these links so a chain is only ever unwound from its
     tail.
     """
@@ -459,8 +459,8 @@ def _surgical_rollback(
             src_row = sig_to_idx.get((rec.employee_key, rec.src_key, rec.employee_start))
             if src_row is not None:
                 df.at[src_row, "EndDate"] = rec.original_end
-                df.at[src_row, "IsPrimary"] = True
-                df.at[src_row, "Status"] = "Active"
+                df.at[src_row, "IsCurrentAssignment"] = True
+                df.at[src_row, "AssignmentStatus"] = "Active"
             dst_row = sig_to_idx.get((rec.employee_key, rec.dst_key, rec.transfer_date))
             if dst_row is not None:
                 drop_idx.append(dst_row)

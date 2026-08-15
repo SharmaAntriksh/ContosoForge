@@ -7,8 +7,10 @@ when ``employees.transfers.enabled = True``.
 Design invariants:
   - No store drops below 1 salesperson on any date after a transfer.
   - No date gaps: old assignment ends the day before new one starts.
-  - Managers (30M), online reps (50M), and corporate hierarchy never transfer.
-  - Only staff in ``salesperson_roles`` are eligible.
+  - Managers, online reps, and corporate hierarchy are excluded by default.
+  - Only physical-store staff in configured ``eligible_roles`` are eligible.
+  - Salesperson coverage is adjusted only when the transferred role sells.
+  - Every emitted transfer reason has an observable business precondition.
 
 The coverage bookkeeping and surgical rollback live in
 ``src.dimensions.employees.assignment_core``; the "is this store open" rule
@@ -23,8 +25,7 @@ import numpy as np
 import pandas as pd
 
 from src.defaults import (
-    EMPLOYEE_TRANSFER_REASON_LABELS,
-    EMPLOYEE_TRANSFER_REASON_PROBS,
+    EMPLOYEE_NEW_STORE_TRANSFER_WINDOW_DAYS,
     is_physical_store_key,
 )
 from src.dimensions.employees.assignment_core import (
@@ -38,8 +39,9 @@ from src.dimensions.employees.assignment_core import (
 )
 from src.dimensions.stores.lifecycle import (
     build_region_store_map,
+    build_store_region_lookup,
     build_store_date_maps,
-    store_open_on,
+    store_open_through_window,
 )
 from src.utils.logging_utils import info, warn
 
@@ -51,24 +53,25 @@ from src.utils.logging_utils import info, warn
 def _build_open_store_candidates(
     region_stores: Dict[str, List[int]],
     all_physical_keys: List[int],
-    year_start: pd.Timestamp,
-    year_end: pd.Timestamp,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
     open_dates: Dict[int, pd.Timestamp],
     close_dates: Dict[int, pd.Timestamp],
     reno_start_dates: Optional[Dict[int, pd.Timestamp]] = None,
     reno_end_dates: Optional[Dict[int, pd.Timestamp]] = None,
 ) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
-    """Pre-compute open store arrays for the year.
-
-    Returns (region_open, all_open).  A store is included only if open on
-    both year_start and year_end — stores that close or are renovating
-    mid-year are excluded entirely (they will never appear as transfer
-    destinations).
-    """
+    """Return stores open throughout a candidate assignment window."""
     all_open = np.array([
         sk for sk in all_physical_keys
-        if store_open_on(sk, year_start, open_dates, close_dates, reno_start_dates, reno_end_dates)
-        and store_open_on(sk, year_end, open_dates, close_dates, reno_start_dates, reno_end_dates)
+        if store_open_through_window(
+            sk,
+            window_start,
+            window_end,
+            open_dates,
+            close_dates,
+            reno_start_dates,
+            reno_end_dates,
+        )
     ], dtype=np.int32)
     all_open_set = set(all_open)
 
@@ -130,6 +133,58 @@ def _format_rejection_summary(rejections: Dict[str, int], fallback: str) -> str:
     return ", ".join(f"{count} {reason}" for reason, count in sorted(rejections.items()))
 
 
+def _classify_transfer_reason(
+    destination_store: int,
+    transfer_date: pd.Timestamp,
+    opening_dates: Dict[int, pd.Timestamp],
+    planned_headcount: Dict[int, int],
+    observed_headcount: int,
+) -> str:
+    """Classify a move from observable destination conditions.
+
+    A recently opened destination is a ``New Store Opening`` move. An older
+    destination below its planned staffing level is a ``Backfill``. All other
+    voluntary moves are ``Employee Request``. Narrative reasons without a
+    generated causal signal are intentionally not emitted.
+    """
+    opening_date = opening_dates.get(int(destination_store))
+    if opening_date is not None:
+        days_open = (pd.Timestamp(transfer_date) - pd.Timestamp(opening_date)).days
+        if 0 <= days_open <= EMPLOYEE_NEW_STORE_TRANSFER_WINDOW_DAYS:
+            return "New Store Opening"
+
+    planned = int(planned_headcount.get(int(destination_store), 0))
+    if planned > 0 and int(observed_headcount) < planned:
+        return "Backfill"
+    return "Employee Request"
+
+
+def _headcount_as_of(
+    row_indices: np.ndarray,
+    start_dates: np.ndarray,
+    end_dates: np.ndarray,
+    on_date: pd.Timestamp,
+    accepted_rows: List[dict],
+) -> int:
+    """Return destination staffing effective on ``on_date``.
+
+    ``row_indices`` points into the year-start assignment arrays. Accepted rows
+    are kept separately until the end-of-year concat, so they are included here
+    explicitly. This prevents a dataset-end snapshot from leaking backward into
+    historical ``Backfill`` classification.
+    """
+    on_date_ns = np.datetime64(on_date, "ns")
+    count = int(np.count_nonzero(
+        (start_dates[row_indices] <= on_date_ns)
+        & (end_dates[row_indices] >= on_date_ns)
+    ))
+    count += sum(
+        pd.Timestamp(row["StartDate"]) <= on_date <= pd.Timestamp(row["EndDate"])
+        for row in accepted_rows
+    )
+    return count
+
+
 def _log_violation_details(
     violations: List[Tuple[int, int]],
     budget: CoverageBudget,
@@ -173,6 +228,7 @@ def apply_transfers(
     min_tenure_months: int = 6,
     same_region_pref: float = 0.7,
     salesperson_roles: Optional[List[str]] = None,
+    eligible_roles: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """Apply employee transfers to the assignments bridge table.
 
@@ -191,16 +247,16 @@ def apply_transfers(
 
     if salesperson_roles is None:
         salesperson_roles = ["Sales Associate"]
+    if eligible_roles is None:
+        eligible_roles = list(salesperson_roles)
+    salesperson_role_set = set(salesperson_roles)
+    eligible_role_set = set(eligible_roles)
 
     # --- Store metadata ---------------------------------------------------
     sk_arr = stores["StoreKey"].astype(np.int32).to_numpy()
     open_dates, close_dates, reno_start_dates, reno_end_dates = build_store_date_maps(stores)
 
-    store_region: Dict[int, str] = {}
-    if "StoreRegion" in stores.columns:
-        sr = stores["StoreRegion"].astype(str).to_numpy()
-        for sk, region in zip(sk_arr, sr):
-            store_region[int(sk)] = region
+    store_region = build_store_region_lookup(stores)
 
     region_stores = build_region_store_map(stores)
 
@@ -210,6 +266,14 @@ def apply_transfers(
     ]
 
     df = assignments.copy()
+    planned_headcount = (
+        dict(zip(
+            stores["StoreKey"].astype(int),
+            pd.to_numeric(stores["EmployeeCount"], errors="coerce")
+            .fillna(0).astype(int),
+        ))
+        if "EmployeeCount" in stores.columns else {}
+    )
     transfer_count = 0
     rejections: Dict[str, int] = defaultdict(int)
     transfer_records: List[_TransferRecord] = []
@@ -231,22 +295,19 @@ def apply_transfers(
         year_start = pd.Timestamp(f"{year}-01-01")
         year_end = pd.Timestamp(f"{year}-12-31")
 
-        # Eligible: staff employees with active primary assignments
-        # and sufficient tenure at current store. In the static model an Active
-        # assignment runs to global_end (EndDate == global_end), so a transfer
-        # date drawn within the year always falls inside [StartDate, EndDate];
-        # the transfer_date <= original_end guard in the loop is the backstop if
-        # that assumption is ever broken (e.g. by a mid-window termination).
+        # Eligible: staff employees with effective current assignments and
+        # sufficient tenure at the current store. AssignmentStatus is deliberately
+        # not a filter: "Completed" is a dataset-end segment outcome and using it here
+        # would leak a future termination backward into earlier years. The
+        # effective StartDate/EndDate window is the point-in-time truth; the
+        # transfer_date <= original_end guard below enforces the exact day.
         tenure_cutoff = year_start - pd.DateOffset(months=min_tenure_months)
 
-        # Physical-store salespeople only: the salesperson_roles filter already
-        # excludes managers; is_physical_store_key excludes online reps (whose
-        # home store is an online store) — together the staff-at-physical-stores
-        # set the old EmployeeKey-band check selected.
+        # Configured physical-store roles only. Managers and online/corporate
+        # employees stay excluded unless a future policy explicitly adds them.
         eligible_mask = (
-            (df["IsPrimary"] == 1)
-            & (df["Status"] == "Active")
-            & (df["RoleAtStore"].isin(salesperson_roles))
+            (df["IsCurrentAssignment"] == 1)
+            & (df["RoleAtStore"].isin(eligible_role_set))
             & is_physical_store_key(df["StoreKey"])
             & (df["StartDate"] <= tenure_cutoff)
             & (df["EndDate"] >= year_start)
@@ -280,32 +341,29 @@ def apply_transfers(
         col_store_key = df["StoreKey"].values
         col_fte = df["FTE"].values
         col_role = df["RoleAtStore"].values
-        col_is_primary = np.array(df["IsPrimary"].values, copy=True)
-        col_status = np.array(df["Status"].values, copy=True)
+        col_is_current = np.array(df["IsCurrentAssignment"].values, copy=True)
+        col_status = np.array(df["AssignmentStatus"].values, copy=True)
 
         start_ns = df["StartDate"].values.astype("datetime64[ns]")
         end_ns = df["EndDate"].values.astype("datetime64[ns]").copy()
 
-        region_open, all_open = _build_open_store_candidates(
-            region_stores, all_physical_keys, year_start, year_end,
-            open_dates, close_dates,
-            reno_start_dates, reno_end_dates,
-        )
+        row_indices_by_store: Dict[int, list[int]] = defaultdict(list)
+        for row_idx, store_key in enumerate(col_store_key):
+            row_indices_by_store[int(store_key)].append(row_idx)
+        row_indices_by_store_np = {
+            store_key: np.asarray(indices, dtype=np.int64)
+            for store_key, indices in row_indices_by_store.items()
+        }
 
         year_new_rows: list[dict] = []
+        year_new_rows_by_store: Dict[int, list[dict]] = defaultdict(list)
 
-        # Pre-generate transfer reasons for the year (avoids per-transfer rng.choice)
-        _reasons_batch = rng.choice(
-            EMPLOYEE_TRANSFER_REASON_LABELS,
-            size=len(chronological),
-            p=EMPLOYEE_TRANSFER_REASON_PROBS,
-        )
-        _reason_idx = 0
-
-        for ti, (transfer_date, idx) in enumerate(chronological):
+        for transfer_date, idx in chronological:
             emp_key = int(col_emp_key[idx])
             source_sk = int(col_store_key[idx])
             source_region = store_region.get(source_sk)
+            role = str(col_role[idx])
+            is_salesperson = role in salesperson_role_set
             employee_start = pd.Timestamp(start_ns[idx])
             original_end = pd.Timestamp(end_ns[idx])
 
@@ -316,7 +374,14 @@ def apply_transfers(
                 rejections["transfer_after_end"] += 1
                 continue
 
-            # Pick destination store
+            # Pick from stores open for the candidate's effective interval. This
+            # admits genuine mid-year openings after they begin operating.
+            region_open, all_open = _build_open_store_candidates(
+                region_stores, all_physical_keys,
+                transfer_date, original_end,
+                open_dates, close_dates,
+                reno_start_dates, reno_end_dates,
+            )
             dest_sk = _pick_destination(
                 rng=rng,
                 source_sk=source_sk,
@@ -337,26 +402,36 @@ def apply_transfers(
                 rejections["dst_renovation_window"] += 1
                 continue
 
-            feasible, _violators = _is_transfer_feasible(
-                budget, source_sk, employee_start, transfer_date, original_end,
-            )
-            if not feasible:
-                rejections["source_coverage"] += 1
-                continue
+            if is_salesperson:
+                feasible, _violators = _is_transfer_feasible(
+                    budget, source_sk, employee_start, transfer_date, original_end,
+                )
+                if not feasible:
+                    rejections["source_coverage"] += 1
+                    continue
 
-            _adjust_budget(
-                budget, source_sk, dest_sk,
-                employee_start, transfer_date, original_end, new_end,
-                direction=1,
-            )
+                _adjust_budget(
+                    budget, source_sk, dest_sk,
+                    employee_start, transfer_date, original_end, new_end,
+                    direction=1,
+                )
 
             new_end_ns = np.datetime64(transfer_date - pd.Timedelta(days=1), "ns")
             end_ns[idx] = new_end_ns
-            col_is_primary[idx] = np.int32(0)
+            col_is_current[idx] = np.int32(0)
             col_status[idx] = "Transferred"
 
-            reason = _reasons_batch[_reason_idx]
-            _reason_idx += 1
+            destination_headcount = _headcount_as_of(
+                row_indices_by_store_np.get(int(dest_sk), np.array([], dtype=np.int64)),
+                start_ns,
+                end_ns,
+                transfer_date,
+                year_new_rows_by_store[int(dest_sk)],
+            )
+            reason = _classify_transfer_reason(
+                dest_sk, transfer_date, open_dates,
+                planned_headcount, destination_headcount,
+            )
 
             new_row = {
                 "EmployeeKey": np.int32(emp_key),
@@ -364,31 +439,33 @@ def apply_transfers(
                 "StartDate": transfer_date,
                 "EndDate": new_end,
                 "FTE": col_fte[idx],
-                "RoleAtStore": col_role[idx],
-                "IsPrimary": True,
+                "RoleAtStore": role,
+                "IsCurrentAssignment": True,
                 "TransferReason": str(reason),
-                "Status": new_status,
+                "AssignmentStatus": new_status,
             }
             year_new_rows.append(new_row)
-            new_rec_idx = len(transfer_records)
-            prev_idx = last_record_by_emp.get(emp_key)
-            if prev_idx is not None:
-                transfer_records[prev_idx].chain_next = new_rec_idx
-            transfer_records.append(_TransferRecord(
-                employee_key=emp_key,
-                src_key=source_sk,
-                dst_key=int(dest_sk),
-                employee_start=employee_start,
-                transfer_date=transfer_date,
-                original_end=original_end,
-                dst_end=new_end,
-            ))
-            last_record_by_emp[emp_key] = new_rec_idx
+            year_new_rows_by_store[int(dest_sk)].append(new_row)
+            if is_salesperson:
+                new_rec_idx = len(transfer_records)
+                prev_idx = last_record_by_emp.get(emp_key)
+                if prev_idx is not None:
+                    transfer_records[prev_idx].chain_next = new_rec_idx
+                transfer_records.append(_TransferRecord(
+                    employee_key=emp_key,
+                    src_key=source_sk,
+                    dst_key=int(dest_sk),
+                    employee_start=employee_start,
+                    transfer_date=transfer_date,
+                    original_end=original_end,
+                    dst_end=new_end,
+                ))
+                last_record_by_emp[emp_key] = new_rec_idx
             transfer_count += 1
 
         df["EndDate"] = end_ns
-        df["IsPrimary"] = col_is_primary
-        df["Status"] = col_status
+        df["IsCurrentAssignment"] = col_is_current
+        df["AssignmentStatus"] = col_status
 
         if year_new_rows:
             df = pd.concat([df, pd.DataFrame(year_new_rows)], ignore_index=True)
@@ -450,7 +527,12 @@ def _pick_destination(
     all_open: np.ndarray,
     same_region_pref: float,
 ) -> Optional[int]:
-    """Pick a destination store from pre-built open-store arrays."""
+    """Pick a destination store from pre-built open-store arrays.
+
+    Cross-region moves are permitted by policy when ``same_region_pref < 1``.
+    A value of exactly 1 is a hard organizational boundary: if no peer store is
+    open in the source region, the transfer is skipped instead of crossing it.
+    """
     use_same_region = rng.random() < same_region_pref
 
     candidates = None
@@ -459,6 +541,9 @@ def _pick_destination(
         filtered = arr[arr != source_sk]
         if len(filtered) > 0:
             candidates = filtered
+
+    if candidates is None and use_same_region and same_region_pref >= 1.0:
+        return None
 
     if candidates is None:
         filtered = all_open[all_open != source_sk]

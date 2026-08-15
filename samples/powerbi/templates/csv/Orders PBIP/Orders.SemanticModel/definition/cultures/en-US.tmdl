@@ -5362,135 +5362,6 @@ cultureInfo en-US
 			      ],
 			      "SemanticType": "Time"
 			    },
-			    "store.open_flag": {
-			      "Definition": {
-			        "Binding": {
-			          "ConceptualEntity": "Store",
-			          "ConceptualProperty": "OpenFlag"
-			        }
-			      },
-			      "State": "Generated",
-			      "Terms": [
-			        {
-			          "open flag": {
-			            "State": "Generated"
-			          }
-			        },
-			        {
-			          "OpenFlag": {
-			            "Type": "Noun",
-			            "State": "Generated",
-			            "Weight": 0.99
-			          }
-			        },
-			        {
-			          "flag": {
-			            "State": "Generated",
-			            "Weight": 0.97
-			          }
-			        },
-			        {
-			          "open ensign": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.5
-			          }
-			        },
-			        {
-			          "open pennant": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.5
-			          }
-			        },
-			        {
-			          "open pennon": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.5
-			          }
-			        },
-			        {
-			          "open emblem": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.5
-			          }
-			        },
-			        {
-			          "open streamer": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.5
-			          }
-			        },
-			        {
-			          "ensign": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.491
-			          }
-			        },
-			        {
-			          "pennant": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.491
-			          }
-			        },
-			        {
-			          "pennon": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.491
-			          }
-			        },
-			        {
-			          "emblem": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.491
-			          }
-			        },
-			        {
-			          "streamer": {
-			            "Type": "Noun",
-			            "State": "Suggested",
-			            "Source": {
-			              "Agent": "Thesaurus"
-			            },
-			            "Weight": 0.491
-			          }
-			        }
-			      ]
-			    },
 			    "store.square_footage": {
 			      "Definition": {
 			        "Binding": {
@@ -17857,11 +17728,11 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "employee_store_assignment.is_primary": {
+			    "employee_store_assignment.is_current_assignment": {
 			      "Definition": {
 			        "Binding": {
 			          "ConceptualEntity": "EmployeeStoreAssignment",
-			          "ConceptualProperty": "IsPrimary"
+			          "ConceptualProperty": "IsCurrentAssignment"
 			        }
 			      },
 			      "State": "Generated",
@@ -17872,7 +17743,7 @@ cultureInfo en-US
 			          }
 			        },
 			        {
-			          "IsPrimary": {
+			          "IsCurrentAssignment": {
 			            "Type": "Noun",
 			            "State": "Generated",
 			            "Weight": 0.99
@@ -23412,7 +23283,7 @@ cultureInfo en-US
 			        }
 			      ]
 			    },
-			    "employee_store_assignment_is_primary": {
+			    "employee_store_assignment_is_current_assignment": {
 			      "Binding": {
 			        "ConceptualEntity": "EmployeeStoreAssignment"
 			      },
@@ -23423,9 +23294,9 @@ cultureInfo en-US
 			            "Entity": "employee_store_assignment"
 			          }
 			        },
-			        "employee_store_assignment.is_primary": {
+			        "employee_store_assignment.is_current_assignment": {
 			          "Target": {
-			            "Entity": "employee_store_assignment.is_primary"
+			            "Entity": "employee_store_assignment.is_current_assignment"
 			          }
 			        }
 			      },
@@ -23443,12 +23314,12 @@ cultureInfo en-US
 			              }
 			            ],
 			            "Measurement": {
-			              "Role": "employee_store_assignment.is_primary"
+			              "Role": "employee_store_assignment.is_current_assignment"
 			            }
 			          },
 			          "State": "Generated",
 			          "Weight": 0.99,
-			          "ID": "is_primary_indicates_how_primary_employee_store_assignments_are"
+			          "ID": "is_current_assignment_indicates_how_primary_employee_store_assignments_are"
 			        },
 			        {
 			          "Attribute": {
@@ -23456,7 +23327,7 @@ cultureInfo en-US
 			              "Role": "employee_store_assignment"
 			            },
 			            "Object": {
-			              "Role": "employee_store_assignment.is_primary"
+			              "Role": "employee_store_assignment.is_current_assignment"
 			            }
 			          },
 			          "State": "Generated",

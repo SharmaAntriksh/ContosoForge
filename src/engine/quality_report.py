@@ -329,10 +329,30 @@ def _check_referential_integrity(
         ("returns", "fact", "EmployeeKey", "employees", "EmployeeKey"),
         # Inventory → dimensions
         ("inventory_snapshot", "fact", "ProductKey", "products", "ProductKey"),
-        ("inventory_snapshot", "fact", "StoreKey", "stores", "StoreKey"),
+        (
+            "inventory_snapshot", "fact", "WarehouseKey",
+            "warehouses", "WarehouseKey",
+        ),
         # Dimension internal FKs
         ("customers", "dim", "GeographyKey", "geography", "GeographyKey"),
         ("stores", "dim", "GeographyKey", "geography", "GeographyKey"),
+        ("warehouses", "dim", "GeographyKey", "geography", "GeographyKey"),
+        ("stores", "dim", "WarehouseKey", "warehouses", "WarehouseKey"),
+        ("stores", "dim", "SuccessorStoreKey", "stores", "StoreKey"),
+        (
+            "employees", "dim", "ParentEmployeeKey",
+            "employees", "EmployeeKey",
+        ),
+        ("employees", "dim", "HomeStoreKey", "stores", "StoreKey"),
+        ("employees", "dim", "GeographyKey", "geography", "GeographyKey"),
+        (
+            "employee_store_assignments", "dim", "EmployeeKey",
+            "employees", "EmployeeKey",
+        ),
+        (
+            "employee_store_assignments", "dim", "StoreKey",
+            "stores", "StoreKey",
+        ),
     ]
 
     folder_map = {"fact": facts_folder, "dim": dims_folder}
@@ -586,6 +606,9 @@ def _check_nulls_and_duplicates(
         ("stores", "StoreKey", dims_folder),
         ("promotions", "PromotionKey", dims_folder),
         ("employees", "EmployeeKey", dims_folder),
+        (
+            "employee_store_assignments", "AssignmentKey", dims_folder,
+        ),
         ("dates", "DateKey", dims_folder),
         ("geography", "GeographyKey", dims_folder),
         ("currency", "CurrencyKey", dims_folder),
@@ -629,6 +652,18 @@ def _check_nulls_and_duplicates(
 def _has_columns(df: Optional[pd.DataFrame], columns: Sequence[str]) -> bool:
     """Return whether *df* contains every requested column."""
     return df is not None and all(column in df.columns for column in columns)
+
+
+def _as_boolean_mask(series: pd.Series) -> pd.Series:
+    """Normalize boolean-like CSV/Parquet values to a null-safe bool mask.
+
+    CSV-backed Arrow frames commonly expose flags as ``int64[pyarrow]`` while
+    Parquet keeps ``bool[pyarrow]``. Normalizing their string representation
+    avoids unsupported mixed Arrow boolean/integer logical operations and also
+    handles conventional textual true values.
+    """
+    normalized = series.astype("string").str.strip().str.lower()
+    return normalized.isin({"1", "true", "t", "yes", "y"}).fillna(False)
 
 
 def _find_check(report: QualityReport, name: str) -> Optional[CheckResult]:
@@ -1040,9 +1075,11 @@ def _check_promotion_alignment(
             how="left",
         )
         category = channel_aligned["PromotionCategory"].astype("string")
+        is_physical = _as_boolean_mask(channel_aligned["IsPhysical"])
+        is_digital = _as_boolean_mask(channel_aligned["IsDigital"])
         invalid_channel = (
-            (category.eq("Store") & ~channel_aligned["IsPhysical"].fillna(False))
-            | (category.eq("Online") & ~channel_aligned["IsDigital"].fillna(False))
+            (category.eq("Store") & ~is_physical)
+            | (category.eq("Online") & ~is_digital)
         )
         invalid_count = int(invalid_channel.sum())
         report.checks.append(CheckResult(
@@ -1265,6 +1302,751 @@ def _check_inventory_stockout_semantics(
     ))
 
 
+def _check_employee_assignment_temporal_integrity(
+    report: QualityReport,
+    assignments: pd.DataFrame,
+) -> None:
+    """Validate the inclusive, gap-free employee assignment timeline contract."""
+    required = [
+        "EmployeeKey", "StartDate", "EndDate", "IsCurrentAssignment",
+    ]
+    if not _has_columns(assignments, required) or assignments.empty:
+        return
+
+    timeline = assignments[required].copy()
+    timeline["StartDate"] = pd.to_datetime(
+        timeline["StartDate"], errors="coerce",
+    ).dt.normalize()
+    timeline["EndDate"] = pd.to_datetime(
+        timeline["EndDate"], errors="coerce",
+    ).dt.normalize()
+
+    invalid_dates = (
+        timeline["StartDate"].isna()
+        | timeline["EndDate"].isna()
+        | (timeline["StartDate"] > timeline["EndDate"])
+    )
+    invalid_count = int(invalid_dates.sum())
+    report.checks.append(CheckResult(
+        name="Assignment date order",
+        passed=invalid_count == 0,
+        message=(
+            "Every assignment has an inclusive StartDate <= EndDate"
+            if invalid_count == 0
+            else f"{invalid_count} assignment(s) have missing or reversed dates"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    ordered = timeline.loc[~invalid_dates].sort_values(
+        ["EmployeeKey", "StartDate", "EndDate"], kind="stable",
+    )
+    previous_end = ordered.groupby("EmployeeKey")["EndDate"].shift()
+    boundary = previous_end.notna()
+    day_delta = (ordered["StartDate"] - previous_end).dt.days
+    overlaps = boundary & day_delta.le(0)
+    gaps = boundary & day_delta.gt(1)
+
+    overlap_count = int(overlaps.sum())
+    overlap_employees = sorted(
+        ordered.loc[overlaps, "EmployeeKey"].drop_duplicates().head(10).tolist(),
+    )
+    report.checks.append(CheckResult(
+        name="Assignment segments do not overlap",
+        passed=overlap_count == 0,
+        message=(
+            "No inclusive assignment windows overlap"
+            if overlap_count == 0
+            else f"{overlap_count} overlapping assignment boundary/boundaries"
+        ),
+        details=(
+            "" if overlap_count == 0
+            else f"Sample EmployeeKeys: {overlap_employees}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    gap_count = int(gaps.sum())
+    gap_employees = sorted(
+        ordered.loc[gaps, "EmployeeKey"].drop_duplicates().head(10).tolist(),
+    )
+    report.checks.append(CheckResult(
+        name="Assignment segments are contiguous",
+        passed=gap_count == 0,
+        message=(
+            "Consecutive inclusive assignments start on the next day"
+            if gap_count == 0
+            else f"{gap_count} gap(s) between consecutive assignments"
+        ),
+        details=(
+            "" if gap_count == 0
+            else f"Sample EmployeeKeys: {gap_employees}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    current = timeline["IsCurrentAssignment"].fillna(False).astype(bool)
+    current_counts = current.groupby(timeline["EmployeeKey"]).sum()
+    invalid_current = current_counts.ne(1)
+    invalid_current_count = int(invalid_current.sum())
+    invalid_current_employees = sorted(
+        current_counts.index[invalid_current].tolist()[:10],
+    )
+    report.checks.append(CheckResult(
+        name="Exactly one current assignment per employee",
+        passed=invalid_current_count == 0,
+        message=(
+            "Every assigned employee has exactly one current segment"
+            if invalid_current_count == 0
+            else (
+                f"{invalid_current_count} employee(s) do not have exactly one "
+                "current segment"
+            )
+        ),
+        details=(
+            "" if invalid_current_count == 0
+            else f"Sample EmployeeKeys: {invalid_current_employees}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_salesperson_assignment_integrity(
+    report: QualityReport,
+    sales: pd.DataFrame,
+    assignments: pd.DataFrame,
+    *,
+    chunk_size: int = 1_000_000,
+) -> None:
+    """Check each sale against the employee's inclusive assignment interval.
+
+    The lookup uses compact integer codes and bounded chunks so the check remains
+    practical for the repository's 20M-row benchmark without materializing a
+    many-to-many Sales-to-assignment join.
+    """
+    sales_required = ["EmployeeKey", "StoreKey", "OrderDate"]
+    assignment_required = [
+        "EmployeeKey", "StoreKey", "StartDate", "EndDate",
+    ]
+    if (
+        not _has_columns(sales, sales_required)
+        or not _has_columns(assignments, assignment_required)
+        or sales.empty
+    ):
+        return
+
+    assignment_employee = pd.to_numeric(
+        assignments["EmployeeKey"], errors="coerce",
+    )
+    assignment_store = pd.to_numeric(assignments["StoreKey"], errors="coerce")
+    assignment_start = pd.to_datetime(
+        assignments["StartDate"], errors="coerce",
+    ).dt.normalize()
+    assignment_end = pd.to_datetime(
+        assignments["EndDate"], errors="coerce",
+    ).dt.normalize()
+    int32 = np.iinfo(np.int32)
+    valid_assignment = (
+        assignment_employee.notna()
+        & assignment_employee.between(int32.min, int32.max)
+        & assignment_store.notna()
+        & assignment_store.between(int32.min, int32.max)
+        & assignment_start.notna()
+        & assignment_end.notna()
+        & assignment_start.le(assignment_end)
+    )
+
+    valid_rows = assignments.loc[valid_assignment].copy()
+    if valid_rows.empty:
+        report.checks.append(CheckResult(
+            name="Salesperson effective assignment matches sale",
+            passed=False,
+            message=f"{len(sales)} sale row(s) have no valid assignment lookup",
+            category="Analytical Integrity",
+        ))
+        return
+
+    assignment_employee_np = assignment_employee.loc[valid_assignment].to_numpy(
+        dtype=np.int64,
+    )
+    assignment_store_np = assignment_store.loc[valid_assignment].to_numpy(
+        dtype=np.int64,
+    )
+    assignment_start_day = assignment_start.loc[valid_assignment].to_numpy(
+        dtype="datetime64[D]",
+    ).astype(np.int64)
+    assignment_end_day = assignment_end.loc[valid_assignment].to_numpy(
+        dtype="datetime64[D]",
+    ).astype(np.int64)
+
+    # pandas' nanosecond datetime range is well within +/-1M epoch days, so this
+    # stride preserves lexicographic (EmployeeKey, date) ordering for int32 keys.
+    date_stride = np.int64(1_000_000)
+    assignment_codes = assignment_employee_np * date_stride + assignment_start_day
+    order = np.argsort(assignment_codes, kind="stable")
+    assignment_codes = assignment_codes[order]
+    assignment_employee_np = assignment_employee_np[order]
+    assignment_store_np = assignment_store_np[order]
+    assignment_start_day = assignment_start_day[order]
+    assignment_end_day = assignment_end_day[order]
+
+    mismatch_count = 0
+    mismatch_samples: List[Dict[str, Any]] = []
+    chunk_size = max(int(chunk_size), 1)
+    for chunk_start in range(0, len(sales), chunk_size):
+        chunk = sales.iloc[chunk_start:chunk_start + chunk_size]
+        employee = pd.to_numeric(chunk["EmployeeKey"], errors="coerce")
+        store = pd.to_numeric(chunk["StoreKey"], errors="coerce")
+        order_date = pd.to_datetime(chunk["OrderDate"], errors="coerce").dt.normalize()
+        valid_sale = (
+            employee.notna()
+            & employee.between(int32.min, int32.max)
+            & store.notna()
+            & store.between(int32.min, int32.max)
+            & order_date.notna()
+        ).to_numpy()
+
+        employee_np = employee.fillna(0).to_numpy(dtype=np.int64)
+        store_np = store.fillna(0).to_numpy(dtype=np.int64)
+        order_day = order_date.fillna(pd.Timestamp("1970-01-01")).to_numpy(
+            dtype="datetime64[D]",
+        ).astype(np.int64)
+        sale_codes = employee_np * date_stride + order_day
+        positions = np.searchsorted(assignment_codes, sale_codes, side="right") - 1
+        has_candidate = positions >= 0
+        safe_positions = np.clip(positions, 0, len(assignment_codes) - 1)
+        matched = (
+            valid_sale
+            & has_candidate
+            & (assignment_employee_np[safe_positions] == employee_np)
+            & (assignment_store_np[safe_positions] == store_np)
+            & (assignment_start_day[safe_positions] <= order_day)
+            & (assignment_end_day[safe_positions] >= order_day)
+        )
+        mismatched = ~matched
+        mismatch_count += int(mismatched.sum())
+        remaining_samples = 10 - len(mismatch_samples)
+        if remaining_samples > 0 and mismatched.any():
+            mismatch_samples.extend(
+                chunk.loc[mismatched, sales_required]
+                .head(remaining_samples)
+                .to_dict(orient="records")
+            )
+
+    report.checks.append(CheckResult(
+        name="Salesperson effective assignment matches sale",
+        passed=mismatch_count == 0,
+        message=(
+            f"All {len(sales)} sale rows match employee, store, and effective date"
+            if mismatch_count == 0
+            else f"{mismatch_count} sale row(s) do not match an effective assignment"
+        ),
+        details=(
+            "" if mismatch_count == 0
+            else f"Sample mismatches: {mismatch_samples}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_current_headcount_reconciliation(
+    report: QualityReport,
+    employees: pd.DataFrame,
+    assignments: pd.DataFrame,
+) -> None:
+    """Reconcile dataset-end effective assignments to active store employees."""
+    employee_required = ["EmployeeKey", "HomeStoreKey", "IsActive"]
+    assignment_required = [
+        "EmployeeKey", "StoreKey", "StartDate", "EndDate",
+    ]
+    if (
+        not _has_columns(employees, employee_required)
+        or not _has_columns(assignments, assignment_required)
+    ):
+        return
+
+    assignment_start = pd.to_datetime(
+        assignments["StartDate"], errors="coerce",
+    ).dt.normalize()
+    assignment_end = pd.to_datetime(
+        assignments["EndDate"], errors="coerce",
+    ).dt.normalize()
+    valid_end = assignment_end.dropna()
+    if valid_end.empty:
+        return
+    snapshot_date = valid_end.max()
+    effective = assignments.loc[
+        assignment_start.le(snapshot_date) & assignment_end.ge(snapshot_date)
+    ]
+
+    active_store_employee = (
+        employees["IsActive"].fillna(False).astype(bool)
+        & employees["HomeStoreKey"].notna()
+    )
+    expected_keys = set(
+        pd.to_numeric(
+            employees.loc[active_store_employee, "EmployeeKey"], errors="coerce",
+        ).dropna().astype(np.int64).tolist()
+    )
+    effective_keys = pd.to_numeric(
+        effective["EmployeeKey"], errors="coerce",
+    ).dropna().astype(np.int64)
+    effective_counts = effective_keys.value_counts()
+    actual_keys = set(effective_counts.index.tolist())
+    missing = sorted(expected_keys - actual_keys)
+    unexpected = sorted(actual_keys - expected_keys)
+    duplicate = sorted(effective_counts.index[effective_counts.gt(1)].tolist())
+    passed = not missing and not unexpected and not duplicate
+    store_count = int(effective["StoreKey"].nunique(dropna=True))
+
+    report.checks.append(CheckResult(
+        name="Current assignment headcount reconciles to active employees",
+        passed=passed,
+        message=(
+            f"{len(expected_keys)} active employees across {store_count} stores "
+            f"at {snapshot_date.date()}"
+            if passed
+            else (
+                f"{len(missing)} missing active; {len(unexpected)} "
+                f"inactive/unexpected; {len(duplicate)} duplicate effective"
+            )
+        ),
+        details=(
+            "" if passed
+            else (
+                f"Missing sample: {missing[:10]}; unexpected sample: "
+                f"{unexpected[:10]}; duplicate sample: {duplicate[:10]}"
+            )
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_store_organizational_geography(
+    report: QualityReport,
+    stores: pd.DataFrame,
+    geography: pd.DataFrame,
+) -> None:
+    """Validate the country-bounded store hierarchy and structured identities."""
+    store_columns = [
+        "GeographyKey", "StoreZone", "StoreDistrict", "StoreRegion",
+        "StoreDistrictId", "StoreRegionId",
+    ]
+    if not _has_columns(stores, store_columns) or "GeographyKey" not in geography:
+        return
+
+    country_column = next(
+        (
+            column for column in (
+                "Country", "CountryRegionName", "RegionCountryName",
+            )
+            if column in geography.columns
+        ),
+        None,
+    )
+    if country_column is None:
+        return
+
+    geo = geography[["GeographyKey", country_column]].drop_duplicates(
+        "GeographyKey", keep="first",
+    ).rename(columns={country_column: "Country"})
+    hierarchy = stores[store_columns].merge(
+        geo, on="GeographyKey", how="left", validate="many_to_one",
+    )
+
+    district_boundary = hierarchy.groupby(
+        "StoreDistrictId", dropna=False,
+    ).agg(
+        Countries=("Country", lambda values: values.nunique(dropna=False)),
+        Zones=("StoreZone", lambda values: values.nunique(dropna=False)),
+        Regions=("StoreRegionId", lambda values: values.nunique(dropna=False)),
+    )
+    bad_districts = district_boundary[
+        district_boundary["Countries"].ne(1)
+        | district_boundary["Zones"].ne(1)
+        | district_boundary["Regions"].ne(1)
+    ]
+    missing_country = int(hierarchy["Country"].isna().sum())
+    district_passed = bad_districts.empty and missing_country == 0
+    report.checks.append(CheckResult(
+        name="Store district country integrity",
+        passed=district_passed,
+        message=(
+            "Every district belongs to one country, zone, and region"
+            if district_passed else
+            f"{len(bad_districts)} invalid district(s); "
+            f"{missing_country} store(s) without country"
+        ),
+        details=(
+            "" if district_passed else
+            f"Sample StoreDistrictIds: {bad_districts.index.tolist()[:10]}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    region_boundary = hierarchy.groupby(
+        "StoreRegionId", dropna=False,
+    ).agg(
+        Countries=("Country", lambda values: values.nunique(dropna=False)),
+        Zones=("StoreZone", lambda values: values.nunique(dropna=False)),
+    )
+    bad_regions = region_boundary[
+        region_boundary["Countries"].ne(1) | region_boundary["Zones"].ne(1)
+    ]
+    region_passed = bad_regions.empty and missing_country == 0
+    report.checks.append(CheckResult(
+        name="Store region country and zone integrity",
+        passed=region_passed,
+        message=(
+            "Every region belongs to one country within one zone"
+            if region_passed else f"{len(bad_regions)} invalid region(s)"
+        ),
+        details=(
+            "" if region_passed else
+            f"Sample StoreRegionIds: {bad_regions.index.tolist()[:10]}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    district_id = pd.to_numeric(hierarchy["StoreDistrictId"], errors="coerce")
+    region_id = pd.to_numeric(hierarchy["StoreRegionId"], errors="coerce")
+    expected_district = "District " + district_id.astype("Int64").astype("string")
+    expected_region = "Region " + region_id.astype("Int64").astype("string")
+    identity_invalid = (
+        district_id.isna()
+        | district_id.le(0)
+        | region_id.isna()
+        | region_id.le(0)
+        | hierarchy["StoreDistrict"].astype("string").ne(expected_district)
+        | hierarchy["StoreRegion"].astype("string").ne(expected_region)
+    )
+    identity_count = int(identity_invalid.fillna(True).sum())
+    report.checks.append(CheckResult(
+        name="Store hierarchy labels match structured IDs",
+        passed=identity_count == 0,
+        message=(
+            "Display labels are deterministic renderings of positive hierarchy IDs"
+            if identity_count == 0 else
+            f"{identity_count} store hierarchy identity mismatch(es)"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_employee_organizational_geography(
+    report: QualityReport,
+    employees: pd.DataFrame,
+    stores: pd.DataFrame,
+) -> None:
+    """Validate employee location nullability, home hierarchy, and parent rollups."""
+    employee_columns = [
+        "EmployeeKey", "ParentEmployeeKey", "OrgLevel", "OrgUnitType",
+        "RegionId", "DistrictId", "HomeStoreKey", "GeographyKey",
+    ]
+    store_columns = [
+        "StoreKey", "GeographyKey", "StoreDistrictId", "StoreRegionId",
+    ]
+    if not _has_columns(employees, employee_columns) or not _has_columns(
+        stores, store_columns,
+    ):
+        return
+
+    org = employees["OrgUnitType"].astype("string").str.strip()
+    corporate = org.eq("Corporate")
+    region = org.eq("Region")
+    district = org.eq("District")
+    store = org.eq("Store")
+    location_columns = ["RegionId", "DistrictId", "HomeStoreKey", "GeographyKey"]
+    invalid_location = ~(corporate | region | district | store)
+    invalid_location |= corporate & employees[location_columns].notna().any(axis=1)
+    invalid_location |= region & (
+        employees["RegionId"].isna()
+        | employees[["DistrictId", "HomeStoreKey", "GeographyKey"]].notna().any(axis=1)
+    )
+    invalid_location |= district & (
+        employees[["RegionId", "DistrictId"]].isna().any(axis=1)
+        | employees[["HomeStoreKey", "GeographyKey"]].notna().any(axis=1)
+    )
+    invalid_location |= store & employees[location_columns].isna().any(axis=1)
+    invalid_location_count = int(invalid_location.fillna(True).sum())
+    report.checks.append(CheckResult(
+        name="Employee organizational location contract",
+        passed=invalid_location_count == 0,
+        message=(
+            "Location keys are present only at their applicable organization level"
+            if invalid_location_count == 0 else
+            f"{invalid_location_count} employee location/nullability violation(s)"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    home = employees.merge(
+        stores[store_columns].drop_duplicates("StoreKey", keep="first"),
+        left_on="HomeStoreKey", right_on="StoreKey", how="left",
+        suffixes=("_employee", "_store"), validate="many_to_one",
+    )
+
+    def _numeric_equal(left: pd.Series, right: pd.Series) -> pd.Series:
+        return pd.to_numeric(left, errors="coerce").eq(
+            pd.to_numeric(right, errors="coerce"),
+        ).fillna(False)
+
+    home_store = home["OrgUnitType"].astype("string").str.strip().eq("Store")
+    home_mismatch = home_store & ~(
+        _numeric_equal(home["GeographyKey_employee"], home["GeographyKey_store"])
+        & _numeric_equal(home["DistrictId"], home["StoreDistrictId"])
+        & _numeric_equal(home["RegionId"], home["StoreRegionId"])
+    )
+
+    region_ids = set(
+        pd.to_numeric(stores["StoreRegionId"], errors="coerce")
+        .dropna().astype(np.int64).tolist()
+    )
+    valid_region_manager = pd.to_numeric(
+        employees["RegionId"], errors="coerce",
+    ).isin(region_ids)
+    management_region_mismatch = region & ~valid_region_manager
+
+    district_rollup = (
+        stores[["StoreDistrictId", "StoreRegionId"]]
+        .drop_duplicates()
+        .drop_duplicates("StoreDistrictId", keep=False)
+        .rename(columns={
+            "StoreDistrictId": "DistrictId", "StoreRegionId": "ExpectedRegionId",
+        })
+    )
+    district_employee = employees.loc[district, ["EmployeeKey", "DistrictId", "RegionId"]]
+    district_employee = district_employee.merge(
+        district_rollup, on="DistrictId", how="left", validate="many_to_one",
+    )
+    district_mismatch_count = int((
+        ~_numeric_equal(
+            district_employee["RegionId"], district_employee["ExpectedRegionId"],
+        )
+    ).sum())
+    hierarchy_mismatch_count = (
+        int(home_mismatch.sum())
+        + int(management_region_mismatch.sum())
+        + district_mismatch_count
+    )
+    report.checks.append(CheckResult(
+        name="Employee hierarchy keys match store hierarchy",
+        passed=hierarchy_mismatch_count == 0,
+        message=(
+            "Employee home, district, and region identities match Stores"
+            if hierarchy_mismatch_count == 0 else
+            f"{hierarchy_mismatch_count} employee hierarchy mismatch(es)"
+        ),
+        details=(
+            "" if hierarchy_mismatch_count == 0 else
+            f"home={int(home_mismatch.sum())}; "
+            f"region={int(management_region_mismatch.sum())}; "
+            f"district={district_mismatch_count}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    parent = employees[[
+        "EmployeeKey", "OrgLevel", "RegionId", "DistrictId", "HomeStoreKey",
+    ]].rename(columns={
+        "EmployeeKey": "ParentEmployeeKey",
+        "OrgLevel": "ParentOrgLevel",
+        "RegionId": "ParentRegionId",
+        "DistrictId": "ParentDistrictId",
+        "HomeStoreKey": "ParentHomeStoreKey",
+    })
+    lineage = employees.merge(
+        parent, on="ParentEmployeeKey", how="left", validate="many_to_one",
+    )
+    level = pd.to_numeric(lineage["OrgLevel"], errors="coerce")
+    parent_level = pd.to_numeric(lineage["ParentOrgLevel"], errors="coerce")
+    invalid_parent = level.eq(1) & lineage["ParentEmployeeKey"].notna()
+    for child_level in (2, 3):
+        invalid_parent |= level.eq(child_level) & parent_level.ne(child_level - 1)
+    invalid_parent |= level.eq(4) & (
+        parent_level.ne(3)
+        | ~_numeric_equal(lineage["RegionId"], lineage["ParentRegionId"])
+    )
+    invalid_parent |= level.eq(5) & (
+        parent_level.ne(4)
+        | ~_numeric_equal(lineage["RegionId"], lineage["ParentRegionId"])
+        | ~_numeric_equal(lineage["DistrictId"], lineage["ParentDistrictId"])
+    )
+    invalid_parent |= level.eq(6) & (
+        parent_level.ne(5)
+        | ~_numeric_equal(lineage["HomeStoreKey"], lineage["ParentHomeStoreKey"])
+    )
+    invalid_parent |= ~level.isin([1, 2, 3, 4, 5, 6])
+    invalid_parent_count = int(invalid_parent.fillna(True).sum())
+    report.checks.append(CheckResult(
+        name="Employee parent hierarchy follows organizational rollups",
+        passed=invalid_parent_count == 0,
+        message=(
+            "Every reporting line follows the corporate, region, district, and store tree"
+            if invalid_parent_count == 0 else
+            f"{invalid_parent_count} invalid employee reporting line(s)"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_workforce_policy_integrity(
+    report: QualityReport,
+    employees: pd.DataFrame,
+) -> None:
+    """Guard the corrected management, department, FTE, and lifecycle policies."""
+    required = [
+        "Title", "OrgLevel", "EmploymentType", "FTE", "DepartmentName",
+        "HireDate", "TerminationDate", "IsActive",
+    ]
+    if not _has_columns(employees, required):
+        return
+
+    level = pd.to_numeric(employees["OrgLevel"], errors="coerce")
+    fte = pd.to_numeric(employees["FTE"], errors="coerce")
+    management = level.le(5)
+    invalid_management = management & (
+        employees["EmploymentType"].astype("string").ne("Full-Time")
+        | ~np.isclose(fte.fillna(-1.0), 1.0, rtol=0.0, atol=0.001)
+    )
+    support = employees["Title"].astype("string").eq("Customer Support")
+    invalid_support = support & employees["DepartmentName"].astype(
+        "string",
+    ).ne("Customer Service")
+    invalid_fte = fte.isna() | fte.le(0.0) | fte.gt(1.0)
+    policy_count = int((invalid_management | invalid_support | invalid_fte).sum())
+    report.checks.append(CheckResult(
+        name="Employee role, department, and FTE policy",
+        passed=policy_count == 0,
+        message=(
+            "Management is full-time, Customer Support is correctly owned, and FTE is valid"
+            if policy_count == 0 else f"{policy_count} workforce policy violation(s)"
+        ),
+        details=(
+            "" if policy_count == 0 else
+            f"management={int(invalid_management.sum())}; "
+            f"department={int(invalid_support.sum())}; fte={int(invalid_fte.sum())}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    hire = pd.to_datetime(employees["HireDate"], errors="coerce").dt.normalize()
+    termination = pd.to_datetime(
+        employees["TerminationDate"], errors="coerce",
+    ).dt.normalize()
+    active = _as_boolean_mask(employees["IsActive"])
+    invalid_lifecycle = (
+        hire.isna()
+        | (termination.notna() & termination.lt(hire))
+        | (active & termination.notna())
+        | (~active & termination.isna())
+    )
+    lifecycle_count = int(invalid_lifecycle.sum())
+    report.checks.append(CheckResult(
+        name="Employee lifecycle snapshot matches effective dates",
+        passed=lifecycle_count == 0,
+        message=(
+            "IsActive agrees with HireDate and TerminationDate"
+            if lifecycle_count == 0 else
+            f"{lifecycle_count} employee lifecycle contradiction(s)"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
+def _check_store_lifecycle_causality(
+    report: QualityReport,
+    stores: pd.DataFrame,
+) -> None:
+    """Require store closure narratives to be supported by generated attributes."""
+    required = [
+        "StoreKey", "Status", "OpeningDate", "ClosingDate", "CloseReason",
+        "RevenueClass", "OwnershipType", "SuccessorStoreKey",
+        "RenovationStartDate", "RenovationEndDate",
+    ]
+    if not _has_columns(stores, required):
+        return
+
+    status = stores["Status"].astype("string").str.strip().fillna("")
+    # CSV round-trips represent the generator's empty open-store reason as NA.
+    # Normalize it before boolean composition so nullable-string comparisons do
+    # not turn otherwise valid open stores into indeterminate failures.
+    reason = stores["CloseReason"].astype("string").str.strip().fillna("")
+    opening = pd.to_datetime(stores["OpeningDate"], errors="coerce").dt.normalize()
+    closing = pd.to_datetime(stores["ClosingDate"], errors="coerce").dt.normalize()
+    renovation_start = pd.to_datetime(
+        stores["RenovationStartDate"], errors="coerce",
+    ).dt.normalize()
+    renovation_end = pd.to_datetime(
+        stores["RenovationEndDate"], errors="coerce",
+    ).dt.normalize()
+    closed = status.eq("Closed")
+    renovating = status.eq("Renovating")
+    has_reason = reason.notna() & reason.ne("")
+    lifecycle_invalid = (
+        opening.isna()
+        | (closed & (closing.isna() | closing.le(opening) | ~has_reason))
+        | (~closed & closing.notna())
+        | (renovating & (
+            renovation_start.isna()
+            | renovation_end.isna()
+            | renovation_end.lt(renovation_start)
+        ))
+    )
+    lifecycle_count = int(lifecycle_invalid.fillna(True).sum())
+    report.checks.append(CheckResult(
+        name="Store lifecycle dates match snapshot status",
+        passed=lifecycle_count == 0,
+        message=(
+            "Store status and lifecycle dates are coherent"
+            if lifecycle_count == 0 else f"{lifecycle_count} store lifecycle contradiction(s)"
+        ),
+        category="Analytical Integrity",
+    ))
+
+    low_sales_invalid = reason.eq("Low Sales") & stores["RevenueClass"].astype(
+        "string",
+    ).ne("C")
+    lease_invalid = reason.eq("Lease Ended") & stores["OwnershipType"].astype(
+        "string",
+    ).ne("Leased")
+    successor = pd.to_numeric(stores["SuccessorStoreKey"], errors="coerce")
+    store_key = pd.to_numeric(stores["StoreKey"], errors="coerce")
+    moved_invalid = reason.eq("Moved Location") & (
+        successor.isna() | successor.eq(store_key)
+    )
+    renovation_invalid = reason.eq("Renovation") & (
+        renovation_start.isna()
+        | renovation_end.isna()
+        | renovation_end.ne(closing)
+        | renovation_end.lt(renovation_start)
+    )
+    unsupported_reason = closed & ~reason.isin([
+        "Low Sales", "Lease Ended", "Moved Location", "Renovation",
+    ])
+    reason_invalid = (
+        low_sales_invalid | lease_invalid | moved_invalid
+        | renovation_invalid | unsupported_reason
+    )
+    reason_count = int(reason_invalid.fillna(True).sum())
+    report.checks.append(CheckResult(
+        name="Store close reasons satisfy causal prerequisites",
+        passed=reason_count == 0,
+        message=(
+            "Every close reason is supported by store lifecycle and business attributes"
+            if reason_count == 0 else
+            f"{reason_count} unsupported store close narrative(s)"
+        ),
+        details=(
+            "" if reason_count == 0 else
+            f"low_sales={int(low_sales_invalid.sum())}; "
+            f"lease={int(lease_invalid.sum())}; moved={int(moved_invalid.sum())}; "
+            f"renovation={int(renovation_invalid.sum())}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
 def _check_analytical_integrity(
     report: QualityReport,
     dims_folder: Path,
@@ -1277,12 +2059,64 @@ def _check_analytical_integrity(
     customers_path = _find_table(dims_folder, "customers")
     sales = _load_available_columns(cache, sales_path, [
         "OrderNumber", "OrderLineNumber", "CustomerKey", "ProductKey",
+        "EmployeeKey", "StoreKey",
         "OrderDate", "DeliveryDate", "Quantity", "UnitPrice", "NetPrice",
         "DiscountAmount", "PromotionKey", "ChannelKey",
     ])
     customers = _load_available_columns(cache, customers_path, [
         "CustomerKey", "CustomerStartDate", "CustomerEndDate", "LoyaltyTierKey",
     ])
+    employees = _load_available_columns(
+        cache,
+        _find_table(dims_folder, "employees"),
+        [
+            "EmployeeKey", "ParentEmployeeKey", "Title", "OrgLevel",
+            "OrgUnitType", "RegionId", "DistrictId", "HomeStoreKey",
+            "GeographyKey", "HireDate", "TerminationDate", "IsActive",
+            "EmploymentType", "FTE", "DepartmentName",
+        ],
+    )
+
+    stores = _load_available_columns(
+        cache,
+        _find_table(dims_folder, "stores"),
+        [
+            "StoreKey", "Status", "GeographyKey", "StoreZone",
+            "StoreDistrict", "StoreRegion", "StoreDistrictId",
+            "StoreRegionId", "OpeningDate", "ClosingDate", "CloseReason",
+            "RevenueClass", "OwnershipType", "SuccessorStoreKey",
+            "RenovationStartDate", "RenovationEndDate",
+        ],
+    )
+    geography = _load_available_columns(
+        cache,
+        _find_table(dims_folder, "geography"),
+        [
+            "GeographyKey", "Country", "CountryRegionName",
+            "RegionCountryName",
+        ],
+    )
+    if stores is not None:
+        _check_store_lifecycle_causality(report, stores)
+        if geography is not None:
+            _check_store_organizational_geography(report, stores, geography)
+    if employees is not None:
+        _check_workforce_policy_integrity(report, employees)
+        if stores is not None:
+            _check_employee_organizational_geography(report, employees, stores)
+
+    assignments = _load_available_columns(
+        cache,
+        _find_table(dims_folder, "employee_store_assignments"),
+        [
+            "EmployeeKey", "StoreKey", "StartDate", "EndDate",
+            "IsCurrentAssignment",
+        ],
+    )
+    if assignments is not None:
+        _check_employee_assignment_temporal_integrity(report, assignments)
+        if employees is not None:
+            _check_current_headcount_reconciliation(report, employees, assignments)
 
     inventory = _load_available_columns(
         cache,
@@ -1294,6 +2128,9 @@ def _check_analytical_integrity(
 
     if sales is None:
         return
+
+    if assignments is not None:
+        _check_salesperson_assignment_integrity(report, sales, assignments)
 
     returns = _load_available_columns(
         cache,

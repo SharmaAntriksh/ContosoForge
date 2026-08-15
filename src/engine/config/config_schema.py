@@ -320,6 +320,13 @@ class TransfersConfig(_Base):
     annual_rate: float = 0.05
     min_tenure_months: int = 6
     same_region_pref: float = 0.7
+    eligible_roles: List[str] = Field(default_factory=lambda: [
+        "Sales Associate",
+        "Cashier",
+        "Stock Associate",
+        "Customer Support",
+        "Fulfillment Associate",
+    ])
 
 
 class EmployeesConfig(_Base):

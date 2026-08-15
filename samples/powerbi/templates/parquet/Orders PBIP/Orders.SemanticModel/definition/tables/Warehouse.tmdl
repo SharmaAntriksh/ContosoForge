@@ -77,6 +77,27 @@ table Warehouse
 
 		annotation SummarizationSetBy = Automatic
 
+	column TargetInventoryTurnover
+		dataType: double
+		summarizeBy: none
+		sourceColumn: TargetInventoryTurnover
+
+		annotation SummarizationSetBy = Automatic
+
+	column LastAuditScore
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: LastAuditScore
+
+		annotation SummarizationSetBy = Automatic
+
+	column TargetShrinkageRatePct
+		dataType: double
+		summarizeBy: none
+		sourceColumn: TargetShrinkageRatePct
+
+		annotation SummarizationSetBy = Automatic
 	partition Warehouse = m
 		mode: import
 		queryGroup: Dimensions

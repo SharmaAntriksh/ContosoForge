@@ -6,14 +6,14 @@ schema, and identifier-case (snake) transformation.
 """
 from __future__ import annotations
 
-import pytest
-
 from src.tools.sql.dialect import REGISTRY
 from src.tools.sql.identifier_case import IdentifierCase
 from src.tools.sql.name_map import build_name_map
 from src.tools.sql.view_sql import (
     PASS_THROUGH_VIEWS,
+    PUBLISHED_DIMENSION_VIEWS,
     PROJECTION_VIEWS,
+    WORKFORCE_VIEWS,
     render_views_sql,
 )
 
@@ -39,6 +39,10 @@ class TestRosterCoverage:
             assert v.source_table in nm.tables
             for c in v.columns:
                 assert c.column in nm.columns, f"{c.column} not in name map"
+        for view in PUBLISHED_DIMENSION_VIEWS:
+            assert view.source_table in nm.tables
+            for column in view.columns:
+                assert column.column in nm.columns, f"{column.column} not in name map"
 
 
 class TestPassThrough:
@@ -75,11 +79,73 @@ class TestFactViews:
         assert 'CAST("ChannelKey" AS INTEGER) AS "ChannelKey"' in _r(PG, mode="sales")
 
 
+class TestWorkforceViews:
+    def test_workforce_view_roster(self) -> None:
+        assert WORKFORCE_VIEWS == (
+            "EmployeeAssignmentHistory",
+            "CurrentEmployeesByStore",
+            "EffectiveSalespersonAssignment",
+            "CurrentStoreManager",
+            "StoreStaffingActualVsPlan",
+        )
+
+    def test_sqlserver_workforce_views_are_guarded_and_filtered(self) -> None:
+        out = _r(SS, mode="sales")
+
+        for view in WORKFORCE_VIEWS:
+            assert f"[dbo].[vw_{view}]" in out
+        assert "JOIN [dbo].[Employees] AS e" in out
+        assert "JOIN [dbo].[Stores] AS s" in out
+        assert "a.[IsCurrentAssignment] = 1" in out
+        assert "e.[IsSalesperson] = 1" in out
+
+    def test_store_staffing_view_compares_current_assignments_to_plan(self) -> None:
+        out = _r(SS, mode="sales")
+
+        assert "[dbo].[vw_StoreStaffingActualVsPlan]" in out
+        assert "LEFT JOIN [dbo].[EmployeeStoreAssignments] AS a" in out
+        assert "s.[EmployeeCount] AS [PlannedEmployeeCount]" in out
+        assert "COUNT(a.[EmployeeKey]) AS [CurrentEmployeeCount]" in out
+        assert "COALESCE(SUM(a.[FTE]), 0.0) AS [CurrentFTE]" in out
+        assert "COUNT(a.[EmployeeKey]) - s.[EmployeeCount] AS [HeadcountVariance]" in out
+
+    def test_current_manager_is_an_employee_relationship(self) -> None:
+        out = _r(SS, mode="sales")
+
+        assert "[dbo].[vw_CurrentStoreManager]" in out
+        assert "a.[EmployeeKey] AS [ManagerEmployeeKey]" in out
+        assert "a.[RoleAtStore] = N''Store Manager''" in out
+        assert "a.[IsCurrentAssignment] = 1" in out
+        assert "a.[AssignmentStatus] = N''Active''" in out
+
+    def test_postgres_workforce_views_use_boolean_literals(self) -> None:
+        out = _r(PG, mode="sales")
+
+        assert '"public"."vw_CurrentEmployeesByStore"' in out
+        assert 'a."IsCurrentAssignment" = TRUE' in out
+        assert 'e."IsSalesperson" = TRUE' in out
+        assert 'a."AssignmentStatus" = \'Active\'' in out
+
+    def test_workforce_views_honor_snake_identifier_case(self) -> None:
+        out = _r(PG, mode="sales", name_map=build_name_map(IdentifierCase.SNAKE))
+
+        assert '"public"."vw_current_employees_by_store"' in out
+        assert '"public"."vw_store_staffing_actual_vs_plan"' in out
+        assert '"public"."employee_store_assignments" AS a' in out
+        assert 'a."employee_key" = e."employee_key"' in out
+        assert 's."employee_count" AS "planned_employee_count"' in out
+        assert 'a."employee_key" AS "manager_employee_key"' in out
+
+
 class TestVwSalesSpecialization:
     def test_flat_variant_from_sales(self) -> None:
         out = _r(PG, mode="sales")
         assert 'FROM "public"."Sales"' in out
-        assert "JOIN" not in out.split("vw_Sales")[-1]
+        unified_sales = out.split('"public"."vw_Sales"', 1)[1].split(
+            "-- Fact-derived store actuals",
+            1,
+        )[0]
+        assert "JOIN" not in unified_sales
 
     def test_join_variant_in_sales_order(self) -> None:
         out = _r(PG, mode="sales_order")
@@ -90,7 +156,13 @@ class TestVwSalesSpecialization:
     def test_order_cols_gated_by_skip_order_cols(self) -> None:
         with_cols = _r(PG, mode="sales", skip_order_cols=False)
         without = _r(PG, mode="sales", skip_order_cols=True)
-        sales_block = lambda s: s[s.rfind('"public"."vw_Sales"'):]
+
+        def sales_block(sql):
+            return sql[sql.rfind('"public"."vw_Sales"'):].split(
+                "-- Fact-derived store actuals",
+                1,
+            )[0]
+
         assert '"OrderNumber"' in sales_block(with_cols)
         assert '"OrderNumber"' not in sales_block(without)
 
@@ -99,6 +171,38 @@ class TestVwSalesSpecialization:
         out = _r(PG, mode="sales_order", skip_order_cols=True)
         tail = out.split('"public"."vw_Sales"')[-1]
         assert 'd."OrderNumber"' in tail
+
+
+class TestStoreSalesActuals:
+    def test_flat_sales_derives_actual_order_value(self) -> None:
+        out = _r(SS, mode="sales", skip_order_cols=False)
+
+        assert "[dbo].[vw_StoreSalesActuals]" in out
+        assert "FROM [dbo].[Sales] AS f" in out
+        assert "SUM(f.[NetPrice] * f.[Quantity]) AS [TransactionAmount]" in out
+        assert "AVG(o.[TransactionAmount]) AS [AvgTransactionValue]" in out
+
+    def test_flat_sales_without_order_keys_omits_transaction_view(self) -> None:
+        out = _r(SS, mode="sales", skip_order_cols=True)
+        assert "vw_StoreSalesActuals" not in out
+
+    def test_order_split_uses_header_and_detail(self) -> None:
+        out = _r(PG, mode="sales_order", skip_order_cols=True)
+
+        assert '"public"."vw_StoreSalesActuals"' in out
+        assert 'FROM "public"."OrderHeader" AS h' in out
+        assert 'JOIN "public"."OrderDetail" AS d' in out
+
+    def test_actual_view_honors_snake_identifier_case(self) -> None:
+        out = _r(
+            PG,
+            mode="sales",
+            skip_order_cols=False,
+            name_map=build_name_map(IdentifierCase.SNAKE),
+        )
+
+        assert '"public"."vw_store_sales_actuals"' in out
+        assert 'AVG(o."transaction_amount") AS "avg_transaction_value"' in out
 
 
 class TestCustomSchema:

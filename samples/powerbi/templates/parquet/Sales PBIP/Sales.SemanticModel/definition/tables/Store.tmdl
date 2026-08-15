@@ -125,15 +125,6 @@ table Store
 
 		annotation PBI_FormatHint = {"isCustom":true}
 
-	column OpenFlag
-		dataType: boolean
-		formatString: """TRUE"";""TRUE"";""FALSE"""
-		lineageTag: 939902b3-b81d-4a59-a569-176806a642c7
-		summarizeBy: none
-		sourceColumn: OpenFlag
-
-		annotation SummarizationSetBy = Automatic
-
 	column SquareFootage
 		dataType: int64
 		formatString: 0
@@ -153,6 +144,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreManager
+		isHidden
 		dataType: string
 		lineageTag: abab45d4-aaae-4fc6-a61b-274dde1e09e0
 		summarizeBy: none
@@ -161,6 +153,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreManagerFirstName
+		isHidden
 		dataType: string
 		lineageTag: cbe7b5cf-f4f5-5500-a834-f254668754cb
 		summarizeBy: none
@@ -169,6 +162,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreManagerLastName
+		isHidden
 		dataType: string
 		lineageTag: 6a806f80-fbbb-5255-a2ef-7c860771c136
 		summarizeBy: none
@@ -177,6 +171,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column Phone
+		isHidden
 		dataType: string
 		lineageTag: ac325863-7ccd-4e22-8b61-e0e9eb4cf48e
 		summarizeBy: none
@@ -185,6 +180,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreEmail
+		isHidden
 		dataType: string
 		lineageTag: 352356da-0723-454a-8fac-887dfd55fd06
 		summarizeBy: none
@@ -193,6 +189,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreDescription
+		isHidden
 		dataType: string
 		lineageTag: 6f6e5e38-ec7c-4f0d-8c20-c97d289f4107
 		summarizeBy: none
@@ -208,55 +205,13 @@ table Store
 
 		annotation SummarizationSetBy = Automatic
 
-	column AvgTransactionValue
-		dataType: double
-		lineageTag: c786c22e-21c2-40ca-984f-89424bc4aa1d
-		summarizeBy: sum
-		sourceColumn: AvgTransactionValue
-
-		annotation SummarizationSetBy = Automatic
-
-		annotation PBI_FormatHint = {"isGeneralNumber":true}
-
-	column CustomerSatisfactionScore
-		dataType: double
-		lineageTag: 0ff48b07-bc03-490d-9586-ffee71ff97c2
-		summarizeBy: sum
-		sourceColumn: CustomerSatisfactionScore
-
-		annotation SummarizationSetBy = Automatic
-
-		annotation PBI_FormatHint = {"isGeneralNumber":true}
-
-	column InventoryTurnoverTarget
-		dataType: double
-		lineageTag: f1cee33c-53da-4fc0-a192-31cc1db004ed
-		summarizeBy: sum
-		sourceColumn: InventoryTurnoverTarget
-
-		annotation SummarizationSetBy = Automatic
-
-		annotation PBI_FormatHint = {"isGeneralNumber":true}
-
-	column LastAuditScore
+	column SuccessorStoreKey
 		dataType: int64
 		formatString: 0
-		lineageTag: 676e14b6-479f-4769-a47b-94388c5bdc9b
-		summarizeBy: sum
-		sourceColumn: LastAuditScore
+		summarizeBy: none
+		sourceColumn: SuccessorStoreKey
 
 		annotation SummarizationSetBy = Automatic
-
-	column ShrinkageRatePct
-		dataType: double
-		lineageTag: 3c1abf79-b5cc-4d3f-ad8d-f3b516edb67c
-		summarizeBy: sum
-		sourceColumn: ShrinkageRatePct
-
-		annotation SummarizationSetBy = Automatic
-
-		annotation PBI_FormatHint = {"isGeneralNumber":true}
-
 	column WarehouseKey
 		dataType: int64
 		formatString: 0

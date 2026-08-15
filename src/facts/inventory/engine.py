@@ -130,6 +130,22 @@ def _load_product_attrs(parquet_dims: Path) -> pd.DataFrame:
     return df
 
 
+def _load_warehouse_attrs(parquet_dims: Path) -> pd.DataFrame:
+    """Load warehouse-grain operating targets consumed by inventory."""
+    path = parquet_dims / "warehouses.parquet"
+    columns = [
+        "WarehouseKey",
+        "TargetInventoryTurnover",
+        "TargetShrinkageRatePct",
+    ]
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+    try:
+        return pd.read_parquet(path, columns=columns)
+    except (KeyError, ValueError, OSError):
+        return pd.DataFrame(columns=columns)
+
+
 # ================================================================
 # Vectorized simulation
 # ================================================================
@@ -328,6 +344,25 @@ def compute_inventory_snapshots(
     # Pre-convert to float64 for use in main loop (avoids per-iteration .astype())
     attr_lead_months_f64 = attr_lead_months.astype(np.float64)
 
+    # Warehouse targets align with the InventorySnapshot grain. Missing or
+    # legacy warehouse dimensions retain the config-level behavior.
+    attr_turnover = np.full(n_pairs, np.nan, dtype=np.float64)
+    attr_shrinkage_rate = np.full(n_pairs, icfg.shrinkage_rate, dtype=np.float64)
+    warehouse_attrs = _load_warehouse_attrs(parquet_dims)
+    if not warehouse_attrs.empty:
+        warehouse_attrs = warehouse_attrs.drop_duplicates("WarehouseKey", keep="last")
+        warehouse_index = warehouse_attrs.set_index("WarehouseKey")
+        mapped_turnover = pd.Series(pair_wk).map(
+            warehouse_index["TargetInventoryTurnover"]
+        ).to_numpy(dtype=np.float64)
+        mapped_shrinkage = pd.Series(pair_wk).map(
+            warehouse_index["TargetShrinkageRatePct"]
+        ).to_numpy(dtype=np.float64)
+        valid_turnover = np.isfinite(mapped_turnover) & (mapped_turnover > 0)
+        valid_shrinkage = np.isfinite(mapped_shrinkage) & (mapped_shrinkage >= 0)
+        attr_turnover[valid_turnover] = mapped_turnover[valid_turnover]
+        attr_shrinkage_rate[valid_shrinkage] = mapped_shrinkage[valid_shrinkage] / 100.0
+
     # ------------------------------------------------------------------
     # 4. Compute per-pair initial conditions
     # ------------------------------------------------------------------
@@ -345,8 +380,13 @@ def compute_inventory_snapshots(
     avg_demand = np.where(demand_nonzero_months > 0, demand_sum / demand_nonzero_months, 1.0)
     avg_demand = np.maximum(avg_demand, 1.0)
 
+    target_stock_months = np.where(
+        np.isfinite(attr_turnover),
+        12.0 / attr_turnover,
+        icfg.initial_stock_multiplier,
+    )
     initial_stock = (
-        avg_demand * icfg.initial_stock_multiplier * attr_abc_mult * icfg.overstock_bias
+        avg_demand * target_stock_months * attr_abc_mult * icfg.overstock_bias
     ).astype(np.int32)
 
     reorder_qty = (
@@ -357,7 +397,11 @@ def compute_inventory_snapshots(
     # Round reorder quantities up to CasePackQty multiples
     reorder_qty = (np.ceil(reorder_qty / attr_case_pack) * attr_case_pack).astype(np.int32)
 
-    monthly_shrinkage_base = icfg.shrinkage_rate / 12.0 if icfg.shrinkage_enabled else 0.0
+    monthly_shrinkage_base = (
+        attr_shrinkage_rate / 12.0
+        if icfg.shrinkage_enabled
+        else np.zeros(n_pairs, dtype=np.float64)
+    )
     # Fragile items shrink at 2.5x the base rate
     monthly_shrinkage_arr = np.where(
         attr_fragile == 1,
@@ -400,6 +444,7 @@ def compute_inventory_snapshots(
     out_on_order = np.zeros((n_pairs, n_months), dtype=np.int32)
     # out_sold is demand_matrix itself (never modified) — no copy needed
     out_received = np.zeros((n_pairs, n_months), dtype=np.int32)
+    out_shrinkage = np.zeros((n_pairs, n_months), dtype=np.int32)
     out_reorder = np.zeros((n_pairs, n_months), dtype=np.int8)
     out_stockout = np.zeros((n_pairs, n_months), dtype=np.int8)
     out_days_oos = np.zeros((n_pairs, n_months), dtype=np.int8)
@@ -412,6 +457,7 @@ def compute_inventory_snapshots(
     pending = np.zeros((n_pairs, n_months + max_lead_buffer), dtype=np.int32)
 
     qoh = np.zeros(n_pairs, dtype=np.int32)
+    shrinkage_carry = np.zeros(n_pairs, dtype=np.float64)
 
     for t in range(n_months):
         # Activate pairs whose first demand month is this month
@@ -426,10 +472,14 @@ def compute_inventory_snapshots(
         out_received[:, t] = received * is_active
 
         sold = demand_matrix[:, t]
-        if monthly_shrinkage_base > 0:
-            shrink = np.multiply(qoh, monthly_shrinkage_arr, dtype=np.float64).astype(np.int32)
-        else:
-            shrink = 0
+        shrinkage_carry += (
+            np.multiply(qoh, monthly_shrinkage_arr, dtype=np.float64)
+            * is_active
+        )
+        shrink = np.floor(shrinkage_carry).astype(np.int32)
+        shrink = np.minimum(shrink, qoh)
+        shrinkage_carry -= shrink
+        out_shrinkage[:, t] = shrink * is_active
         qoh -= (sold + shrink) * is_active
 
         stockout_mask = (qoh < 0) & is_active
@@ -494,6 +544,7 @@ def compute_inventory_snapshots(
         "QuantityOnOrder": out_on_order[row_idx, col_idx].astype(np.int32),
         "QuantitySold": demand_matrix[row_idx, col_idx].astype(np.int32),
         "QuantityReceived": out_received[row_idx, col_idx].astype(np.int32),
+        "ShrinkageQuantity": out_shrinkage[row_idx, col_idx].astype(np.int32),
         "ReorderFlag": out_reorder[row_idx, col_idx].astype(bool),
         "StockoutFlag": out_stockout[row_idx, col_idx].astype(bool),
         "DaysOutOfStock": out_days_oos[row_idx, col_idx].astype(np.int32),
@@ -510,7 +561,8 @@ def _aggregate_quarterly(df: pd.DataFrame) -> pd.DataFrame:
 
     SnapshotDate becomes the first day of each quarter.
     - QuantityOnHand: end-of-quarter value (last month in quarter)
-    - QuantitySold, QuantityOnOrder, QuantityReceived: summed over quarter
+    - QuantitySold, QuantityOnOrder, QuantityReceived, ShrinkageQuantity: summed
+      over quarter
     - ReorderFlag, StockoutFlag: 1 if any month in quarter flagged
     - DaysOutOfStock: summed over quarter (capped at 90)
     """
@@ -524,6 +576,7 @@ def _aggregate_quarterly(df: pd.DataFrame) -> pd.DataFrame:
         QuantityOnOrder=("QuantityOnOrder", "sum"),
         QuantitySold=("QuantitySold", "sum"),
         QuantityReceived=("QuantityReceived", "sum"),
+        ShrinkageQuantity=("ShrinkageQuantity", "sum"),
         ReorderFlag=("ReorderFlag", "max"),
         StockoutFlag=("StockoutFlag", "max"),
         DaysOutOfStock=("DaysOutOfStock", "sum"),
@@ -542,10 +595,11 @@ def _aggregate_quarterly(df: pd.DataFrame) -> pd.DataFrame:
     agg["QuantityOnOrder"] = agg["QuantityOnOrder"].astype(np.int32)
     agg["QuantitySold"] = agg["QuantitySold"].astype(np.int32)
     agg["QuantityReceived"] = agg["QuantityReceived"].astype(np.int32)
+    agg["ShrinkageQuantity"] = agg["ShrinkageQuantity"].astype(np.int32)
 
     return agg[["ProductKey", "WarehouseKey", "SnapshotDate",
                 "QuantityOnHand", "QuantityOnOrder",
-                "QuantitySold", "QuantityReceived",
+                "QuantitySold", "QuantityReceived", "ShrinkageQuantity",
                 "ReorderFlag", "StockoutFlag", "DaysOutOfStock"]]
 
 
@@ -553,6 +607,6 @@ def _empty_snapshot() -> pd.DataFrame:
     return pd.DataFrame(columns=[
         "ProductKey", "WarehouseKey", "SnapshotDate",
         "QuantityOnHand", "QuantityOnOrder",
-        "QuantitySold", "QuantityReceived",
+        "QuantitySold", "QuantityReceived", "ShrinkageQuantity",
         "ReorderFlag", "StockoutFlag", "DaysOutOfStock",
     ])

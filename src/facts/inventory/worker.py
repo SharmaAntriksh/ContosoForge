@@ -13,7 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,14 +22,14 @@ from .engine import InventoryConfig, compute_inventory_snapshots
 _INVENTORY_CSV_COLUMNS = [
     "ProductKey", "WarehouseKey", "SnapshotDate",
     "QuantityOnHand", "QuantityOnOrder",
-    "QuantitySold", "QuantityReceived",
+    "QuantitySold", "QuantityReceived", "ShrinkageQuantity",
     "ReorderFlag", "StockoutFlag", "DaysOutOfStock",
 ]
 
 _INVENTORY_CSV_INT_COLS = (
     "ProductKey", "WarehouseKey",
     "QuantityOnHand", "QuantityOnOrder",
-    "QuantitySold", "QuantityReceived",
+    "QuantitySold", "QuantityReceived", "ShrinkageQuantity",
     "ReorderFlag", "StockoutFlag", "DaysOutOfStock",
 )
 

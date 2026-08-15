@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from src.exceptions import DimensionError
+from src.versioning import frame_content_hash
 
 
 def _safe_read_geography(geo_path: Path) -> pd.DataFrame:
@@ -85,11 +86,21 @@ def _build_location_maps(geo: pd.DataFrame) -> tuple[dict[int, str], dict[int, s
     return short_map, full_map
 
 
-def _geography_signature(geo_keys: np.ndarray) -> str:
-    arr = np.asarray(geo_keys, dtype=np.int64)
-    if arr.size == 0:
-        return "empty"
-    return f"{int(arr.size)}:{int(arr.min())}:{int(arr.max())}:{int(arr[: min(5, arr.size)].sum())}"
+def _geography_signature(geo: pd.DataFrame) -> str:
+    """Hash the geography values that shape store output and hierarchy.
+
+    The former count/min/max signature neither tracked country/ISO changes nor
+    resisted collisions. This content digest is row-order independent and makes
+    a country-boundary edit invalidate Stores and its dependent dimensions.
+    """
+    return frame_content_hash(
+        geo,
+        [
+            "GeographyKey", "City", "StateProvinceName",
+            "CountryRegionName", "Country", "RegionCountryName",
+            "ISOCode", "Population",
+        ],
+    )
 
 
 def _sample_geography_keys(

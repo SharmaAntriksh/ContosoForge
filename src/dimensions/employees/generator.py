@@ -30,6 +30,7 @@ def generate_employee_dimension(
     store_manager_names: dict[int, str] | None = None,
     store_opening_dates: dict[int, pd.Timestamp] | None = None,
     store_closing_dates: dict[int, pd.Timestamp] | None = None,
+    store_close_reasons: dict[int, str] | None = None,
 ) -> pd.DataFrame:
     """
     Build a parent-child employee hierarchy with stable keys.
@@ -70,6 +71,7 @@ def generate_employee_dimension(
         global_end=global_end,
         store_opening_dates=store_opening_dates,
         store_closing_dates=store_closing_dates,
+        store_close_reasons=store_close_reasons,
     )
     finalize_employees(
         df,

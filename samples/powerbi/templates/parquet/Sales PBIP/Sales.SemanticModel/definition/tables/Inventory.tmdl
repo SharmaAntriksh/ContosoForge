@@ -68,6 +68,13 @@ table Inventory
 
 		annotation SummarizationSetBy = Automatic
 
+	column ShrinkageQuantity
+		dataType: int64
+		formatString: 0
+		summarizeBy: sum
+		sourceColumn: ShrinkageQuantity
+
+		annotation SummarizationSetBy = Automatic
 	column ReorderFlag
 		dataType: boolean
 		formatString: """TRUE"";""TRUE"";""FALSE"""

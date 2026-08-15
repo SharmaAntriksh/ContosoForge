@@ -1,10 +1,7 @@
 """Tests for packaging, SQL generation, and PowerBI modules."""
 from __future__ import annotations
 
-import os
-import textwrap
 from pathlib import Path
-from typing import Mapping
 
 import pytest
 
@@ -142,6 +139,12 @@ class TestStaticSchemas:
         for table, schema in STATIC_SCHEMAS.items():
             cols = [col for col, _ in schema]
             assert len(cols) == len(set(cols)), f"{table} has duplicate columns"
+
+    def test_store_status_is_the_only_snapshot_indicator(self):
+        store_columns = {column for column, _ in STATIC_SCHEMAS["Stores"]}
+
+        assert "Status" in store_columns
+        assert "OpenFlag" not in store_columns
 
     def test_column_counts_are_reasonable(self):
         """Each table should have between 2 and 200 columns.
@@ -1260,7 +1263,7 @@ class TestPowerBIPackaging:
         assert text.count('expression ContosoFolder = "') == 1
         # Escaped quotes should be present (\" not bare ")
         # The malicious content should be inside a single string literal
-        lines = [l for l in text.splitlines() if "ContosoFolder" in l]
+        lines = [line for line in text.splitlines() if "ContosoFolder" in line]
         assert len(lines) == 1
 
 

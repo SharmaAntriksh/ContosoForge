@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 # Bump when the warehouse version-key layout changes. Shared by the stores flow
 # (which writes + stamps the version) and the check below.
-WAREHOUSES_SCHEMA_VERSION = 3  # v3: resolved seed folded into version key
+WAREHOUSES_SCHEMA_VERSION = 4  # v4: inventory targets moved to warehouse grain
 
 
 def build_warehouse_version_cfg(cfg: AppConfig, stores_df: pd.DataFrame) -> dict:

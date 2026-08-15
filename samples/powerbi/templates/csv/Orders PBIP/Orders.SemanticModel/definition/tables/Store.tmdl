@@ -65,15 +65,6 @@ table Store
 
 		annotation UnderlyingDateTimeDataType = Date
 
-	column OpenFlag
-		dataType: int64
-		formatString: 0
-		lineageTag: fe65a993-456c-4d32-924b-21d0dc34de01
-		summarizeBy: sum
-		sourceColumn: OpenFlag
-
-		annotation SummarizationSetBy = Automatic
-
 	column SquareFootage
 		dataType: int64
 		formatString: 0
@@ -93,6 +84,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreManager
+		isHidden
 		dataType: string
 		lineageTag: 3a6eefda-f93f-41d2-9a51-4412ba34ed04
 		summarizeBy: none
@@ -101,6 +93,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreManagerFirstName
+		isHidden
 		dataType: string
 		lineageTag: a587f504-b29f-56ea-bb10-8913fc5814b8
 		summarizeBy: none
@@ -109,6 +102,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreManagerLastName
+		isHidden
 		dataType: string
 		lineageTag: c20b7b4b-3914-527f-bf22-5b40d1f4e743
 		summarizeBy: none
@@ -117,6 +111,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column Phone
+		isHidden
 		dataType: string
 		lineageTag: 8bfa479e-183c-47ca-8a2b-e23a1c8d3592
 		summarizeBy: none
@@ -125,6 +120,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreDescription
+		isHidden
 		dataType: string
 		lineageTag: cd83747a-a10f-45d4-9d20-eb2807a58713
 		summarizeBy: none
@@ -197,6 +193,7 @@ table Store
 		annotation SummarizationSetBy = Automatic
 
 	column StoreEmail
+		isHidden
 		dataType: string
 		lineageTag: 081c59f0-b1e2-4e50-a4d9-2b76be37a8eb
 		summarizeBy: none
@@ -204,55 +201,13 @@ table Store
 
 		annotation SummarizationSetBy = Automatic
 
-	column AvgTransactionValue
-		dataType: double
-		lineageTag: 9957b4fd-ed23-4684-adab-79112980284e
-		summarizeBy: sum
-		sourceColumn: AvgTransactionValue
-
-		annotation SummarizationSetBy = Automatic
-
-		annotation PBI_FormatHint = {"isGeneralNumber":true}
-
-	column CustomerSatisfactionScore
-		dataType: double
-		lineageTag: 0cb090b5-8da7-46df-b635-202ee1d0e3c4
-		summarizeBy: sum
-		sourceColumn: CustomerSatisfactionScore
-
-		annotation SummarizationSetBy = Automatic
-
-		annotation PBI_FormatHint = {"isGeneralNumber":true}
-
-	column InventoryTurnoverTarget
-		dataType: double
-		lineageTag: 0f5fe00f-ae32-4a50-9110-cb238022e418
-		summarizeBy: sum
-		sourceColumn: InventoryTurnoverTarget
-
-		annotation SummarizationSetBy = Automatic
-
-		annotation PBI_FormatHint = {"isGeneralNumber":true}
-
-	column LastAuditScore
+	column SuccessorStoreKey
 		dataType: int64
 		formatString: 0
-		lineageTag: 7a6c978f-a08c-4695-bea9-dd97feb71953
-		summarizeBy: sum
-		sourceColumn: LastAuditScore
+		summarizeBy: none
+		sourceColumn: SuccessorStoreKey
 
 		annotation SummarizationSetBy = Automatic
-
-	column ShrinkageRatePct
-		dataType: double
-		lineageTag: a8d76f67-868e-40be-b811-7b7a409e17e8
-		summarizeBy: sum
-		sourceColumn: ShrinkageRatePct
-
-		annotation SummarizationSetBy = Automatic
-
-		annotation PBI_FormatHint = {"isGeneralNumber":true}
-
 	column WarehouseKey
 		dataType: int64
 		formatString: 0
@@ -268,7 +223,7 @@ table Store
 		source =
 				let
 				    Source = FxReadCSVFile ( "dimensions", "stores" ),
-				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"StoreKey", Int64.Type}, {"StoreNumber", type text}, {"StoreName", type text}, {"StoreType", type text}, {"StoreFormat", type text}, {"OwnershipType", type text}, {"RevenueClass", type text}, {"Status", type text}, {"GeographyKey", Int64.Type}, {"StoreZone", type text}, {"StoreDistrict", type text}, {"StoreRegion", type text}, {"OpeningDate", type date}, {"ClosingDate", type date}, {"OpenFlag", Int64.Type}, {"SquareFootage", Int64.Type}, {"EmployeeCount", Int64.Type}, {"StoreManager", type text}, {"StoreManagerFirstName", type text}, {"StoreManagerLastName", type text}, {"Phone", type text}, {"StoreEmail", type text}, {"StoreDescription", type text}, {"CloseReason", type text}, {"AvgTransactionValue", type number}, {"CustomerSatisfactionScore", type number}, {"InventoryTurnoverTarget", type number}, {"LastAuditScore", Int64.Type}, {"ShrinkageRatePct", type number}, {"WarehouseKey", Int64.Type}})
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"StoreKey", Int64.Type}, {"StoreNumber", type text}, {"StoreName", type text}, {"StoreType", type text}, {"StoreFormat", type text}, {"OwnershipType", type text}, {"RevenueClass", type text}, {"Status", type text}, {"GeographyKey", Int64.Type}, {"StoreZone", type text}, {"StoreDistrict", type text}, {"StoreRegion", type text}, {"OpeningDate", type date}, {"ClosingDate", type date}, {"SquareFootage", Int64.Type}, {"EmployeeCount", Int64.Type}, {"StoreManager", type text}, {"StoreManagerFirstName", type text}, {"StoreManagerLastName", type text}, {"Phone", type text}, {"StoreEmail", type text}, {"StoreDescription", type text}, {"CloseReason", type text}, {"SuccessorStoreKey", Int64.Type}, {"WarehouseKey", Int64.Type}})
 				in
 				    #"Changed Type"
 

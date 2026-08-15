@@ -153,7 +153,7 @@ def test_mid_window_roster_ramps_in(geo_keys, iso_by_geo, people_pools):
 
     emp = employees.copy()
     emp["HireDate"] = pd.to_datetime(emp["HireDate"]).dt.normalize()
-    emp["OpeningDate"] = emp["StoreKey"].astype(int).map(opening)
+    emp["OpeningDate"] = emp["HomeStoreKey"].map(opening)
     mid = emp[emp["OpeningDate"] > DS_START]
     assert len(mid) > 0, "fixture must produce mid-window stores"
 
@@ -178,7 +178,7 @@ def test_mid_window_roster_ramps_in(geo_keys, iso_by_geo, people_pools):
     # on or after opening, none beyond the ramp window, and genuinely spread
     # (not all clamped to a single day).
     other = mid[~mid["Title"].isin(["Store Manager", "Sales Associate"])]
-    other = other[other["StoreKey"].astype(int).isin(opening)]
+    other = other[other["HomeStoreKey"].isin(opening)]
     assert len(other) > 0
     lag = (other["HireDate"] - other["OpeningDate"]).dt.days
     assert (lag >= 0).all(), "other staff must not predate opening"
@@ -232,13 +232,15 @@ def test_mid_window_store_that_closes_within_ramp(people_pools):
     assert (hd[both] <= td[both]).all(), "no employee may be hired after termination"
 
     # Store-1 staff must be hired on or before the last operating day (C1 - 1).
-    s1 = employees[employees["StoreKey"].astype(int) == 1]
+    s1 = employees[employees["HomeStoreKey"] == 1]
     assert (pd.to_datetime(s1["HireDate"]) <= C1 - pd.Timedelta(days=1)).all()
 
     # And none are dropped from the bridge by the start<=end filter.
     bridge = generate_employee_store_assignments(
         employees, DS_START, DS_END, store_opening_dates=opening,
     )
-    store_level = set(employees.loc[employees["StoreKey"].astype(int) > 0, "EmployeeKey"].astype(int))
+    store_level = set(
+        employees.loc[employees["HomeStoreKey"].notna(), "EmployeeKey"].astype(int)
+    )
     missing = store_level - set(bridge["EmployeeKey"].astype(int))
     assert not missing, f"{len(missing)} store-level employee(s) missing from the bridge"

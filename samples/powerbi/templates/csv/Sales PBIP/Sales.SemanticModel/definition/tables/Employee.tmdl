@@ -110,6 +110,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column FirstName
+		isHidden
 		dataType: string
 		lineageTag: 81d01f46-7bae-49f7-b7d8-e23dddcd157a
 		summarizeBy: none
@@ -118,6 +119,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column LastName
+		isHidden
 		dataType: string
 		lineageTag: 43c9e099-5631-4105-9856-a3366ecc341d
 		summarizeBy: none
@@ -126,6 +128,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column MiddleName
+		isHidden
 		dataType: string
 		lineageTag: 705130a8-51dc-4d8b-86d8-2d44ba12581e
 		summarizeBy: none
@@ -145,6 +148,7 @@ table Employee
 		annotation UnderlyingDateTimeDataType = Date
 
 	column MaritalStatus
+		isHidden
 		dataType: string
 		lineageTag: 07361d44-99fb-458e-a535-01afef7b2f5a
 		summarizeBy: none
@@ -153,6 +157,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column EmailAddress
+		isHidden
 		dataType: string
 		lineageTag: cd1f7a5f-5fc3-441f-b92a-34a7cf7bc1f6
 		summarizeBy: none
@@ -161,6 +166,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column Phone
+		isHidden
 		dataType: int64
 		formatString: 0
 		lineageTag: 96e21abf-ca2b-40aa-a237-9044e13412f6
@@ -170,6 +176,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column EmergencyContactName
+		isHidden
 		dataType: string
 		lineageTag: 86788d81-56e7-4536-bfb2-c7165717973e
 		summarizeBy: none
@@ -178,6 +185,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column EmergencyContactPhone
+		isHidden
 		dataType: int64
 		formatString: 0
 		lineageTag: 650fc7c5-d6f3-4728-8937-12dbbfb7b1c4
@@ -196,11 +204,19 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column PayFrequency
+		isHidden
 		dataType: int64
 		formatString: 0
 		lineageTag: 26e2303d-cc4f-473d-8f44-cc6d8ae9b95b
 		summarizeBy: sum
 		sourceColumn: PayFrequency
+
+		annotation SummarizationSetBy = Automatic
+
+	column PayFrequencyLabel
+		dataType: string
+		summarizeBy: none
+		sourceColumn: PayFrequencyLabel
 
 		annotation SummarizationSetBy = Automatic
 
@@ -224,6 +240,7 @@ table Employee
 		annotation SummarizationSetBy = Automatic
 
 	column Status
+		isHidden
 		dataType: string
 		lineageTag: 331a7cb9-2694-400c-b63a-e98ff6fa1030
 		summarizeBy: none
@@ -248,12 +265,12 @@ table Employee
 
 		annotation SummarizationSetBy = Automatic
 
-	column StoreKey
+	column HomeStoreKey
 		dataType: int64
 		formatString: 0
 		lineageTag: f236d7d3-f95c-4901-ae9e-9932a17378fe
 		summarizeBy: count
-		sourceColumn: StoreKey
+		sourceColumn: HomeStoreKey
 
 		annotation SummarizationSetBy = Automatic
 
@@ -298,7 +315,7 @@ table Employee
 		source =
 				let
 				    Source = FxReadCSVFile ( "dimensions", "employees" ),
-				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"EmployeeKey", Int64.Type}, {"ParentEmployeeKey", Int64.Type}, {"EmployeeName", type text}, {"Title", type text}, {"OrgLevel", Int64.Type}, {"OrgUnitType", type text}, {"RegionId", Int64.Type}, {"DistrictId", Int64.Type}, {"StoreKey", Int64.Type}, {"GeographyKey", Int64.Type}, {"HireDate", type date}, {"TerminationDate", type date}, {"TerminationReason", type text}, {"IsActive", Int64.Type}, {"EmploymentType", type text}, {"FTE", type number}, {"Gender", type text}, {"FirstName", type text}, {"LastName", type text}, {"MiddleName", type text}, {"BirthDate", type date}, {"MaritalStatus", type text}, {"EmailAddress", type text}, {"Phone", Int64.Type}, {"EmergencyContactName", type text}, {"EmergencyContactPhone", Int64.Type}, {"SalariedFlag", Int64.Type}, {"PayFrequency", Int64.Type}, {"BaseRate", type number}, {"VacationHours", Int64.Type}, {"Status", type text}, {"IsSalesperson", Int64.Type}, {"DepartmentName", type text}})
+				    #"Changed Type" = Table.TransformColumnTypes(Source,{{"EmployeeKey", Int64.Type}, {"ParentEmployeeKey", Int64.Type}, {"EmployeeName", type text}, {"Title", type text}, {"OrgLevel", Int64.Type}, {"OrgUnitType", type text}, {"RegionId", Int64.Type}, {"DistrictId", Int64.Type}, {"HomeStoreKey", Int64.Type}, {"GeographyKey", Int64.Type}, {"HireDate", type date}, {"TerminationDate", type date}, {"TerminationReason", type text}, {"IsActive", Int64.Type}, {"EmploymentType", type text}, {"FTE", type number}, {"Gender", type text}, {"FirstName", type text}, {"LastName", type text}, {"MiddleName", type text}, {"BirthDate", type date}, {"MaritalStatus", type text}, {"EmailAddress", type text}, {"Phone", Int64.Type}, {"EmergencyContactName", type text}, {"EmergencyContactPhone", Int64.Type}, {"SalariedFlag", Int64.Type}, {"PayFrequency", Int64.Type}, {"PayFrequencyLabel", type text}, {"BaseRate", type number}, {"VacationHours", Int64.Type}, {"Status", type text}, {"IsSalesperson", Int64.Type}, {"DepartmentName", type text}})
 				in
 				    #"Changed Type"
 
