@@ -11,6 +11,7 @@ from src.exceptions import SqlServerImportError
 from src.tools.sql._import_common import (
     _extract_tables_from_create_sql,
     _log,
+    _run_with_spinner,
     find_create_sql as _find_create_sql,
     find_prepare_load_script,
     find_finish_load_script,
@@ -319,7 +320,7 @@ def _execute_cci_with_progress(cursor, sql_file: Path, target_tables: list[str])
         sys.stdout.flush()
 
         if error is not None:
-            _log("FAIL", f"    CCI batch failed")
+            _log("FAIL", "    CCI batch failed")
             raise SqlServerImportError(
                 f"Error in CCI script '{sql_file.name}'. Details: {error.args}"
             ) from error
@@ -347,6 +348,19 @@ def _execute_cci_with_progress(cursor, sql_file: Path, target_tables: list[str])
     _log("WORK", f"    {n_with_cci}/{len(target_tables)} tables now have CCI")
     for t in missing:
         _log("WARN", f"    {t}: no CCI")
+
+
+def _restore_primary_keys_with_progress(cursor, *, elapsed_from: float) -> None:
+    """Restore saved PK/UQ/FK definitions while showing pipeline activity."""
+    def _restore_constraints() -> None:
+        cursor.execute("EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'")
+        _drain_results(cursor)
+
+    _run_with_spinner(
+        "Restoring Primary Keys & Foreign Keys",
+        _restore_constraints,
+        elapsed_from=elapsed_from,
+    )
 
 
 _BULK_INSERT_SPLIT_RE = re.compile(
@@ -1342,8 +1356,10 @@ def import_sql_server(
                 if pk_backup_count == 0 and uq_backup_count == 0 and fk_backup_count == 0:
                     _log("INFO", "    No backup definitions found in [admin].[_PK_Backup] — nothing to restore")
                 else:
-                    cursor.execute("EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'")
-                    _drain_results(cursor)
+                    _restore_primary_keys_with_progress(
+                        cursor,
+                        elapsed_from=_t_total,
+                    )
                     _log(
                         "DONE",
                         f"  Restored {pk_backup_count} PKs, {uq_backup_count} UQs, "

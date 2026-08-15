@@ -74,6 +74,16 @@ def main() -> int:
             "the main connection."
         ),
     )
+    parser.add_argument(
+        "--maintenance-workers",
+        type=int,
+        default=0,
+        help=(
+            "Concurrent table-level VACUUM FREEZE ANALYZE workers. Default 0 "
+            "uses a conservative auto value (1 for sequential loads, otherwise 2). "
+            "Set 1 to force the lowest-I/O sequential maintenance path."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -112,6 +122,7 @@ def main() -> int:
                 run_dir=run_dir,
                 verify=not args.no_verify,
                 load_workers=args.load_workers,
+                maintenance_workers=args.maintenance_workers,
                 sql_root_override=sql_root_override,
             )
     except PostgresImportError as exc:

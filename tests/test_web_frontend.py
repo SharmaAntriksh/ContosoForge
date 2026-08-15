@@ -272,6 +272,13 @@ def test_specialized_forms_expose_stable_names_and_help():
     assert 'describedBy="sql-verify-help"' in sql_import
     assert 'aria-label="Database engine"' in sql_import
     assert 'aria-label="Database import progress"' in sql_import
+    assert 'className="import-running-spinner"' in sql_import
+    assert (
+        '<strong role="status" aria-live="polite" aria-atomic="true">'
+        "{currentStatus}</strong>"
+    ) in sql_import
+    assert '<div role="status" aria-live="polite"' not in sql_import
+    assert "Total elapsed {formatElapsed(elapsed)}" in sql_import
     assert 'htmlFor="pg-host"' in sql_import
     assert 'htmlFor="pg-port"' in sql_import
     assert 'htmlFor="pg-identifier-case"' in sql_import

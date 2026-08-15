@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +41,48 @@ def _log(level: str, msg: str) -> None:
         print(f"{_ts()} | {c}{level:<4}{r} | {msg}")
     else:
         print(f"{_ts()} | {level:<4} | {msg}")
+
+
+_SPINNER_FRAMES = ("-", "\\", "|", "/")
+
+
+def _run_with_spinner(label: str, work, *, detail=None, elapsed_from: float | None = None):
+    """Run blocking importer work with an elapsed-time terminal spinner.
+
+    The helper is dialect-neutral so every importer can expose activity for
+    long server-side operations. ``elapsed_from`` switches the counter from
+    phase elapsed time to total pipeline elapsed time.
+    """
+    stop_event = threading.Event()
+    started = time.time() if elapsed_from is None else elapsed_from
+    elapsed_label = "Total elapsed " if elapsed_from is not None else ""
+
+    def _spin() -> None:
+        frame_index = 0
+        while not stop_event.is_set():
+            elapsed = time.time() - started
+            suffix = detail() if detail is not None else ""
+            frame = _SPINNER_FRAMES[frame_index % len(_SPINNER_FRAMES)]
+            sys.stdout.write(
+                f"\r    [{frame}] {label}{suffix}  {elapsed_label}{elapsed:.0f}s  "
+            )
+            sys.stdout.flush()
+            frame_index += 1
+            stop_event.wait(0.15)
+
+    spinner_thread = threading.Thread(
+        target=_spin,
+        name="database-import-spinner",
+        daemon=True,
+    )
+    spinner_thread.start()
+    try:
+        return work()
+    finally:
+        stop_event.set()
+        spinner_thread.join(timeout=1)
+        sys.stdout.write("\r" + " " * 100 + "\r")
+        sys.stdout.flush()
 
 
 # Identifier in either [brackets], "double quotes", or bare form. Each

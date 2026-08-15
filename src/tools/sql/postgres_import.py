@@ -16,21 +16,24 @@ Beyond chunked COPY, ``load_workers > 1`` also unlocks:
   * Three-phase parallel constraint application: PK/UQ → FK NOT VALID
     + CHECK → VALIDATE CONSTRAINT. The FK ADD blocks are rewritten in
     Python from one block per FK into two — a microsecond metadata-only
-    ``NOT VALID`` step and a separate ``VALIDATE CONSTRAINT`` step. The
-    latter uses ``ShareUpdateExclusiveLock``, which is self-compatible,
-    so multiple FKs on the same parent (e.g. Sales' six FKs) validate
-    truly in parallel instead of serializing on AccessExclusiveLock.
-  * Parallel index creation with ``maintenance_work_mem = 1GB`` and
-    ``max_parallel_maintenance_workers = load_workers`` boosted per
-    session so each CREATE INDEX uses parallel sort internally.
+    ``NOT VALID`` step and a separate ``VALIDATE CONSTRAINT`` step. Constraint
+    work is grouped by parent table because PostgreSQL's validation lock is
+    self-conflicting; this prevents workers from idling behind another
+    validation of the same table while unrelated tables are ready to run.
+    PK/UQ index builds use at most four external builders and share a bounded
+    1 GiB maintenance-memory budget so concurrent sorts do not swamp storage
+    or multiply memory with the COPY worker count.
+  * Secondary indexes use the same bounded build policy: at most four
+    external builders share 1 GiB, while each CREATE INDEX may use at most
+    two Postgres parallel-maintenance workers internally.
 
 A post-load ``VACUUM (FREEZE, ANALYZE, PARALLEL N)`` bakes in the
 visibility map + frozen xmin so the loaded rows skip the first-read
 hint-bit tax and qualify for index-only scans immediately. ``COPY ...
 FREEZE`` can't be used inline with parallel chunked workers (the FREEZE
 precondition is that the table was created in the same transaction —
-only satisfiable by one session), so we pay the freeze cost once here in
-a single sequential pass.
+only satisfiable by one session), so table-level maintenance workers pay
+the freeze cost once per relation after the load.
 
 Run-directory layout (CSV mode):
     <run>/sql/postgres/schema/01_create_dimensions.sql
@@ -47,6 +50,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import threading
 import time as _time
 from pathlib import Path
 
@@ -54,6 +58,7 @@ from src.exceptions import PostgresImportError
 from src.tools.sql._import_common import (
     _extract_tables_from_create_sql,
     _log,
+    _run_with_spinner,
     _short_path,
     find_create_sql,
     list_sql_files,
@@ -116,7 +121,10 @@ def _execute_script(conn, sql_file: Path) -> None:
         return
     try:
         with conn.cursor() as cur:
-            cur.execute(sql_text)  # type: ignore[arg-type]
+            _run_with_spinner(
+                f"Executing {sql_file.name}",
+                lambda: cur.execute(sql_text),  # type: ignore[arg-type]
+            )
     except psycopg.Error as exc:  # type: ignore[union-attr]
         raise PostgresImportError(
             f"Error executing '{sql_file.name}': {exc}"
@@ -169,6 +177,7 @@ def _run_parallel_in_workers(
     dsn: dict,
     n_workers: int,
     setup_sql: list[str] | None = None,
+    on_item_done=None,
 ) -> None:
     """Run ``work_fn(cur, item)`` for each item across ``n_workers`` connections.
 
@@ -209,6 +218,8 @@ def _run_parallel_in_workers(
                         return
                     try:
                         work_fn(cur, item)
+                        if on_item_done is not None:
+                            on_item_done()
                     except Exception as exc:
                         with errors_lock:
                             errors.append(exc)
@@ -237,16 +248,39 @@ def _run_parallel_in_workers(
 # are large, commits rare) and slightly noisy, so the load workers don't
 # get this tuning.
 _DDL_BASE_TUNING = ["SET synchronous_commit = off;"]
+_MAINTENANCE_MEMORY_MB = 1024
+_MAX_AUTO_MAINTENANCE_WORKERS = 2
+_MAX_AUTO_INDEX_BUILD_WORKERS = 4
+_MAX_INDEX_PARALLEL_WORKERS = 2
 
 
-# Adds index-build memory + parallel-degree caps. Big sorts during CREATE
-# INDEX (and the implicit ones inside VACUUM FREEZE) benefit from more
-# work_mem; PG13+ uses max_parallel_maintenance_workers as the cap for
-# both CREATE INDEX and VACUUM parallel index processing.
-def _ddl_full_tuning(load_workers: int) -> list[str]:
+def _resolve_maintenance_workers(load_workers: int, requested: int) -> int:
+    """Resolve bounded table-level V/F/A concurrency.
+
+    COPY and VACUUM stress storage differently, so the COPY worker count is
+    not reused wholesale. Auto mode uses at most two table workers; callers
+    can force the old sequential behavior with ``requested=1``.
+    """
+    if requested < 0 or requested > 64:
+        raise PostgresImportError(
+            f"maintenance_workers must be between 0 and 64 (got {requested})."
+        )
+    if requested:
+        return requested
+    return min(max(1, load_workers), _MAX_AUTO_MAINTENANCE_WORKERS)
+
+
+def _resolve_index_build_workers(load_workers: int) -> int:
+    """Bound concurrent index builds independently from COPY concurrency."""
+    return min(max(1, load_workers), _MAX_AUTO_INDEX_BUILD_WORKERS)
+
+
+def _index_build_tuning(n_workers: int) -> list[str]:
+    """Allocate a fixed total memory budget across index-builder sessions."""
+    memory_mb = max(1, _MAINTENANCE_MEMORY_MB // max(1, n_workers))
     return _DDL_BASE_TUNING + [
-        "SET maintenance_work_mem = '1GB';",
-        f"SET max_parallel_maintenance_workers = {load_workers};",
+        f"SET maintenance_work_mem = '{memory_mb}MB';",
+        f"SET max_parallel_maintenance_workers = {_MAX_INDEX_PARALLEL_WORKERS};",
     ]
 
 
@@ -289,6 +323,16 @@ _FK_CONSTRAINT_NAME_RE = re.compile(
 )
 _FK_PARENT_TABLE_RE = re.compile(
     r'ALTER\s+TABLE\s+("[^"]+"\."[^"]+")\s*[\r\n]+\s*ADD\s+CONSTRAINT',
+    re.IGNORECASE | re.DOTALL,
+)
+_ALTER_TABLE_TARGET_RE = re.compile(
+    r'ALTER\s+TABLE\s+("[^"]+"\."[^"]+")',
+    re.IGNORECASE,
+)
+_CREATE_INDEX_TARGET_RE = re.compile(
+    r'CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+'
+    r'(?P<index>"[^"]+")\s+ON\s+'
+    r'(?P<table>"[^"]+"\."[^"]+")',
     re.IGNORECASE | re.DOTALL,
 )
 # Matches the trailing `REFERENCES "schema"."table" ("col");` — we insert
@@ -345,19 +389,126 @@ def _run_ddl_phase(
     target_dsn: dict,
     n_workers: int,
     setup_sql: list[str],
+    item_label=None,
 ) -> None:
-    """Dispatch a list of DO blocks across workers under one phase label."""
+    """Dispatch independent DO blocks and optionally report slow items."""
     if not blocks:
         return
     n_active = min(n_workers, len(blocks))
     _log("WORK", f"    {phase_label} — {len(blocks)} statements across {n_active} workers")
-    _run_parallel_in_workers(
-        blocks,
-        lambda cur, stmt: cur.execute(stmt),
-        dsn=target_dsn,
-        n_workers=n_active,
-        setup_sql=setup_sql,
+
+    timings: list[tuple[str, float]] = []
+    timings_lock = threading.Lock()
+
+    def _run_block(cur, block: str) -> None:
+        started = _time.time()
+        cur.execute(block)
+        if item_label is not None:
+            with timings_lock:
+                timings.append((item_label(block), _time.time() - started))
+
+    _run_with_spinner(
+        phase_label,
+        lambda: _run_parallel_in_workers(
+            blocks,
+            _run_block,
+            dsn=target_dsn,
+            n_workers=n_active,
+            setup_sql=setup_sql,
+        ),
     )
+
+    for label, elapsed in sorted(timings, key=lambda item: item[1], reverse=True):
+        if elapsed >= 0.2:
+            _log("WORK", f"    {label} ({elapsed:.1f}s)")
+
+
+def _index_block_label(block: str) -> str:
+    """Return a readable table/index label for one generated index block."""
+    match = _CREATE_INDEX_TARGET_RE.search(block)
+    if match is None:
+        return "unrecognized index statement"
+    return f"{match.group('table')} {match.group('index')}"
+
+
+def _group_ddl_blocks_by_table(
+    blocks: list[str],
+) -> list[tuple[str, list[str]]]:
+    """Group DDL by ALTER TABLE target, largest groups first.
+
+    PostgreSQL's locks for PK/UQ creation, FK addition, and FK validation are
+    self-conflicting. Dispatching two statements for one table to different
+    workers therefore consumes a worker just to wait for a lock. A table group
+    is the scheduler's unit of work so statements for that table stay serial
+    while different tables still run concurrently.
+    """
+    groups: dict[str, list[str]] = {}
+    for ordinal, block in enumerate(blocks, start=1):
+        match = _ALTER_TABLE_TARGET_RE.search(block)
+        # Generated constraint blocks always have an ALTER TABLE target. Keep
+        # an unrecognized future shape isolated rather than accidentally
+        # serializing it with another unrelated statement.
+        target = match.group(1) if match else f"statement {ordinal}"
+        groups.setdefault(target, []).append(block)
+    # Stable sorting preserves generated order for ties while starting tables
+    # with the most serial work first. This avoids a large table group becoming
+    # the tail after workers have already drained all smaller groups.
+    return sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)
+
+
+def _run_table_affine_ddl_phase(
+    blocks: list[str],
+    phase_label: str,
+    *,
+    target_dsn: dict,
+    n_workers: int,
+    setup_sql: list[str],
+) -> None:
+    """Run constraint DDL without same-table lock convoys."""
+    if not blocks:
+        return
+
+    groups = _group_ddl_blocks_by_table(blocks)
+    n_active = min(n_workers, len(groups))
+    _log(
+        "WORK",
+        f"    {phase_label} — {len(blocks)} statements on "
+        f"{len(groups)} tables across {n_active} workers",
+    )
+
+    timings: list[tuple[str, int, float]] = []
+    timings_lock = threading.Lock()
+
+    def _run_table_group(cur, group: tuple[str, list[str]]) -> None:
+        table, statements = group
+        started = _time.time()
+        for statement in statements:
+            cur.execute(statement)
+        with timings_lock:
+            timings.append((table, len(statements), _time.time() - started))
+
+    _run_with_spinner(
+        phase_label,
+        lambda: _run_parallel_in_workers(
+            groups,
+            _run_table_group,
+            dsn=target_dsn,
+            n_workers=n_active,
+            setup_sql=setup_sql,
+        ),
+    )
+
+    for table, statement_count, elapsed in sorted(
+        timings,
+        key=lambda item: item[2],
+        reverse=True,
+    ):
+        if elapsed >= 0.2:
+            noun = "statement" if statement_count == 1 else "statements"
+            _log(
+                "WORK",
+                f"    {table} ({elapsed:.1f}s, {statement_count} {noun})",
+            )
 
 
 def _parallel_copy_chunks(
@@ -367,6 +518,7 @@ def _parallel_copy_chunks(
     dsn: dict,
     n_workers: int,
     run_dir: Path,
+    on_chunk_done=None,
 ) -> None:
     """Load chunks for one table across ``n_workers`` dedicated connections.
 
@@ -380,6 +532,7 @@ def _parallel_copy_chunks(
         csv_paths, _do_copy,
         dsn=dsn,
         n_workers=n_workers,
+        on_item_done=on_chunk_done,
     )
 
 
@@ -434,20 +587,45 @@ def _apply_copy_script_via_stdin(
     with conn.cursor() as cur:
         for target, csv_paths in groups:
             n_chunks = len(csv_paths)
-            if parallel_ok and n_chunks > 1:
-                n_active = min(load_workers, n_chunks)
-                t0 = _time.time()
-                _log("WORK", f"    {target} — {n_chunks} chunks across {n_active} workers")
-                _parallel_copy_chunks(
-                    target, csv_paths,
-                    dsn=parallel_dsn,  # type: ignore[arg-type]
-                    n_workers=n_active,
-                    run_dir=run_dir,
-                )
-                _log("DONE", f"    {target} — loaded in {_time.time() - t0:.1f}s")
-            else:
+            run_parallel = parallel_ok and n_chunks > 1
+            n_active = min(load_workers, n_chunks) if run_parallel else 1
+            completed = [0]
+            completed_lock = threading.Lock()
+
+            def _on_chunk_done() -> None:
+                with completed_lock:
+                    completed[0] += 1
+
+            def _detail() -> str:
+                if n_chunks <= 1:
+                    return ""
+                worker_note = f", {n_active} workers" if run_parallel else ""
+                with completed_lock:
+                    completed_count = completed[0]
+                return f" ({completed_count}/{n_chunks} chunks{worker_note})"
+
+            def _load_table() -> None:
+                if run_parallel:
+                    _parallel_copy_chunks(
+                        target, csv_paths,
+                        dsn=parallel_dsn,  # type: ignore[arg-type]
+                        n_workers=n_active,
+                        run_dir=run_dir,
+                        on_chunk_done=_on_chunk_done,
+                    )
+                    return
                 for csv_path in csv_paths:
                     _copy_one_chunk(cur, target, csv_path, run_dir=run_dir)
+                    _on_chunk_done()
+
+            t0 = _time.time()
+            _run_with_spinner(f"Loading {target}", _load_table, detail=_detail)
+            elapsed = _time.time() - t0
+            if elapsed >= 0.2:
+                chunk_note = f", {n_chunks} chunks" if n_chunks > 1 else ""
+                if run_parallel:
+                    chunk_note += f", {n_active} workers"
+                _log("WORK", f"    {target} ({elapsed:.1f}s{chunk_note})")
 
 
 def _apply_constraints_parallel(
@@ -457,18 +635,18 @@ def _apply_constraints_parallel(
     n_workers: int,
     run_dir: Path,
 ) -> None:
-    """Apply constraint files in two ordered phases (PK/UQ, then FK + other).
+    """Apply constraints in dependency order with table-affine workers.
 
     The generator emits PKs and FKs intermixed in one file; parallelizing
     blindly would race FKs against their referenced PKs. Splitting by
-    classification preserves the dependency order while still parallelizing
-    within each phase. Multiple constraints on the same parent table
-    serialize on AccessExclusiveLock; constraints on different tables run
-    truly concurrently.
+    classification preserves the dependency order. Within each phase, all
+    statements for one parent table stay on one worker because the relevant
+    PostgreSQL table locks self-conflict; different tables still run in
+    parallel without blocked workers forming a same-table lock convoy.
     """
     pk_blocks: list[str] = []
     add_blocks: list[str] = []      # FK NOT VALID adds + CHECKs + others (fast metadata)
-    validate_blocks: list[str] = [] # FK VALIDATE — parallel even on same parent
+    validate_blocks: list[str] = [] # FK VALIDATE; one worker per parent table
 
     for f in files:
         for block in _split_do_blocks(_read_sql_text(f)):
@@ -493,14 +671,26 @@ def _apply_constraints_parallel(
     for f in files:
         _log("WORK", f"    {_short_path(f, base=run_dir)}")
 
+    pk_workers = _resolve_index_build_workers(n_workers)
+    _run_table_affine_ddl_phase(
+        pk_blocks,
+        "PK/UQ phase",
+        target_dsn=target_dsn,
+        n_workers=pk_workers,
+        setup_sql=_index_build_tuning(pk_workers),
+    )
+
     for blocks, label in (
-        (pk_blocks,       "PK/UQ phase"),
         (add_blocks,      "FK NOT VALID + CHECK phase"),
         (validate_blocks, "VALIDATE CONSTRAINT phase"),
     ):
-        _run_ddl_phase(blocks, label,
-                       target_dsn=target_dsn, n_workers=n_workers,
-                       setup_sql=_DDL_BASE_TUNING)
+        _run_table_affine_ddl_phase(
+            blocks,
+            label,
+            target_dsn=target_dsn,
+            n_workers=n_workers,
+            setup_sql=_DDL_BASE_TUNING,
+        )
 
     _log("DONE", f"  Applying Constraints completed in {_time.time() - t0:.1f}s")
 
@@ -516,9 +706,9 @@ def _apply_indexes_parallel(
 
     CREATE INDEX (non-CONCURRENT) takes a ShareLock that's compatible with
     itself, so multiple indexes on the same table can build concurrently.
-    Each worker session gets maintenance_work_mem + max_parallel_maintenance_workers
-    bumped — both speed up individual builds, and the latter unlocks
-    Postgres' built-in parallel sort inside each CREATE INDEX.
+    The external builder count is independent from COPY concurrency. Builder
+    sessions share a fixed maintenance-memory budget and retain a small amount
+    of Postgres-internal parallelism for each CREATE INDEX.
     """
     blocks = [b for f in files for b in _split_do_blocks(_read_sql_text(f))]
     if not blocks:
@@ -529,9 +719,15 @@ def _apply_indexes_parallel(
     for f in files:
         _log("WORK", f"    {_short_path(f, base=run_dir)}")
 
-    _run_ddl_phase(blocks, "Index phase",
-                   target_dsn=target_dsn, n_workers=n_workers,
-                   setup_sql=_ddl_full_tuning(n_workers))
+    index_workers = _resolve_index_build_workers(n_workers)
+    _run_ddl_phase(
+        blocks,
+        "Index phase",
+        target_dsn=target_dsn,
+        n_workers=index_workers,
+        setup_sql=_index_build_tuning(index_workers),
+        item_label=_index_block_label,
+    )
 
     _log("DONE", f"  Creating Indexes completed in {_time.time() - t0:.1f}s")
 
@@ -562,6 +758,108 @@ def _tune_database_for_speed(admin_conn, database: str, dialect) -> None:
     with admin_conn.cursor() as cur:
         for key, value in _DB_PERSISTENT_TUNING:
             cur.execute(f"ALTER DATABASE {quoted} SET {key} = {value};")
+
+
+def _list_vacuum_targets(conn) -> list[tuple[str, str, int]]:
+    """Return database-local tables largest-first for table-level V/F/A.
+
+    This mirrors database-wide ``VACUUM`` coverage while excluding shared
+    catalogs (which database owners cannot vacuum) and TOAST relations (which
+    are processed with their owning table). Partitioned parents are excluded;
+    their ordinary child relations are listed and vacuumed exactly once.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT n.nspname, c.relname, pg_total_relation_size(c.oid) "
+            "FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relkind IN ('r', 'm') "
+            "  AND c.relisshared = false "
+            "  AND n.nspname NOT LIKE 'pg_toast%' "
+            "ORDER BY pg_total_relation_size(c.oid) DESC, n.nspname, c.relname;"
+        )
+        rows = cur.fetchall()
+
+    targets = []
+    for schema, table, size_bytes in rows:
+        qualified = (
+            f"{_DIALECT.quote_ident(str(schema))}."
+            f"{_DIALECT.quote_ident(str(table))}"
+        )
+        targets.append((qualified, f"{schema}.{table}", int(size_bytes or 0)))
+    return targets
+
+
+def _vacuum_freeze_analyze_tables(
+    *,
+    target_dsn: dict,
+    targets: list[tuple[str, str, int]],
+    maintenance_workers: int,
+    load_workers: int,
+) -> None:
+    """Run full V/F/A on every user table with bounded table concurrency.
+
+    PostgreSQL's ``VACUUM ... PARALLEL`` parallelizes index cleanup, not the
+    heap scan that dominates a fresh bulk load. Running separate tables on a
+    small number of connections parallelizes those heap scans. When multiple
+    table workers are active, nested index parallelism is disabled and the
+    existing 1 GiB maintenance-memory budget is divided across workers.
+    """
+    if not targets:
+        return
+
+    n_active = min(maintenance_workers, len(targets))
+    index_workers = load_workers if n_active == 1 else 0
+    memory_mb = max(128, _MAINTENANCE_MEMORY_MB // n_active)
+    setup_sql = _DDL_BASE_TUNING + [
+        f"SET maintenance_work_mem = '{memory_mb}MB';",
+        f"SET max_parallel_maintenance_workers = {index_workers};",
+    ]
+
+    completed = [0]
+    timings: list[tuple[str, float, int]] = []
+    progress_lock = threading.Lock()
+
+    def _vacuum_one(cur, target: tuple[str, str, int]) -> None:
+        qualified, display, size_bytes = target
+        started = _time.time()
+        cur.execute(
+            f"VACUUM (FREEZE, ANALYZE, PARALLEL {index_workers}) "
+            f"ONLY {qualified};"
+        )
+        elapsed = _time.time() - started
+        with progress_lock:
+            timings.append((display, elapsed, size_bytes))
+            completed[0] += 1
+
+    def _detail() -> str:
+        with progress_lock:
+            return f" ({completed[0]}/{len(targets)} tables, {n_active} workers)"
+
+    _log(
+        "WORK",
+        f"    {len(targets)} tables across {n_active} maintenance workers",
+    )
+    _run_with_spinner(
+        "Vacuum + Freeze + Analyze",
+        lambda: _run_parallel_in_workers(
+            targets,
+            _vacuum_one,
+            dsn=target_dsn,
+            n_workers=n_active,
+            setup_sql=setup_sql,
+        ),
+        detail=_detail,
+    )
+
+    for display, elapsed, size_bytes in sorted(
+        timings,
+        key=lambda item: item[1],
+        reverse=True,
+    ):
+        if elapsed >= 0.2:
+            size_mb = size_bytes / (1024 * 1024)
+            _log("WORK", f"    {display} ({elapsed:.1f}s, {size_mb:,.0f} MB)")
 
 
 def _verify_row_counts(conn, *, dim_tables: list[str], fact_tables: list[str]) -> None:
@@ -613,6 +911,7 @@ def import_postgres(
     run_dir: Path,
     verify: bool = True,
     load_workers: int = 1,
+    maintenance_workers: int = 0,
     sql_root_override: Path | None = None,
 ) -> None:
     """Apply generated Postgres DDL and COPY scripts to a target database.
@@ -628,6 +927,10 @@ def import_postgres(
     """
     if load_workers < 1:
         raise PostgresImportError(f"load_workers must be >= 1 (got {load_workers}).")
+    maintenance_workers = _resolve_maintenance_workers(
+        load_workers,
+        maintenance_workers,
+    )
     # Validate inputs before requiring the driver — fail fast on bad layout
     # without forcing psycopg to be installed just to see the error message.
     run_dir = Path(run_dir)
@@ -759,25 +1062,21 @@ def import_postgres(
         ) from exc
 
     # VACUUM (FREEZE, ANALYZE) needs autocommit — VACUUM can't run inside a
-    # transaction. FREEZE sets the visibility map + frozen xmin in one
-    # sequential pass, so subsequent queries skip the first-read hint-bit
-    # tax and can use index-only scans immediately. Also subsumes the
-    # planner-statistics refresh the old ANALYZE phase did. PARALLEL N
-    # (PG13+) parallelizes index processing — capped server-side by
-    # max_parallel_maintenance_workers, so passing a larger N is harmless.
+    # transaction. FREEZE sets the visibility map + frozen xmin so subsequent
+    # queries skip the first-read hint-bit tax and can use index-only scans.
+    # Run generated tables on a bounded number of connections: VACUUM's own
+    # PARALLEL option only parallelizes index processing, not table heap scans.
     try:
         with pg.connect(**target_dsn, autocommit=True) as final_conn:
             _t_vac = _time.time()
             _log("INFO", "  Vacuum + Freeze + Analyze")
-            vacuum_opts = "FREEZE, ANALYZE"
-            if load_workers > 1:
-                vacuum_opts += f", PARALLEL {load_workers}"
-            with final_conn.cursor() as cur:
-                # Bump maintenance settings before VACUUM so the parallel
-                # index workers actually have memory + worker slots to use.
-                for stmt in _ddl_full_tuning(load_workers):
-                    cur.execute(stmt)
-                cur.execute(f"VACUUM ({vacuum_opts});")
+            vacuum_targets = _list_vacuum_targets(final_conn)
+            _vacuum_freeze_analyze_tables(
+                target_dsn=target_dsn,
+                targets=vacuum_targets,
+                maintenance_workers=maintenance_workers,
+                load_workers=load_workers,
+            )
             _log("DONE", f"  Vacuum + Freeze + Analyze completed in {_time.time() - _t_vac:.1f}s")
 
             if verify:

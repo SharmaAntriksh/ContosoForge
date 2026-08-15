@@ -68,6 +68,7 @@ function SqlImport({ onBack }) {
   const [logs, setLogs] = useState([]);
   const [elapsed, setElapsed] = useState(0);
   const [jobStatus, setJobStatus] = useState(null);
+  const [currentStatus, setCurrentStatus] = useState("Ready to import");
   const [requestError, setRequestError] = useState(null);
   const [idleSecs, setIdleSecs] = useState(0);
   const timerRef = useRef(null);
@@ -170,6 +171,7 @@ function SqlImport({ onBack }) {
     setEngine(nextEngine);
     setRequestError(null);
     setJobStatus(null);
+    setCurrentStatus("Ready to import");
   };
 
   const chooseDataset = dataset => {
@@ -199,6 +201,7 @@ function SqlImport({ onBack }) {
 
     setLogs([]);
     setJobStatus(null);
+    setCurrentStatus(`Starting ${engineName} import`);
     setRequestError(null);
     setElapsed(0);
     setIdleSecs(0);
@@ -245,8 +248,12 @@ function SqlImport({ onBack }) {
             setIdleSecs(0);
             setLogs(previous => [...previous, data.line]);
           }
-          if (data.type === "status") setElapsed(data.elapsed);
+          if (data.type === "status") {
+            setElapsed(data.elapsed);
+            if (data.current_status) setCurrentStatus(data.current_status);
+          }
           if (data.type === "end" || data.type === "idle") {
+            if (data.current_status) setCurrentStatus(data.current_status);
             stopTimers(data.status || "done", data.elapsed || 0);
           }
         };
@@ -715,9 +722,9 @@ function SqlImport({ onBack }) {
         {isRunning ? (
           <>
             <div>
-              <span className="import-running-dot" aria-hidden="true" />
-              <strong>Importing into {engineName}</strong>
-              <small>{formatElapsed(elapsed)}</small>
+              <span className="import-running-spinner" aria-hidden="true" />
+              <strong role="status" aria-live="polite" aria-atomic="true">{currentStatus}</strong>
+              <small>{engineName} · Total elapsed {formatElapsed(elapsed)}</small>
             </div>
             <button type="button" className="import-cancel" onClick={cancelImport}>Cancel import</button>
           </>

@@ -25,6 +25,7 @@ from src.tools.sql.sql_server_import import (
     _drain_results,
     _execute_load_with_progress,
     _read_sql_text,
+    _restore_primary_keys_with_progress,
     _split_load_statements,
     _with_database,
 )
@@ -241,6 +242,30 @@ class TestDrainResults:
         # C3a: an error at the fetch of the current rowset must propagate.
         with pytest.raises(pyodbc.Error):
             _drain_results(_DeferredErrorCursor())
+
+
+def test_pk_restore_uses_shared_total_elapsed_spinner(monkeypatch):
+    calls = []
+
+    class Cursor(_NoResultCursor):
+        def execute(self, statement):
+            calls.append(statement)
+
+    def fake_spinner(label, work, *, elapsed_from):
+        calls.append((label, elapsed_from))
+        work()
+
+    monkeypatch.setattr(
+        "src.tools.sql.sql_server_import._run_with_spinner",
+        fake_spinner,
+    )
+
+    _restore_primary_keys_with_progress(Cursor(), elapsed_from=123.0)
+
+    assert calls == [
+        ("Restoring Primary Keys & Foreign Keys", 123.0),
+        "EXEC [admin].[ManagePrimaryKeys] @Action = 'RESTORE'",
+    ]
 
 
 class _RaisingExecCursor:

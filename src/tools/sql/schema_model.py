@@ -31,7 +31,10 @@ Sections mirror the old file layout so the mode/feature gating is unchanged:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
+
+from src.exceptions import ValidationError
+from src.utils.static_schemas import STATIC_SCHEMAS as _STATIC_SCHEMAS
 
 __all__ = [
     "CheckExpr",
@@ -48,8 +51,10 @@ __all__ = [
     "Constraint",
     "SECTIONS",
     "select_sections",
+    "iter_all_constraints",
     "Index",
     "INDEXES",
+    "validate_roster_against_schemas",
 ]
 
 
@@ -462,6 +467,14 @@ _ORDER_HEADER: tuple[Constraint, ...] = (
         guard_columns=("EmployeeKey",), type_compat=True,
     ),
     ForeignKey(
+        "FK_OrderHeader_Promotions", "OrderHeader", ("PromotionKey",), "Promotions", ("PromotionKey",),
+        guard_columns=("PromotionKey",),
+    ),
+    ForeignKey(
+        "FK_OrderHeader_Currency", "OrderHeader", ("CurrencyKey",), "Currency", ("CurrencyKey",),
+        guard_columns=("CurrencyKey",),
+    ),
+    ForeignKey(
         "FK_OrderHeader_Dates_OrderDate", "OrderHeader", ("OrderDate",), "Dates", ("Date",),
         guard_columns=("OrderDate",),
     ),
@@ -484,14 +497,6 @@ _ORDER_DETAIL: tuple[Constraint, ...] = (
     ForeignKey(
         "FK_OrderDetail_Products", "OrderDetail", ("ProductKey",), "Products", ("ProductKey",),
         guard_columns=("ProductKey",),
-    ),
-    ForeignKey(
-        "FK_OrderDetail_Promotions", "OrderDetail", ("PromotionKey",), "Promotions", ("PromotionKey",),
-        guard_columns=("PromotionKey",),
-    ),
-    ForeignKey(
-        "FK_OrderDetail_Currency", "OrderDetail", ("CurrencyKey",), "Currency", ("CurrencyKey",),
-        guard_columns=("CurrencyKey",),
     ),
     ForeignKey(
         "FK_OrderDetail_Dates_DueDate", "OrderDetail", ("DueDate",), "Dates", ("Date",),
@@ -665,14 +670,14 @@ INDEXES: tuple[Index, ...] = (
     # --- OrderHeader FK columns (OrderNumber has UQ) ---------------------
     _btree("OrderHeader", "CustomerKey"),
     _btree("OrderHeader", "StoreKey"),
+    _btree("OrderHeader", "PromotionKey"),
+    _btree("OrderHeader", "CurrencyKey"),
     _btree("OrderHeader", "OrderDate"),
     _btree("OrderHeader", "EmployeeKey", guarded=True),
     _btree("OrderHeader", "TimeKey", guarded=True),
     _btree("OrderHeader", "ChannelKey", guarded=True),
     # --- OrderDetail FK columns (OrderNumber leads UQ) -------------------
     _btree("OrderDetail", "ProductKey"),
-    _btree("OrderDetail", "PromotionKey"),
-    _btree("OrderDetail", "CurrencyKey"),
     _btree("OrderDetail", "DueDate"),
     _btree("OrderDetail", "DeliveryDate"),
     # --- InventorySnapshot (ProductKey leads composite PK) ---------------
@@ -687,3 +692,75 @@ INDEXES: tuple[Index, ...] = (
     _brin("OrderDetail", "DeliveryDate", guarded=True),
     _brin("InventorySnapshot", "SnapshotDate"),
 )
+
+
+def validate_roster_against_schemas(
+    schemas: Mapping[str, Iterable[tuple[str, object]]],
+    *,
+    constraints: Iterable[Constraint] | None = None,
+    indexes: Iterable[Index] | None = None,
+) -> None:
+    """Reject roster entries that reference unknown canonical identifiers.
+
+    The declarative roster feeds every SQL dialect, while ``STATIC_SCHEMAS``
+    feeds CREATE TABLE generation. Validating the former against the latter
+    prevents a renderer from emitting a constraint or index for a column that
+    no generated table can contain. Optional/config-gated columns must still
+    exist in the canonical schema superset; runtime guards only decide whether
+    that valid canonical column is present in a particular run.
+    """
+    canonical = {
+        table: frozenset(column for column, _spec in schema)
+        for table, schema in schemas.items()
+    }
+    problems: list[str] = []
+
+    def check_table(owner: str, table: str) -> frozenset[str]:
+        columns = canonical.get(table)
+        if columns is None:
+            problems.append(f"{owner}: unknown table {table!r}")
+            return frozenset()
+        return columns
+
+    def check_columns(owner: str, table: str, columns: Iterable[str]) -> None:
+        canonical_columns = check_table(owner, table)
+        if not canonical_columns:
+            return
+        for column in columns:
+            if column not in canonical_columns:
+                problems.append(
+                    f"{owner}: unknown column {table}.{column}"
+                )
+
+    roster_constraints = (
+        tuple(iter_all_constraints()) if constraints is None else tuple(constraints)
+    )
+    roster_indexes = INDEXES if indexes is None else tuple(indexes)
+
+    for constraint in roster_constraints:
+        source_columns = set(getattr(constraint, "columns", ()) or ())
+        source_columns.update(getattr(constraint, "guard_columns", ()) or ())
+        if isinstance(constraint, Check):
+            source_columns.add(constraint.column)
+        check_columns(constraint.name, constraint.table, source_columns)
+        if isinstance(constraint, ForeignKey):
+            check_columns(
+                constraint.name,
+                constraint.ref_table,
+                constraint.ref_columns,
+            )
+
+    for index in roster_indexes:
+        check_columns(index.name, index.table, (index.column,))
+
+    if problems:
+        detail = "\n  - ".join(problems)
+        raise ValidationError(
+            "SQL roster does not match the canonical generated schemas:\n"
+            f"  - {detail}"
+        )
+
+
+# Fail during application startup/generation rather than minutes into a live
+# database import.
+validate_roster_against_schemas(_STATIC_SCHEMAS)

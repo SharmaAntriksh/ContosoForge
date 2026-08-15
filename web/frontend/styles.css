@@ -298,6 +298,7 @@ input[type=number]::-webkit-inner-spin-button{opacity:1}
 .import-launch small{grid-column:2;color:var(--muted);font-size:10.5px}
 .import-start{min-width:190px}
 .import-running-dot{grid-row:1/3;width:9px;height:9px;border-radius:50%;background:var(--ok);animation:pulse 1.2s infinite}
+.import-running-spinner{grid-row:1/3;width:17px;height:17px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .75s linear infinite}
 .review-back{margin-top:16px;padding-top:14px}
 .import-job-status{display:flex;justify-content:space-between;gap:12px;margin-top:15px;padding:11px 13px;border-radius:8px;font-size:11.5px}
 .import-job-status.success{border:1px solid rgba(11,122,53,.15);background:var(--okBg);color:var(--ok)}

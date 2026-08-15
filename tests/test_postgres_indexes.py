@@ -55,9 +55,15 @@ class TestIndexContent:
         out = self._out()
         for ix in ("IX_Sales_CustomerKey", "IX_Sales_ProductKey", "IX_Sales_StoreKey",
                    "IX_Sales_OrderDate", "IX_OrderHeader_CustomerKey",
+                   "IX_OrderHeader_PromotionKey", "IX_OrderHeader_CurrencyKey",
                    "IX_OrderDetail_ProductKey", "IX_Returns_ReturnDate",
                    "IX_InventorySnapshot_WarehouseKey"):
             assert ix in out, f"Missing index: {ix}"
+
+    def test_order_detail_does_not_index_header_columns(self) -> None:
+        out = self._out()
+        assert "IX_OrderDetail_PromotionKey" not in out
+        assert "IX_OrderDetail_CurrencyKey" not in out
 
     def test_covers_date_columns_with_brin(self) -> None:
         out = self._out()

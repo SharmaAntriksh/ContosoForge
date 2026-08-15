@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.exceptions import ValidationError
 from src.tools.sql.dialect import REGISTRY
 from src.tools.sql.constraint_sql import render_constraints_sql
 from src.tools.sql.identifier_case import IdentifierCase
@@ -17,11 +18,14 @@ from src.tools.sql.name_map import build_name_map
 from src.tools.sql.schema_model import (
     Check,
     ForeignKey,
+    Index,
     PrimaryKey,
     Unique,
     UniqueIndex,
     iter_all_constraints,
+    validate_roster_against_schemas,
 )
+from src.utils.static_schemas import STATIC_SCHEMAS
 
 SS = REGISTRY["sqlserver"]
 PG = REGISTRY["postgres"]
@@ -45,6 +49,55 @@ class TestRosterIntegrity:
         names = [c.name for c in iter_all_constraints()]
         dupes = {n for n in names if names.count(n) > 1}
         assert not dupes, f"Duplicate constraint names: {sorted(dupes)}"
+
+    def test_every_roster_identifier_exists_in_canonical_schema(self) -> None:
+        validate_roster_against_schemas(STATIC_SCHEMAS)
+
+    def test_schema_validator_rejects_bad_constraints_and_indexes(self) -> None:
+        bad_fk = ForeignKey(
+            "FK_Bad_OrderDetail_Promotions",
+            "OrderDetail",
+            ("PromotionKey",),
+            "Promotions",
+            ("PromotionKey",),
+        )
+        bad_index = Index("btree", "OrderDetail", "CurrencyKey")
+
+        with pytest.raises(ValidationError) as exc_info:
+            validate_roster_against_schemas(
+                STATIC_SCHEMAS,
+                constraints=(bad_fk,),
+                indexes=(bad_index,),
+            )
+
+        message = str(exc_info.value)
+        assert "OrderDetail.PromotionKey" in message
+        assert "OrderDetail.CurrencyKey" in message
+
+    def test_order_header_owns_promotion_and_currency_relationships(self) -> None:
+        fks = {
+            c.name: c
+            for c in iter_all_constraints()
+            if isinstance(c, ForeignKey)
+        }
+        for name, column, target in (
+            ("FK_OrderHeader_Promotions", "PromotionKey", "Promotions"),
+            ("FK_OrderHeader_Currency", "CurrencyKey", "Currency"),
+        ):
+            fk = fks[name]
+            assert fk.table == "OrderHeader"
+            assert fk.columns == (column,)
+            assert fk.ref_table == target
+        assert "FK_OrderDetail_Promotions" not in fks
+        assert "FK_OrderDetail_Currency" not in fks
+
+    @pytest.mark.parametrize("dialect", [SS, PG])
+    def test_order_header_relationships_render_for_every_dialect(self, dialect) -> None:
+        out = _render(dialect, mode="both")
+        assert "FK_OrderHeader_Promotions" in out
+        assert "FK_OrderHeader_Currency" in out
+        assert "FK_OrderDetail_Promotions" not in out
+        assert "FK_OrderDetail_Currency" not in out
 
     def test_every_identifier_is_in_the_snake_name_map(self) -> None:
         """Snake mode only transforms identifiers the name map knows.

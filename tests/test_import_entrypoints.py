@@ -121,6 +121,22 @@ class TestPostgresEntrypoint:
         assert rc == 0
         assert seen["override"] is None
 
+    def test_forwards_maintenance_workers(self, monkeypatch, tmp_path: Path) -> None:
+        run = _make_run(tmp_path)
+        seen = {}
+
+        def stub(**kwargs):
+            seen["maintenance_workers"] = kwargs["maintenance_workers"]
+
+        rc = self._main(
+            monkeypatch,
+            run,
+            ["--maintenance-workers", "3"],
+            stub,
+        )
+        assert rc == 0
+        assert seen["maintenance_workers"] == 3
+
     def test_missing_packaged_config_exits_2_with_message(self, monkeypatch, tmp_path: Path, capsys) -> None:
         run = _make_run(tmp_path)
         (run / "config" / "config.yaml").unlink()

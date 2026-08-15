@@ -43,6 +43,11 @@ param (
     # Dim tables always load on the main connection.
     [int]$LoadWorkers = 1,
 
+    # Table-level VACUUM FREEZE ANALYZE concurrency. 0 = conservative auto
+    # (1 for sequential loads, otherwise 2). Use 1 for minimum I/O pressure.
+    [ValidateRange(0, 64)]
+    [int]$MaintenanceWorkers = 0,
+
     # Identifier casing to import under. 'pascal' (default) runs the PascalCase
     # scripts packaged with the run; 'snake' re-renders the DDL/load/constraints/
     # views/indexes in lower_snake_case from the run's config before importing
@@ -121,7 +126,8 @@ try {
         "--user",     $Username,
         "--run-path", $ResolvedRunPath,
         "--identifier-case", $IdentifierCase,
-        "--load-workers", $LoadWorkers.ToString()
+        "--load-workers", $LoadWorkers.ToString(),
+        "--maintenance-workers", $MaintenanceWorkers.ToString()
     )
     if ($NoVerify) { $argsList += "--no-verify" }
 
@@ -143,6 +149,7 @@ try {
         if ($NoVerify) { $flags += "no-verify" }
         $flags += ("case=" + $IdentifierCase)
         if ($LoadWorkers -gt 1) { $flags += "load-workers=$LoadWorkers" }
+        if ($MaintenanceWorkers -gt 0) { $flags += "maintenance-workers=$MaintenanceWorkers" }
         $flagText = if ($flags.Count -gt 0) { " [" + ($flags -join ", ") + "]" } else { "" }
 
         Write-Step ("Running: {0} {1} --host {2}:{3} --database {4} --run {5}{6}" -f $pyName, $entryName, $PgHost, $Port, $Database, $runDisplay, $flagText) -Level cmd

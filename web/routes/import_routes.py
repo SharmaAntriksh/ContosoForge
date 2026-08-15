@@ -35,9 +35,14 @@ from web.process_control import (
 )
 from web.shared_state import REPO_ROOT, _ANSI_RE
 
-# Spinner lines from sql_server_import.py use \r to overwrite in-place.
-# In a subprocess pipe they appear as separate lines — filter them out.
+# Terminal spinner lines from the import runners use \r to overwrite in-place.
+# In a subprocess pipe they appear as separate lines — filter them out. The web
+# client renders one import-wide spinner from job state instead.
 _SPINNER_RE = re.compile(r"^\s*\[[-\\|/]\]\s")
+_IMPORT_LOG_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}\s+.+?\|\s*(?P<level>[A-Z]+)\s*\|\s*(?P<message>.*)$"
+)
+_STATUS_METADATA_PREFIXES = ("Server:", "Host:", "Database:")
 
 router = APIRouter(prefix="/api", tags=["import"])
 
@@ -96,6 +101,19 @@ def _safe_dataset_path(name: str) -> Path:
 
 _import_lock = threading.Lock()
 _current_import: dict | None = None
+
+
+def _status_from_import_log(line: str) -> str | None:
+    """Return an operator-facing phase from a timestamped importer log line."""
+    match = _IMPORT_LOG_RE.match(line)
+    if match is None or match.group("level") != "INFO":
+        return None
+    message = match.group("message").strip()
+    if not message or not message.strip("="):
+        return None
+    if message.startswith(_STATUS_METADATA_PREFIXES):
+        return None
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +347,9 @@ def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
     """Run the selected database importer as a subprocess."""
     global _current_import
     proc = None
+    terminal_status = "failed"
+    terminal_current_status = "Import failed"
+    terminal_exit_code = -1
     try:
         cmd, env = _build_import_command(req, dataset_path)
         job["command"] = " ".join(cmd)
@@ -358,39 +379,69 @@ def _run_import_thread(job: dict, req: ImportRequest, dataset_path: Path):
                 clean = _ANSI_RE.sub("", line.rstrip())
                 if not clean or _SPINNER_RE.match(clean):
                     continue
-                job["logs"].append(clean)
+                current_status = _status_from_import_log(clean)
+                with _import_lock:
+                    job["logs"].append(clean)
+                    if current_status is not None:
+                        job["current_status"] = current_status
             proc.wait()
         finally:
             timer.cancel()
             for kt in job.get("_kill_timers", []):
                 kt.cancel()
 
-        if timed_out.is_set():
-            job["logs"].append(f"ERROR: Import killed after {_IMPORT_TIMEOUT}s timeout")
-        # Any interruption (timeout or user cancel) can orphan the DB / leave
-        # BULK_LOGGED recovery — spell out the recovery steps once the run ends.
-        if timed_out.is_set() or job.get("status") == "cancelled":
-            hint = (
-                _POSTGRES_INTERRUPT_HINT
-                if req.engine == "postgres"
-                else _SQLSERVER_INTERRUPT_HINT
+        with _import_lock:
+            was_cancelled = job["status"] == "cancelling"
+            if timed_out.is_set():
+                job["logs"].append(
+                    f"ERROR: Import killed after {_IMPORT_TIMEOUT}s timeout"
+                )
+            # Any interruption (timeout or user cancel) can orphan the DB / leave
+            # BULK_LOGGED recovery — spell out the recovery steps once the run ends.
+            if timed_out.is_set() or was_cancelled:
+                hint = (
+                    _POSTGRES_INTERRUPT_HINT
+                    if req.engine == "postgres"
+                    else _SQLSERVER_INTERRUPT_HINT
+                )
+                job["logs"].append(hint)
+
+        terminal_exit_code = proc.returncode
+        if was_cancelled:
+            terminal_status = "cancelled"
+            terminal_current_status = "Import cancelled"
+        else:
+            terminal_status = "done" if proc.returncode == 0 else "failed"
+            terminal_current_status = (
+                "Import completed" if proc.returncode == 0 else "Import failed"
             )
-            job["logs"].append(hint)
-        job["exit_code"] = proc.returncode
-        # Preserve a user-initiated cancel: terminate() makes the process exit
-        # non-zero, which would otherwise be reported as "failed".
-        if job["status"] != "cancelled":
-            job["status"] = "done" if proc.returncode == 0 else "failed"
+            if timed_out.is_set():
+                terminal_current_status = "Import timed out"
     except Exception:
         logging.getLogger(__name__).exception("Import thread failed")
-        job["logs"].append("ERROR: Import failed unexpectedly. Check server logs for details.")
-        job["status"] = "failed"
-        job["exit_code"] = -1
+        with _import_lock:
+            was_cancelled = job["status"] == "cancelling"
+            if not was_cancelled:
+                job["logs"].append(
+                    "ERROR: Import failed unexpectedly. Check server logs for details."
+                )
+        if was_cancelled:
+            terminal_status = "cancelled"
+            terminal_current_status = "Import cancelled"
     finally:
-        if proc is not None:
-            release_process_tree(proc)
-        job["ended"] = time.time()
-        job["elapsed"] = job["ended"] - job["started"]
+        try:
+            if proc is not None:
+                release_process_tree(proc)
+        finally:
+            ended = time.time()
+            with _import_lock:
+                job.update(
+                    status=terminal_status,
+                    current_status=terminal_current_status,
+                    exit_code=terminal_exit_code,
+                    ended=ended,
+                    elapsed=ended - job["started"],
+                )
 
 
 @router.post("/import/start")
@@ -441,7 +492,7 @@ def start_import(req: ImportRequest):
         )
 
     with _import_lock:
-        if _current_import and _current_import["status"] == "running":
+        if _current_import and _current_import["status"] in {"running", "cancelling"}:
             raise HTTPException(409, "An import is already running.")
         job = {
             "id": str(uuid.uuid4())[:8],
@@ -457,6 +508,11 @@ def start_import(req: ImportRequest):
             "database": req.database,
             "server": req.server,
             "engine": req.engine,
+            "current_status": (
+                "Starting PostgreSQL import"
+                if req.engine == "postgres"
+                else "Starting SQL Server import"
+            ),
         }
         _current_import = job
 
@@ -473,17 +529,40 @@ async def stream_import_logs():
         while True:
             with _import_lock:
                 job = _current_import
-            if job is None:
+                snapshot = None if job is None else {
+                    "logs": list(job["logs"]),
+                    "status": job["status"],
+                    "started": job["started"],
+                    "elapsed": job.get("elapsed", 0),
+                    "exit_code": job.get("exit_code"),
+                    "current_status": job.get("current_status", "Importing"),
+                }
+            if snapshot is None:
                 yield f"data: {_json.dumps({'type': 'idle'})}\n\n"
                 break
-            logs = list(job["logs"])
+            logs = snapshot["logs"]
             for line in logs[idx:]:
                 yield f"data: {_json.dumps({'type': 'log', 'line': line})}\n\n"
             idx = len(logs)
-            elapsed = time.time() - job["started"] if job["status"] == "running" else job.get("elapsed", 0)
-            yield f"data: {_json.dumps({'type': 'status', 'status': job['status'], 'elapsed': round(elapsed, 1)})}\n\n"
-            if job["status"] in ("done", "failed", "cancelled"):
-                yield f"data: {_json.dumps({'type': 'end', 'status': job['status'], 'exit_code': job.get('exit_code'), 'elapsed': round(elapsed, 1)})}\n\n"
+            elapsed = (
+                time.time() - snapshot["started"]
+                if snapshot["status"] in {"running", "cancelling"}
+                else snapshot["elapsed"]
+            )
+            progress = {
+                "type": "status",
+                "status": snapshot["status"],
+                "elapsed": round(elapsed, 1),
+                "current_status": snapshot["current_status"],
+            }
+            yield f"data: {_json.dumps(progress)}\n\n"
+            if snapshot["status"] in ("done", "failed", "cancelled"):
+                terminal = {
+                    **progress,
+                    "type": "end",
+                    "exit_code": snapshot["exit_code"],
+                }
+                yield f"data: {_json.dumps(terminal)}\n\n"
                 break
             await asyncio.sleep(0.3)
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -498,7 +577,8 @@ def cancel_import():
             raise HTTPException(400, "No running import to cancel.")
         proc = _current_import.get("process")
         if proc and proc.poll() is None:
-            _current_import["status"] = "cancelled"
+            _current_import["status"] = "cancelling"
+            _current_import["current_status"] = "Cancelling import"
             _current_import["logs"].append("Import cancelled by user.")
             # Graceful stop first (lets the child revert the recovery model),
             # then hard-kill after the grace window if it doesn't exit.
@@ -512,17 +592,35 @@ def import_status():
     """Get current import job status."""
     with _import_lock:
         job = _current_import
-    if not job:
+        snapshot = None if job is None else {
+            "id": job["id"],
+            "status": job["status"],
+            "started": job["started"],
+            "elapsed": job.get("elapsed", 0),
+            "exit_code": job.get("exit_code"),
+            "log_count": len(job["logs"]),
+            "dataset": job.get("dataset"),
+            "database": job.get("database"),
+            "server": job.get("server"),
+            "engine": job.get("engine", "sqlserver"),
+            "current_status": job.get("current_status", "Importing"),
+        }
+    if snapshot is None:
         return {"status": "idle"}
-    elapsed = time.time() - job["started"] if job["status"] == "running" else job.get("elapsed", 0)
+    elapsed = (
+        time.time() - snapshot["started"]
+        if snapshot["status"] in {"running", "cancelling"}
+        else snapshot["elapsed"]
+    )
     return {
-        "id": job["id"],
-        "status": job["status"],
+        "id": snapshot["id"],
+        "status": snapshot["status"],
         "elapsed": round(elapsed, 1),
-        "exit_code": job.get("exit_code"),
-        "log_count": len(job["logs"]),
-        "dataset": job.get("dataset"),
-        "database": job.get("database"),
-        "server": job.get("server"),
-        "engine": job.get("engine", "sqlserver"),
+        "exit_code": snapshot["exit_code"],
+        "log_count": snapshot["log_count"],
+        "dataset": snapshot["dataset"],
+        "database": snapshot["database"],
+        "server": snapshot["server"],
+        "engine": snapshot["engine"],
+        "current_status": snapshot["current_status"],
     }
