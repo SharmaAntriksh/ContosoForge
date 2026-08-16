@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from src.exceptions import ConfigError, DimensionError
-from src.utils.logging_utils import debug, info, skip, stage, warn
+from src.utils.logging_utils import debug, skip, stage, warn
 from src.versioning.version_store import should_regenerate, save_version
 
 
@@ -309,4 +309,4 @@ def run_geography(cfg: Dict, parquet_folder: Path) -> None:
         df.to_parquet(out_path, index=False)
 
     save_version("geography", version_cfg, out_path)
-    info(f"Geography dimension written: {out_path.name}  ({len(df)} rows)")
+    debug(f"Geography dimension written: {out_path.name}  ({len(df)} rows)")

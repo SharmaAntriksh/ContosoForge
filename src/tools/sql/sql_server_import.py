@@ -894,7 +894,8 @@ def _run_verify(cursor) -> None:
     Execute verify.RunAll if the procedure exists.
 
     Fetches the detail rows (Suite, Category, Check, Description, Result, ActualValue)
-    and the summary row, then logs the results.
+    and the summary row. Successful details are counted but kept off the console;
+    failures retain their descriptions and the final scorecard reports all counts.
     """
     # Check if the proc exists
     cursor.execute(
@@ -925,7 +926,6 @@ def _run_verify(cursor) -> None:
         seen.add(key)
         if result == "PASS":
             passed += 1
-            _log("PASS", f"    [{suite}] {check}  ({actual})")
         elif result == "INFO":
             info += 1
         else:

@@ -1302,6 +1302,97 @@ def _check_inventory_stockout_semantics(
     ))
 
 
+def _check_inventory_turnover_alignment(
+    report: QualityReport,
+    inventory: pd.DataFrame,
+    warehouses: pd.DataFrame,
+    *,
+    min_median_ratio: float = 0.50,
+    max_median_ratio: float = 2.00,
+    min_warehouse_ratio: float = 0.25,
+    max_warehouse_ratio: float = 2.00,
+    min_in_band_share: float = 0.80,
+) -> None:
+    """Require realized warehouse turnover to follow its published target."""
+    inventory_required = ["WarehouseKey", "QuantitySold", "QuantityOnHand"]
+    warehouse_required = ["WarehouseKey", "TargetInventoryTurnover"]
+    if (
+        not _has_columns(inventory, inventory_required)
+        or not _has_columns(warehouses, warehouse_required)
+    ):
+        return
+
+    actual = inventory.groupby("WarehouseKey", dropna=False).agg(
+        sold=("QuantitySold", "sum"),
+        snapshot_qoh=("QuantityOnHand", "sum"),
+    )
+    actual = actual.loc[actual["snapshot_qoh"].gt(0)].copy()
+    actual["ActualTurnover"] = (
+        12.0 * actual["sold"] / actual["snapshot_qoh"]
+    )
+    comparison = warehouses[[
+        "WarehouseKey", "TargetInventoryTurnover",
+    ]].merge(
+        actual[["ActualTurnover"]],
+        left_on="WarehouseKey",
+        right_index=True,
+        how="inner",
+    )
+    comparison["TargetInventoryTurnover"] = pd.to_numeric(
+        comparison["TargetInventoryTurnover"], errors="coerce",
+    )
+    comparison = comparison.loc[
+        comparison["TargetInventoryTurnover"].gt(0)
+        & comparison["ActualTurnover"].notna()
+    ].copy()
+    if comparison.empty:
+        return
+
+    comparison["ActualToTargetRatio"] = (
+        comparison["ActualTurnover"]
+        / comparison["TargetInventoryTurnover"]
+    )
+    median_ratio = float(comparison["ActualToTargetRatio"].median())
+    rank_correlation = (
+        float(
+            comparison["TargetInventoryTurnover"].rank().corr(
+                comparison["ActualTurnover"].rank(),
+            )
+        )
+        if len(comparison) >= 3
+        else 1.0
+    )
+    in_band_share = float(
+        comparison["ActualToTargetRatio"].between(
+            min_warehouse_ratio, max_warehouse_ratio,
+        ).mean()
+    )
+    passed = (
+        min_median_ratio <= median_ratio <= max_median_ratio
+        and in_band_share >= min_in_band_share
+    )
+    report.checks.append(CheckResult(
+        name="Inventory turnover target-to-realized alignment",
+        passed=passed,
+        message=(
+            f"Warehouse turnover rank correlation={rank_correlation:.3f}; "
+            f"median actual/target={median_ratio:.2f}x; "
+            f"in-band warehouses={in_band_share:.1%}"
+        ),
+        details=(
+            f"Required median ratio within [{min_median_ratio:.2f}, "
+            f"{max_median_ratio:.2f}] and >= {min_in_band_share:.0%} of "
+            f"warehouses within [{min_warehouse_ratio:.2f}, "
+            f"{max_warehouse_ratio:.2f}]; rank correlation is diagnostic only; "
+            f"actual range={comparison['ActualTurnover'].min():.2f}-"
+            f"{comparison['ActualTurnover'].max():.2f}; target range="
+            f"{comparison['TargetInventoryTurnover'].min():.2f}-"
+            f"{comparison['TargetInventoryTurnover'].max():.2f}"
+        ),
+        category="Analytical Integrity",
+    ))
+
+
 def _check_employee_assignment_temporal_integrity(
     report: QualityReport,
     assignments: pd.DataFrame,
@@ -1596,7 +1687,24 @@ def _check_current_headcount_reconciliation(
     missing = sorted(expected_keys - actual_keys)
     unexpected = sorted(actual_keys - expected_keys)
     duplicate = sorted(effective_counts.index[effective_counts.gt(1)].tolist())
-    passed = not missing and not unexpected and not duplicate
+    label_mismatch_count = 0
+    if _has_columns(
+        assignments, ["IsCurrentAssignment", "AssignmentStatus"],
+    ):
+        labeled_active = (
+            assignments["IsCurrentAssignment"].fillna(False).astype(bool)
+            & assignments["AssignmentStatus"].eq("Active")
+        )
+        effective_mask = (
+            assignment_start.le(snapshot_date) & assignment_end.ge(snapshot_date)
+        )
+        label_mismatch_count = int((labeled_active ^ effective_mask).sum())
+    passed = (
+        not missing
+        and not unexpected
+        and not duplicate
+        and label_mismatch_count == 0
+    )
     store_count = int(effective["StoreKey"].nunique(dropna=True))
 
     report.checks.append(CheckResult(
@@ -1608,14 +1716,16 @@ def _check_current_headcount_reconciliation(
             if passed
             else (
                 f"{len(missing)} missing active; {len(unexpected)} "
-                f"inactive/unexpected; {len(duplicate)} duplicate effective"
+                f"inactive/unexpected; {len(duplicate)} duplicate effective; "
+                f"{label_mismatch_count} current/status label mismatch"
             )
         ),
         details=(
             "" if passed
             else (
                 f"Missing sample: {missing[:10]}; unexpected sample: "
-                f"{unexpected[:10]}; duplicate sample: {duplicate[:10]}"
+                f"{unexpected[:10]}; duplicate sample: {duplicate[:10]}; "
+                f"current/status label mismatches: {label_mismatch_count}"
             )
         ),
         category="Analytical Integrity",
@@ -2110,7 +2220,7 @@ def _check_analytical_integrity(
         _find_table(dims_folder, "employee_store_assignments"),
         [
             "EmployeeKey", "StoreKey", "StartDate", "EndDate",
-            "IsCurrentAssignment",
+            "IsCurrentAssignment", "AssignmentStatus",
         ],
     )
     if assignments is not None:
@@ -2121,10 +2231,20 @@ def _check_analytical_integrity(
     inventory = _load_available_columns(
         cache,
         _find_table(facts_folder, "inventory_snapshot"),
-        ["StockoutFlag", "DaysOutOfStock"],
+        [
+            "WarehouseKey", "QuantitySold", "QuantityOnHand",
+            "StockoutFlag", "DaysOutOfStock",
+        ],
     )
     if inventory is not None:
         _check_inventory_stockout_semantics(report, inventory)
+        warehouses = _load_available_columns(
+            cache,
+            _find_table(dims_folder, "warehouses"),
+            ["WarehouseKey", "TargetInventoryTurnover"],
+        )
+        if warehouses is not None:
+            _check_inventory_turnover_alignment(report, inventory, warehouses)
 
     if sales is None:
         return

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Dict, Tuple
 import numpy as np
 import pandas as pd
 
-from src.utils.logging_utils import info, skip, stage, warn
+from src.utils.logging_utils import debug, skip, stage, warn
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning import should_regenerate, save_version, frame_content_hash
 from src.utils.name_pools import load_people_pools, resolve_people_folder
@@ -253,4 +253,4 @@ def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
         )
 
     save_version("employees", version_cfg, out_path)
-    info(f"Employees dimension written: {out_path.name}")
+    debug(f"Employees dimension written: {out_path.name}")

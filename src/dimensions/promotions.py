@@ -10,7 +10,7 @@ import pandas as pd
 import warnings
 
 from src.exceptions import DimensionError
-from src.utils.logging_utils import info, skip, stage, warn
+from src.utils.logging_utils import debug, skip, stage, warn
 from src.utils.config_helpers import as_dict
 from src.utils.config_precedence import resolve_seed
 from src.versioning import should_regenerate, save_version
@@ -612,4 +612,4 @@ def run_promotions(cfg: Dict, parquet_folder: Path) -> None:
         )
 
     save_version("promotions", version_cfg, out_path)
-    info(f"Promotions dimension written: {out_path.name}")
+    debug(f"Promotions dimension written: {out_path.name}")

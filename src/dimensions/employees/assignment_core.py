@@ -342,6 +342,7 @@ class _TransferRecord:
     transfer_date: pd.Timestamp
     original_end: pd.Timestamp
     dst_end: pd.Timestamp
+    original_status: str = "Active"
     rolled_back: bool = False
     chain_next: Optional[int] = None
 
@@ -460,7 +461,7 @@ def _surgical_rollback(
             if src_row is not None:
                 df.at[src_row, "EndDate"] = rec.original_end
                 df.at[src_row, "IsCurrentAssignment"] = True
-                df.at[src_row, "AssignmentStatus"] = "Active"
+                df.at[src_row, "AssignmentStatus"] = rec.original_status
             dst_row = sig_to_idx.get((rec.employee_key, rec.dst_key, rec.transfer_date))
             if dst_row is not None:
                 drop_idx.append(dst_row)

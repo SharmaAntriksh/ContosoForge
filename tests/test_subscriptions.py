@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import src.dimensions.customers.subscriptions.helpers as subscription_helpers
+
 from src.dimensions.customers.subscriptions.catalog import (
     PLANS_CATALOG,
     _PAYMENT_WEIGHTS,
@@ -375,6 +377,50 @@ def _generate_one_customer_subscriptions(
 
 
 class TestSubscriptionLifecycleContract:
+    def test_plan_launch_groups_are_cached_by_cutoff(self, monkeypatch):
+        original = subscription_helpers._eligible_plan_groups
+        calls = 0
+
+        def counted(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(subscription_helpers, "_eligible_plan_groups", counted)
+        starts = pd.Timestamp("2024-01-01")
+        customer_ends = pd.to_datetime([
+            "2024-01-15",
+            "2024-01-20",
+            "2024-03-01",
+            "2024-03-02",
+        ])
+        generate_subscriptions_bulk(
+            eligible_ck=np.arange(1, 5, dtype=np.int32),
+            eligible_lo=np.full(4, starts.value, dtype=np.int64),
+            eligible_hi=customer_ends.to_numpy(dtype="datetime64[ns]").view(np.int64),
+            eligible_span=np.full(4, 90, dtype=np.int64),
+            plan_keys=np.array([1, 2], dtype=np.int32),
+            plan_cycle_prices=np.array([10.0, 20.0]),
+            plan_cycle_months=np.array([1, 1], dtype=np.int32),
+            unique_types=np.array(["A", "B"], dtype=object),
+            type_members=[np.array([0]), np.array([1])],
+            type_weights=np.array([0.5, 0.5]),
+            g_end_ns=pd.Timestamp("2024-03-31").value,
+            max_subs=1,
+            avg_subscriptions=1.0,
+            churn_rate=0.0,
+            trial_rate=0.0,
+            trial_conversion_rate=1.0,
+            trial_days=14,
+            rng=np.random.default_rng(42),
+            plan_launch_ns=pd.to_datetime([
+                "2024-01-01",
+                "2024-02-01",
+            ]).to_numpy(dtype="datetime64[ns]").view(np.int64),
+        )
+
+        assert calls == 2
+
     def test_periods_stay_inside_customer_and_global_bounds(self):
         df = _generate_one_customer_subscriptions()
         assert pd.to_datetime(df["PeriodStartDate"]).min() >= pd.Timestamp("2024-01-15")

@@ -410,7 +410,7 @@ class InventoryConfig(_Base):
     overstock_bias: float = 1.0
     abc_stock_multiplier: ABCStockMultiplierConfig = ABCStockMultiplierConfig()
     shrinkage: ShrinkageConfig = ShrinkageConfig()
-    write_chunk_rows: int = 2_000_000
+    write_chunk_rows: int = Field(2_000_000, ge=1)
 
 
 # -- Packaging --

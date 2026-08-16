@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import glob
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from src.exceptions import PackagingError, SalesError
 from src.utils.config_helpers import bool_or as _bool_or
 from src.utils.logging_utils import info, work
+from src.utils.write_metrics import artifact_stats, log_write_metric
 
 from .chunk_result import ChunkResult
 from .format_writer import SalesOutputFormat, manifest_fields_for
@@ -139,6 +141,7 @@ class ChunkResultCollector:
         self.complaints_acc = complaints_acc
         self.created_by_table: Dict[str, List[Any]] = {t: [] for t in tables}
         self.created_files: List[str] = []
+        self.metric_totals: Dict[str, float] = {}
         # (agg key emitted by the worker, accumulator, its add-method name).
         # Budget uses add_sales(); the streamed facts use add(). Each add() is a
         # no-op on a None/empty payload, so feeding an absent agg is harmless.
@@ -150,6 +153,8 @@ class ChunkResultCollector:
         ]
 
     def record(self, r: ChunkResult, completed_units: int, total_units: int) -> None:
+        for name, value in r.metrics.items():
+            self.metric_totals[name] = self.metric_totals.get(name, 0.0) + float(value)
         for agg_key, acc, add_name in self._accumulators:
             if acc is not None:
                 getattr(acc, add_name)(r.aggs.get(agg_key))
@@ -172,10 +177,11 @@ class ChunkResultCollector:
 
 def _merge_parquet_job(job: tuple) -> None:
     """Pool task: merge one table's parquet chunks (top-level for spawn pickling)."""
-    t, chunks, out, delete_after, compression = job
+    t, chunks, out, delete_after, compression, canonical_schema = job
     merge_parquet_files(
         chunks, out, delete_after=delete_after,
-        compression=compression, table_name=t, log=False,
+        compression=compression, table_name=t,
+        canonical_schema=canonical_schema, log=False,
     )
 
 
@@ -210,6 +216,9 @@ def _merge_fact_csv_chunks(
     if not csv_chunks:
         return
 
+    metric_started = time.perf_counter()
+    input_stats = artifact_stats(csv_chunks)
+
     with open(csv_chunks[0], "rb") as f:
         header = f.readline()  # raw header bytes, including the line terminator
 
@@ -221,6 +230,7 @@ def _merge_fact_csv_chunks(
     tmp_files: list[Path] = []
     out_f = None
     rows_in_current = 0
+    rows_total = 0
     file_idx = 0
 
     def _open_next():
@@ -248,7 +258,9 @@ def _merge_fact_csv_chunks(
                     if not buf:
                         break
                     out_f.write(buf)
-                    rows_in_current += buf.count(b"\n")  # data rows (header skipped)
+                    rows_read = buf.count(b"\n")  # data rows (header skipped)
+                    rows_in_current += rows_read
+                    rows_total += rows_read
     finally:
         if out_f is not None:
             out_f.close()
@@ -291,6 +303,21 @@ def _merge_fact_csv_chunks(
     except OSError:
         pass
 
+    log_write_metric(
+        "csv_compaction",
+        elapsed_seconds=time.perf_counter() - metric_started,
+        output_paths=[out_dir / name for name in sorted(out_names)],
+        rows=rows_total,
+        codec="csv",
+        detail=f"input_chunks={len(csv_chunks)},output_chunks={len(out_names)}",
+        input_stats=input_stats,
+    )
+
+
+def _csv_worker_chunks_are_final(table_name: str) -> bool:
+    """Whether worker CSV chunks already obey the configured row ceiling."""
+    return table_name in {TABLE_SALES, TABLE_SALES_ORDER_DETAIL}
+
 
 def _assemble_output(
     file_format, tables, output_paths, collector,
@@ -301,9 +328,9 @@ def _assemble_output(
 ):
     """Post-pool output assembly: delta writes, CSV re-chunking, or parquet merge.
 
-    ``schema_by_table`` (Delta only) maps a logical table name to its
-    authoritative Arrow schema; when present it becomes the Delta write
-    contract instead of the schema read from the first part file.
+    ``schema_by_table`` maps a logical table name to its authoritative Arrow
+    schema. It becomes the Parquet/Delta write contract instead of rebuilding
+    a schema from the emitted part files.
     """
     fmt = SalesOutputFormat.parse(file_format)
 
@@ -363,6 +390,15 @@ def _assemble_output(
             csv_chunks = sorted(csv_dir.glob(f"{spec.chunk_prefix}*.csv"))
             if len(csv_chunks) <= 1:
                 continue
+            if _csv_worker_chunks_are_final(t):
+                # These tables have at most ``chunk_size`` rows per worker
+                # artifact by construction. Re-chunking them cannot improve
+                # the layout; it only rereads and rewrites the complete fact.
+                info(
+                    f"CSV chunks already target-sized: keeping "
+                    f"{len(csv_chunks)} {spec.chunk_prefix} file(s)"
+                )
+                continue
             _merge_fact_csv_chunks(csv_chunks, csv_dir, spec.chunk_prefix, chunk_size, delete_chunks)
 
         return _make_result()
@@ -408,7 +444,10 @@ def _assemble_output(
                     from src.utils.pool import iter_imap_unordered, PoolRunSpec
                     n_merge = min(len(merge_jobs), max(1, (os.cpu_count() or 1) - 1))
                     jobs = [
-                        (t, chunks, out, bool(delete_chunks), compression)
+                        (
+                            t, chunks, out, bool(delete_chunks), compression,
+                            schema_by_table.get(t) if schema_by_table else None,
+                        )
                         for (t, chunks, out) in merge_jobs
                     ]
                     # Drain to completion; iter_imap_unordered surfaces any worker
@@ -426,6 +465,9 @@ def _assemble_output(
                         delete_after=bool(delete_chunks),
                         compression=compression,
                         table_name=t,
+                        canonical_schema=(
+                            schema_by_table.get(t) if schema_by_table else None
+                        ),
                         log=False,
                     )
 

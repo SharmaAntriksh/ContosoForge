@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Callable, Iterable, Optional, Sequence, Set, Union
 
 from src.exceptions import SalesError
+from src.utils.write_metrics import artifact_stats, log_write_metric
 from .utils import _arrow, _ensure_dir_for_file, atomic_output, done, info, skip, warn
 from .projection import project_table_to_schema
 from .encoding import _schema_dict_cols, _validate_required, required_pricing_cols_for_table
@@ -327,6 +329,8 @@ def _merge_parquet_files_common(
 
     merged_file_abs = os.path.abspath(os.fspath(merged_file))
     _ensure_dir_for_file(merged_file_abs)
+    metric_started = time.perf_counter()
+    metric_input_stats = artifact_stats(files)
 
     if log:
         info(f"{log_prefix}Merging {len(files)} chunks: {os.path.basename(merged_file_abs)}".strip())
@@ -391,6 +395,23 @@ def _merge_parquet_files_common(
 
     if log:
         done(f"{log_prefix}Merged chunks: {os.path.basename(merged_file_abs)}".strip())
+    try:
+        metadata = pq.ParquetFile(merged_file_abs).metadata
+        rows = int(metadata.num_rows) if metadata is not None else None
+        row_groups = int(metadata.num_row_groups) if metadata is not None else 0
+    except (OSError, ValueError):
+        rows = None
+        row_groups = 0
+    log_write_metric(
+        "parquet_merge",
+        elapsed_seconds=time.perf_counter() - metric_started,
+        input_paths=files,
+        output_paths=[merged_file_abs],
+        rows=rows,
+        codec=compression,
+        detail=f"chunks={len(files)},row_groups={row_groups}",
+        input_stats=metric_input_stats,
+    )
     return merged_file_abs
 
 
@@ -430,6 +451,7 @@ def merge_parquet_files(
     write_statistics: bool = True,
     table_name: str | None = None,
     schema_strategy: str = "union",
+    canonical_schema=None,
     log: bool = True,
 ) -> Optional[str]:
     """Merge multiple Parquet chunk files into a single consolidated Parquet file.
@@ -459,6 +481,9 @@ def merge_parquet_files(
     schema_strategy : str
         ``"union"`` (default) merges all chunk schemas; ``"first"`` uses
         the first file's schema as-is.
+    canonical_schema : pa.Schema | None
+        Authoritative output schema supplied by the coordinator. When present,
+        skips the separate all-file schema-discovery pass.
     log : bool
         Emit progress/skip log messages.
 
@@ -478,7 +503,10 @@ def merge_parquet_files(
 
     files.sort()
 
-    canonical_schema = _pm_build_canonical_schema(files, schema_strategy=schema_strategy, pa=pa, pq=pq)
+    if canonical_schema is None:
+        canonical_schema = _pm_build_canonical_schema(
+            files, schema_strategy=schema_strategy, pa=pa, pq=pq
+        )
 
     expected_cols = _expected_cols_for_table(table_name)
     if expected_cols:

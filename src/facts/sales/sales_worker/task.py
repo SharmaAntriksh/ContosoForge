@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Callable
 
 import numpy as np
@@ -175,8 +176,14 @@ def _project_for_table(table_name: str, table: pa.Table) -> pa.Table:
     return table.select(cols)
 
 
-def _write_table(table_name: str, idx: int, table: pa.Table) -> Union[str, Dict[str, Any]]:
-    return write_table_by_format(
+def _write_table(
+    table_name: str,
+    idx: int,
+    table: pa.Table,
+    metrics: Optional[Dict[str, float]] = None,
+) -> Union[str, Dict[str, Any]]:
+    started = time.perf_counter()
+    result = write_table_by_format(
         file_format=State.file_format,
         output_paths=State.output_paths,
         table_name=table_name,
@@ -185,6 +192,11 @@ def _write_table(table_name: str, idx: int, table: pa.Table) -> Union[str, Dict[
         write_csv_fn=lambda t, p: _write_csv(t, p, table_name=table_name),
         write_parquet_fn=lambda t, p: _write_parquet_table(t, p, table_name=table_name, is_chunk=True),
     )
+    if metrics is not None:
+        metrics["write_seconds"] = metrics.get("write_seconds", 0.0) + (
+            time.perf_counter() - started
+        )
+    return result
 
 
 def _mode() -> str:
@@ -441,6 +453,7 @@ def _worker_task(args):
 
         chunk_seed = derive_chunk_seed(seed, idx_i)
 
+        build_started = time.perf_counter()
         detail_table = build_chunk_table(
             batch_i,
             chunk_seed,
@@ -451,6 +464,10 @@ def _worker_task(args):
 
         if not isinstance(detail_table, pa.Table):
             raise TypeError("chunk_builder must return pyarrow.Table")
+        chunk_metrics = {
+            "build_seconds": time.perf_counter() - build_started,
+            "write_seconds": 0.0,
+        }
 
         budget_agg = _maybe_budget_agg(detail_table) if do_budget else None
         chunk_aggs: Dict[str, Any] = {}
@@ -484,11 +501,19 @@ def _worker_task(args):
                 detail_table, chunk_seed=chunk_seed, mode=mode, returns_cfg=returns_cfg)
             sales_out = _project_for_table(TABLE_SALES, sales_table)
 
-            out: Dict[str, Any] = {TABLE_SALES: _write_table(TABLE_SALES, idx_i, sales_out)}
+            out: Dict[str, Any] = {
+                TABLE_SALES: _write_table(
+                    TABLE_SALES, idx_i, sales_out, chunk_metrics
+                )
+            }
             if returns_table is not None:
                 returns_out = _project_for_table(TABLE_SALES_RETURN, returns_table)  # type: ignore[arg-type]
-                out[TABLE_SALES_RETURN] = _write_table(TABLE_SALES_RETURN, idx_i, returns_out)  # type: ignore[arg-type]
-            results.append(ChunkResult(chunk_idx=idx_i, outputs=out, aggs=chunk_aggs))
+                out[TABLE_SALES_RETURN] = _write_table(  # type: ignore[arg-type]
+                    TABLE_SALES_RETURN, idx_i, returns_out, chunk_metrics
+                )
+            results.append(ChunkResult(
+                chunk_idx=idx_i, outputs=out, aggs=chunk_aggs, metrics=chunk_metrics
+            ))
             continue
 
         out: Dict[str, Any] = {}
@@ -497,25 +522,41 @@ def _worker_task(args):
             sales_table = detail_table
             if skip_order_cols_flag:
                 sales_table = _drop_order_cols_for_sales(sales_table)
-            out[TABLE_SALES] = _write_table(TABLE_SALES, idx_i, _project_for_table(TABLE_SALES, sales_table))
+            out[TABLE_SALES] = _write_table(
+                TABLE_SALES,
+                idx_i,
+                _project_for_table(TABLE_SALES, sales_table),
+                chunk_metrics,
+            )
 
         header_table = build_header_from_detail(
             detail_table, validate_invariants=validate_header)
 
         out[TABLE_SALES_ORDER_DETAIL] = _write_table(
-            TABLE_SALES_ORDER_DETAIL, idx_i, _project_for_table(TABLE_SALES_ORDER_DETAIL, detail_table)
+            TABLE_SALES_ORDER_DETAIL,
+            idx_i,
+            _project_for_table(TABLE_SALES_ORDER_DETAIL, detail_table),
+            chunk_metrics,
         )
         out[TABLE_SALES_ORDER_HEADER] = _write_table(
-            TABLE_SALES_ORDER_HEADER, idx_i, _project_for_table(TABLE_SALES_ORDER_HEADER, header_table)
+            TABLE_SALES_ORDER_HEADER,
+            idx_i,
+            _project_for_table(TABLE_SALES_ORDER_HEADER, header_table),
+            chunk_metrics,
         )
 
         returns_table = _maybe_build_returns(
             detail_table, chunk_seed=chunk_seed, mode=mode, returns_cfg=returns_cfg)
         if returns_table is not None:
             out[TABLE_SALES_RETURN] = _write_table(
-                TABLE_SALES_RETURN, idx_i, _project_for_table(TABLE_SALES_RETURN, returns_table)  # type: ignore[arg-type]
+                TABLE_SALES_RETURN,
+                idx_i,
+                _project_for_table(TABLE_SALES_RETURN, returns_table),  # type: ignore[arg-type]
+                chunk_metrics,
             )
 
-        results.append(ChunkResult(chunk_idx=idx_i, outputs=out, aggs=chunk_aggs))
+        results.append(ChunkResult(
+            chunk_idx=idx_i, outputs=out, aggs=chunk_aggs, metrics=chunk_metrics
+        ))
 
     return results[0] if single else results

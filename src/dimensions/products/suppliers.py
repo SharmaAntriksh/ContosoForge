@@ -9,7 +9,7 @@ import pandas as pd
 from src.exceptions import DimensionError
 from src.utils.config_helpers import as_dict as _as_dict, int_or as _int_or, bool_or as _bool_or
 from src.utils.config_precedence import resolve_seed
-from src.utils.logging_utils import info, skip, stage
+from src.utils.logging_utils import debug, skip, stage
 from src.versioning.version_store import should_regenerate, save_version
 
 
@@ -222,5 +222,5 @@ def run_suppliers(cfg: Dict[str, Any], parquet_folder: Path) -> None:
     )
 
     save_version("suppliers", version_cfg, out_path)
-    info(f"Suppliers dimension written: {out_path.name}")
+    debug(f"Suppliers dimension written: {out_path.name}")
 

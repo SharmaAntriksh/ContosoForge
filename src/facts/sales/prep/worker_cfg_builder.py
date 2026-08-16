@@ -21,7 +21,7 @@ from src.utils.config_helpers import (
     int_or as _int_or,
     str_or as _str_or,
 )
-from src.utils.logging_utils import info
+from src.utils.logging_utils import debug, info
 
 from .dimension_loaders import _compute_promo_salience
 from ..sales_worker.returns_builder import ReturnsConfig
@@ -297,7 +297,7 @@ def _build_worker_cfg(
     if assortment_cfg.get("enabled") and product_subcat_key is not None and stores.store_type_map is not None:
         worker_cfg["assortment"] = dict(assortment_cfg)
         worker_cfg["store_type_map"] = stores.store_type_map
-        info("Store-product assortment: enabled")
+        debug("Store-product assortment: enabled")
 
     return worker_cfg
 
@@ -334,7 +334,7 @@ def _setup_accumulators(cfg, worker_cfg, parquet_folder_p):
                 country_labels=budget_lookups["budget_country_labels"],
                 category_labels=budget_lookups["budget_category_labels"],
             )
-            info("Budget streaming aggregation: enabled")
+            debug("Budget streaming aggregation: enabled")
         except (KeyError, ValueError, TypeError) as exc:
             info(f"Budget streaming aggregation: disabled ({type(exc).__name__}: {exc})")
             budget_enabled = False
@@ -361,7 +361,7 @@ def _setup_accumulators(cfg, worker_cfg, parquet_folder_p):
                 _sk_to_wk = np.full(_max_sk, -1, dtype=np.int32)
                 _sk_to_wk[_sk] = _wk
                 worker_cfg["inventory_store_to_warehouse"] = _sk_to_wk
-        info("Inventory streaming aggregation: enabled")
+        debug("Inventory streaming aggregation: enabled")
     else:
         worker_cfg["inventory_enabled"] = False
 
@@ -372,7 +372,7 @@ def _setup_accumulators(cfg, worker_cfg, parquet_folder_p):
     if wishlists_enabled:
         wishlists_acc = WishlistAccumulator()
         worker_cfg["wishlists_enabled"] = True
-        info("Wishlists streaming aggregation: enabled")
+        debug("Wishlists streaming aggregation: enabled")
     else:
         worker_cfg["wishlists_enabled"] = False
 
@@ -383,7 +383,7 @@ def _setup_accumulators(cfg, worker_cfg, parquet_folder_p):
     if complaints_enabled:
         complaints_acc = ComplaintsAccumulator()
         worker_cfg["complaints_enabled"] = True
-        info("Complaints streaming aggregation: enabled")
+        debug("Complaints streaming aggregation: enabled")
     else:
         worker_cfg["complaints_enabled"] = False
 

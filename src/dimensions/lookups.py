@@ -8,7 +8,7 @@ import pandas as pd
 
 from src.exceptions import DimensionError
 from src.utils.config_helpers import as_dict as _as_dict, int_or as _int_or
-from src.utils.logging_utils import info, skip, stage
+from src.utils.logging_utils import debug, skip, stage
 from src.versioning.version_store import should_regenerate, save_version
 
 
@@ -89,7 +89,7 @@ def _run_lookup_dim(
         _write_parquet(df, out_path, compression=compression)
 
     save_version(dim_key, version_cfg, out_path)
-    info(f"{display_name} written: {out_path.name}")
+    debug(f"{display_name} written: {out_path.name}")
 
 # =========================================================
 # Default row sets

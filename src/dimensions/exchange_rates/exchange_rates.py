@@ -18,7 +18,7 @@ from src.defaults import CURRENCY_BASE
 from src.exceptions import ConfigError
 from src.integrations.fx_yahoo import build_or_update_fx
 from src.utils.config_precedence import resolve_seed
-from src.utils.logging_utils import info, skip, stage
+from src.utils.logging_utils import debug, skip, stage
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning.version_store import should_regenerate, save_version
 
@@ -254,7 +254,7 @@ def run_exchange_rates(cfg, parquet_folder: Path):
 
     parquet_folder.mkdir(parents=True, exist_ok=True)
     write_parquet_with_date32(df, out_path, date_cols=["Date"])
-    info(f"Exchange Rates dimension written: {out_path.name}")
+    debug(f"Exchange Rates dimension written: {out_path.name}")
 
     # Step 4: Monthly aggregation
     if include_monthly:
@@ -262,7 +262,7 @@ def run_exchange_rates(cfg, parquet_folder: Path):
             monthly_df = build_monthly_rates(df)
 
         write_parquet_with_date32(monthly_df, monthly_path, date_cols=["Date"])
-        info(f"Exchange Rates Monthly written: {monthly_path.name}")
+        debug(f"Exchange Rates Monthly written: {monthly_path.name}")
 
     # Re-fingerprint the master to capture any data downloaded during this run,
     # so a rerun on the same day sees a matching hash and skips correctly.

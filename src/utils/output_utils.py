@@ -3,12 +3,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pa_csv
@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 from src.exceptions import PackagingError
 from src.tools.sql.dialect import SqlType
 from src.utils.logging_utils import stage, done, info
+from src.utils.write_metrics import log_write_metric
 from src.utils.static_schemas import STATIC_SCHEMAS
 
 __all__ = [
@@ -335,18 +336,6 @@ def _iter_dim_files(parquet_dims: Path, excluded_dims: set[str]) -> list[Path]:
     return [f for f in parquet_dims.glob("*.parquet") if f.name not in excluded_dims]
 
 
-def _date_col_overrides(df: pd.DataFrame) -> dict[str, pd.Series]:
-    """Build assign() overrides that cast date-like columns to python ``date``.
-
-    Used by both CSV and Delta branches so pyarrow writes pure date32 / "YYYY-MM-DD"
-    instead of leaving NullType (object cols) or appending " 00:00:00" (datetime64).
-    """
-    return {
-        c: pd.to_datetime(df[c], errors="coerce").dt.date
-        for c in _guess_date_cols(df)
-    }
-
-
 # ============================================================
 # Null-typed column coercion (Delta Lake compatibility)
 # ============================================================
@@ -458,37 +447,205 @@ def _coerce_null_columns(table: pa.Table, table_name: Optional[str]) -> pa.Table
     return table
 
 
+_DIM_BATCH_ROWS = 250_000
+_DATEISH_TOKENS = (
+    "date", "day", "birth", "created", "updated",
+    "effective", "expiry", "valid", "start", "end",
+)
+
+
+def _is_arrow_integer(dtype: pa.DataType) -> bool:
+    return pa.types.is_integer(dtype) or pa.types.is_unsigned_integer(dtype)
+
+
+def _field_is_dateish(field: pa.Field, static_type: Optional[pa.DataType]) -> bool:
+    if static_type is not None and pa.types.is_date(static_type):
+        return True
+    return (
+        any(token in field.name.lower() for token in _DATEISH_TOKENS)
+        and (pa.types.is_date(field.type) or pa.types.is_timestamp(field.type))
+    )
+
+
+def _parquet_column_all_null(source: pq.ParquetFile, column_name: str) -> bool:
+    """Return whether a Parquet column contains no values, without materialising it."""
+    metadata = source.metadata
+    column_idx = source.schema_arrow.get_field_index(column_name)
+    if metadata is not None and column_idx >= 0:
+        stats_complete = True
+        for row_group_idx in range(metadata.num_row_groups):
+            column = metadata.row_group(row_group_idx).column(column_idx)
+            stats = column.statistics
+            if stats is None or stats.null_count is None:
+                stats_complete = False
+                break
+            if int(stats.null_count) < int(column.num_values):
+                return False
+        if stats_complete:
+            return True
+
+    for batch in source.iter_batches(
+        batch_size=_DIM_BATCH_ROWS, columns=[column_name]
+    ):
+        column = batch.column(0)
+        if column.null_count < len(column):
+            return False
+    return True
+
+
+def _dimension_target_schema(
+    source: pq.ParquetFile,
+    *,
+    table_name: Optional[str],
+    force_date32: bool,
+    for_csv: bool = False,
+    for_delta: bool = False,
+) -> pa.Schema:
+    """Build the streamed dimension schema without a Pandas materialisation."""
+    source_schema = source.schema_arrow
+    static_types = _arrow_types_for_table(table_name)
+    fields: list[pa.Field] = []
+
+    for field in source_schema:
+        static_type = static_types.get(field.name)
+        target_type = field.type
+
+        if for_csv and pa.types.is_boolean(target_type):
+            target_type = pa.int8()
+        elif (
+            for_csv
+            and pa.types.is_floating(target_type)
+            and static_type is not None
+            and _is_arrow_integer(static_type)
+        ):
+            target_type = pa.int64()
+
+        if force_date32 and _field_is_dateish(field, static_type):
+            target_type = pa.date32()
+
+        # Delta rejects NullType. CSV support has varied across Arrow versions,
+        # so give all-null columns a concrete static type there as well.
+        if (for_csv or for_delta) and pa.types.is_null(target_type):
+            target_type = static_type or pa.string()
+        elif (
+            for_delta
+            and static_type is not None
+            and not target_type.equals(static_type)
+            and _parquet_column_all_null(source, field.name)
+        ):
+            target_type = static_type
+
+        fields.append(
+            pa.field(
+                field.name,
+                target_type,
+                nullable=field.nullable,
+                metadata=field.metadata,
+            )
+        )
+
+    return pa.schema(fields, metadata=source_schema.metadata)
+
+
+def _cast_dimension_batch(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
+    if not batch.schema.equals(schema, check_metadata=False):
+        batch = batch.cast(schema, safe=False)
+    if not batch.schema.equals(schema):
+        batch = pa.record_batch(batch.columns, schema=schema)
+    return batch
+
+
+def _iter_dimension_batches(source: pq.ParquetFile, schema: pa.Schema):
+    for batch in source.iter_batches(batch_size=_DIM_BATCH_ROWS):
+        yield _cast_dimension_batch(batch, schema)
+
+
+def _parquet_compression_matches(source: pq.ParquetFile, requested: str) -> bool:
+    metadata = source.metadata
+    if metadata is None:
+        return False
+    expected = str(requested or "snappy").strip().upper()
+    if expected in {"NONE", "UNCOMPRESSED"}:
+        expected = "UNCOMPRESSED"
+    for row_group_idx in range(metadata.num_row_groups):
+        row_group = metadata.row_group(row_group_idx)
+        for column_idx in range(row_group.num_columns):
+            if str(row_group.column(column_idx).compression).upper() != expected:
+                return False
+    return True
+
+
+def _write_one_dim_parquet(
+    src: Path,
+    dest: Path,
+    *,
+    compression: str,
+    compression_level: Optional[int],
+    force_date32: bool,
+) -> bool:
+    """Copy a canonical dimension or stream-transcode it. Returns True on copy."""
+    source = pq.ParquetFile(str(src))
+    schema = _dimension_target_schema(
+        source,
+        table_name=_dim_table_name_for_file(src.stem),
+        force_date32=force_date32,
+    )
+    can_copy = (
+        compression_level is None
+        and source.schema_arrow.equals(schema, check_metadata=False)
+        and _parquet_compression_matches(source, compression)
+    )
+    if can_copy:
+        shutil.copy2(src, dest)
+        return True
+
+    writer_kwargs: dict = {"compression": str(compression)}
+    if compression_level is not None:
+        writer_kwargs["compression_level"] = int(compression_level)
+    with pq.ParquetWriter(str(dest), schema, **writer_kwargs) as writer:
+        for batch in _iter_dimension_batches(source, schema):
+            writer.write_batch(batch)
+    return False
+
+
 def _write_one_dim_csv(src: Path, dest: Path, *, force_date32: bool) -> None:
-    """Read one dimension parquet and write CSV via pyarrow.
+    """Stream one dimension parquet to SQL-compatible CSV via PyArrow.
 
     Normalises bool → 0/1 and integer-like floats → Int64 so SQL Server
     BULK INSERT sees clean values (no "true"/"false", no "10001.0").
     """
-    df = pd.read_parquet(src, dtype_backend="numpy_nullable")
-
-    overrides: dict[str, pd.Series] = {}
-
-    for c in df.select_dtypes(include=["bool", "boolean"]).columns:
-        overrides[c] = df[c].astype("Int8")
-
-    for c in df.select_dtypes(include=["float", "Float32", "Float64"]).columns:
-        arr = df[c].to_numpy(dtype="float64", na_value=np.nan, copy=False)
-        mask = ~np.isnan(arr)
-        if mask.any() and not np.any(arr[mask] % 1):
-            overrides[c] = df[c].astype("Int64")
-
-    if force_date32:
-        overrides.update(_date_col_overrides(df))
-
-    if overrides:
-        df = df.assign(**overrides)
-
-    table = pa.Table.from_pandas(df, preserve_index=False)
-    pa_csv.write_csv(
-        table,
-        str(dest),
-        write_options=pa_csv.WriteOptions(include_header=True, quoting_style="needed"),
+    source = pq.ParquetFile(str(src))
+    schema = _dimension_target_schema(
+        source,
+        table_name=_dim_table_name_for_file(src.stem),
+        force_date32=force_date32,
+        for_csv=True,
     )
+    options = pa_csv.WriteOptions(include_header=True, quoting_style="needed")
+    with pa_csv.CSVWriter(str(dest), schema, write_options=options) as writer:
+        for batch in _iter_dimension_batches(source, schema):
+            writer.write_batch(batch)
+
+
+def _write_one_dim_delta(
+    src: Path,
+    dest: Path,
+    *,
+    force_date32: bool,
+    write_deltalake,
+) -> None:
+    """Stream one dimension Parquet file into a single Delta transaction."""
+    source = pq.ParquetFile(str(src))
+    schema = _dimension_target_schema(
+        source,
+        table_name=_dim_table_name_for_file(src.stem),
+        force_date32=force_date32,
+        for_delta=True,
+    )
+    reader = pa.RecordBatchReader.from_batches(
+        schema, _iter_dimension_batches(source, schema)
+    )
+    write_deltalake(str(dest), reader, mode="overwrite")
 
 
 def _write_dim_csvs_parallel(
@@ -585,18 +742,23 @@ def create_final_output_folder(
 
         parquet_dims = Path(parquet_dims)
         excluded_dims = _excluded_dim_files(cfg)
+        dimension_metric_started = time.perf_counter()
 
         if ff == "parquet":
-            for f in _iter_dim_files(parquet_dims, excluded_dims):
-                df = pd.read_parquet(f)
-                write_parquet_with_date32(
-                    df,
+            dim_files = _iter_dim_files(parquet_dims, excluded_dims)
+            copied = 0
+            for f in dim_files:
+                copied += int(_write_one_dim_parquet(
+                    f,
                     dims_out / f.name,
-                    cast_all_datetime=False,
                     compression=dim_parquet_compression,
                     compression_level=dim_parquet_compression_level,
                     force_date32=dim_force_date32,
-                )
+                ))
+            info(
+                f"Dimension Parquet: copied {copied} canonical file(s), "
+                f"Arrow-transcoded {len(dim_files) - copied} file(s)."
+            )
 
         elif ff == "csv":
             _write_dim_csvs_parallel(parquet_dims, dims_out, excluded_dims, dim_force_date32)
@@ -613,25 +775,27 @@ def create_final_output_folder(
             for f in _iter_dim_files(parquet_dims, excluded_dims):
                 delta_out = dims_out / f.stem
                 delta_out.mkdir(parents=True, exist_ok=True)
-
-                df = pd.read_parquet(f)
-                if dim_force_date32:
-                    overrides = _date_col_overrides(df)
-                    if overrides:
-                        df = df.assign(**overrides)
-
-                table = pa.Table.from_pandas(df, preserve_index=False)
-                # delta-rs rejects Arrow null-typed columns (all-null object
-                # columns on small/short-window runs); cast them to concrete
-                # types derived from the static schema before committing.
-                table = _coerce_null_columns(table, _dim_table_name_for_file(f.stem))
-                write_deltalake(str(delta_out), table, mode="overwrite")
+                _write_one_dim_delta(
+                    f,
+                    delta_out,
+                    force_date32=dim_force_date32,
+                    write_deltalake=write_deltalake,
+                )
 
         else:
             raise ValueError(
                 f"Unknown file_format {file_format!r}. "
                 "Expected one of: 'parquet', 'csv', 'deltaparquet'."
             )
+
+        log_write_metric(
+            "dimension_packaging",
+            elapsed_seconds=time.perf_counter() - dimension_metric_started,
+            input_paths=_iter_dim_files(parquet_dims, excluded_dims),
+            output_paths=[dims_out],
+            codec=(dim_parquet_compression if ff == "parquet" else ff),
+            detail=f"format={ff}",
+        )
 
         done(f"Created final folder: {final_folder.name}")
         return final_folder

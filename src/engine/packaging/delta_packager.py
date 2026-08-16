@@ -1,4 +1,3 @@
-import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -7,6 +6,7 @@ from src.utils.logging_utils import info, done
 from src.facts.sales.output_paths import TABLE_SALES
 
 from .paths import table_dir_name, to_snake
+from .artifact_transfer import transfer_delta_dir
 
 
 def looks_like_delta_table_dir(p: Path) -> bool:
@@ -81,20 +81,12 @@ def find_delta_table_dir(fact_out: Path, sales_cfg: dict, table: str) -> Optiona
     return None
 
 
-def copy_delta_table_dir(src: Path, dst: Path, skip_dirnames: set[str]) -> None:
+def copy_delta_table_dir(src: Path, dst: Path, skip_dirnames: set[str],
+                         *, promote: bool = False) -> bool:
     """Copy a delta table directory snapshot, skipping internal scratch dirs."""
-    if dst.exists():
-        shutil.rmtree(dst)
-    dst.mkdir(parents=True, exist_ok=True)
-
-    for item in src.iterdir():
-        if item.name in skip_dirnames:
-            continue
-        target = dst / item.name
-        if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=True)
-        else:
-            shutil.copy2(item, target)
+    return transfer_delta_dir(
+        src, dst, promote=promote, skip_dirnames=skip_dirnames
+    )
 
 
 def _manifest_delta_dir(manifest, table: str) -> Optional[Path]:
@@ -116,8 +108,9 @@ def _manifest_delta_dir(manifest, table: str) -> Optional[Path]:
 
 
 def copy_delta_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
-                     tables: list[str], manifest=None) -> None:
+                     tables: list[str], manifest=None, promote: bool = False) -> None:
     copied = 0
+    promoted = 0
     missing: list[str] = []
 
     for t in tables:
@@ -142,7 +135,9 @@ def copy_delta_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
         if t == TABLE_SALES and len(tables) > 1:
             skip_dirs |= {table_dir_name(x) for x in tables if x != TABLE_SALES}
 
-        copy_delta_table_dir(src_dir, dst_dir, skip_dirnames=skip_dirs)
+        promoted += int(copy_delta_table_dir(
+            src_dir, dst_dir, skip_dirnames=skip_dirs, promote=promote
+        ))
         copied += 1
 
     if missing:
@@ -162,4 +157,5 @@ def copy_delta_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
             )
         )
 
-    done(f"Copied {copied} delta table snapshot(s).")
+    action = f"; promoted {promoted}" if promote else ""
+    done(f"Packaged {copied} delta table snapshot(s){action}.")

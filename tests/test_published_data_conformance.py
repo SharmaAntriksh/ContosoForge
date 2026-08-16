@@ -1,4 +1,4 @@
-"""Regression guards for Phase 4 currency and secondary-fact conformance."""
+"""Regression guards for currency and secondary-fact conformance."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -28,7 +28,7 @@ LOCAL_CURRENCIES = {
 }
 
 
-def test_currency_defaults_cover_phase4_local_currencies():
+def test_currency_defaults_cover_local_currencies():
     expected = set(LOCAL_CURRENCIES.values())
     assert expected.issubset(CURRENCY_DEFAULT_LIST)
     assert expected.issubset(CURRENCY_NAME_MAP)
@@ -36,7 +36,7 @@ def test_currency_defaults_cover_phase4_local_currencies():
     assert CURRENCY_NAME_MAP["PLN"] == "Polish Zloty"
 
 
-def test_geography_master_uses_local_currency_for_phase4_countries():
+def test_geography_master_uses_local_currency_for_supported_countries():
     master = _load_master()
     observed = (
         master.loc[master["Country"].isin(LOCAL_CURRENCIES), ["Country", "ISOCode"]]

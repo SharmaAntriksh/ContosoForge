@@ -1,4 +1,3 @@
-import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -7,6 +6,7 @@ from src.utils.logging_utils import info, done
 from src.facts.sales.output_paths import TABLE_SALES
 
 from .paths import table_dir_name
+from .artifact_transfer import transfer_file
 
 
 def resolve_merged_parquet(fact_out: Path, sales_cfg: dict, table: str) -> Optional[Path]:
@@ -117,8 +117,9 @@ def _manifest_merged_parquet(manifest, table: str) -> Optional[Path]:
 
 
 def copy_parquet_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
-                       tables: list[str], manifest=None) -> None:
+                       tables: list[str], manifest=None, promote: bool = False) -> None:
     copied = 0
+    promoted = 0
     missing: list[str] = []
 
     for t in tables:
@@ -133,7 +134,7 @@ def copy_parquet_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
             dst = facts_out / src.name
             if dst.exists():
                 dst.unlink()
-            shutil.copy2(src, dst)
+            promoted += int(transfer_file(src, dst, promote=promote))
             copied += 1
             continue
 
@@ -144,7 +145,9 @@ def copy_parquet_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
             dst_dir = facts_out / table_dir_name(t)
             dst_dir.mkdir(parents=True, exist_ok=True)
             for chunk in chunks:
-                shutil.copy2(chunk, dst_dir / chunk.name)
+                promoted += int(
+                    transfer_file(chunk, dst_dir / chunk.name, promote=promote)
+                )
             copied += 1
             info(f"Copied {len(chunks)} unmerged chunk(s) for {t} -> {table_dir_name(t)}/")
             continue
@@ -159,4 +162,5 @@ def copy_parquet_facts(*, fact_out: Path, facts_out: Path, sales_cfg: dict,
             + f". Scratch roots checked: {fact_out} and {fact_out / 'parquet'}."
         )
 
-    done(f"Copied {copied} parquet fact file(s).")
+    action = f"; promoted {promoted} artifact(s)" if promote else ""
+    done(f"Packaged {copied} parquet fact table(s){action}.")

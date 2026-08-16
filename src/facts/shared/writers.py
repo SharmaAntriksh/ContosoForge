@@ -7,10 +7,12 @@ NOT used by the sales writer, which has its own chunked merge pipeline.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional, Sequence
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 
 from src.utils.logging_utils import info
@@ -27,6 +29,11 @@ def write_fact_table(
     compression: str = "snappy",
     row_group_size: int = 500_000,
     csv_chunk_size: Optional[int] = None,
+    csv_columns: Optional[Sequence[str]] = None,
+    csv_int_columns: Optional[Sequence[str]] = None,
+    csv_round: Optional[Mapping[str, int]] = None,
+    csv_fill_null_ints: bool = False,
+    csv_float_scale: Optional[int] = None,
 ) -> None:
     """Write a fact table in the requested format.
 
@@ -81,6 +88,55 @@ def write_fact_table(
             use_dictionary=True,
         )
         info(f"Wrote {name}.parquet ({n_rows:,} rows)")
+        return
+
+    if file_format == "csv" and csv_prep_fn is None:
+        if csv_columns is not None:
+            arrays = []
+            existing = set(table.column_names)
+            for column_name in csv_columns:
+                if column_name in existing:
+                    arrays.append(table.column(column_name))
+                else:
+                    arrays.append(pa.nulls(n_rows, type=pa.string()))
+            table = pa.table(arrays, names=list(csv_columns))
+
+        for column_idx, field in enumerate(table.schema):
+            target = table.column(column_idx)
+            if pa.types.is_boolean(field.type):
+                target = pc.cast(target, pa.int8(), safe=False)
+            if csv_round and field.name in csv_round and pa.types.is_floating(target.type):
+                target = pc.round(target, ndigits=int(csv_round[field.name]))
+            if csv_int_columns and field.name in csv_int_columns:
+                if csv_fill_null_ints:
+                    target = pc.fill_null(target, 0)
+                target = pc.cast(target, pa.int64(), safe=False)
+            elif csv_float_scale is not None and pa.types.is_floating(target.type):
+                scale = int(csv_float_scale)
+                target = pc.round(target, ndigits=scale)
+                target = pc.cast(target, pa.decimal128(38, scale), safe=False)
+            if not target.type.equals(field.type):
+                table = table.set_column(column_idx, field.name, target)
+
+        write_options = pa_csv.WriteOptions(
+            include_header=True,
+            quoting_style="needed",
+        )
+        if csv_chunk_size and csv_chunk_size > 0 and n_rows > csv_chunk_size:
+            n_files = 0
+            for start in range(0, n_rows, csv_chunk_size):
+                chunk_path = out_dir / f"{name}_{n_files:05d}.csv"
+                pa_csv.write_csv(
+                    table.slice(start, csv_chunk_size),
+                    str(chunk_path),
+                    write_options=write_options,
+                )
+                n_files += 1
+            info(f"Wrote {name} ({n_rows:,} rows, {n_files} files)")
+        else:
+            csv_path = out_dir / f"{name}.csv"
+            pa_csv.write_csv(table, str(csv_path), write_options=write_options)
+            info(f"Wrote {csv_path.name} ({n_rows:,} rows)")
         return
 
     if file_format == "csv":

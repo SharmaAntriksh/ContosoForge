@@ -952,10 +952,10 @@ class TestLogFunctionsSmokeTests:
 
 class TestStageContextManager:
     def test_normal_exit(self, capsys):
-        with stage("Test Stage"):
+        with stage("Generating Test Stage"):
             pass
         captured = capsys.readouterr()
-        assert "Test Stage" in captured.out
+        assert "Generating Test Stage completed in" in captured.out
 
     def test_exception_logged_and_reraised(self, capsys):
         with pytest.raises(ValueError):
@@ -992,6 +992,75 @@ class TestConfigureLogging:
         configure_logging(enable_file_log=False)
         from src.utils import logging_utils
         assert logging_utils.ENABLE_FILE_LOG is False
+
+    def test_normal_hides_work_messages(self, capsys):
+        configure_logging(verbosity="normal")
+        work("hidden work")
+        info("visible info")
+        captured = capsys.readouterr()
+        assert "visible info" in captured.out
+        assert "hidden work" not in captured.out
+
+    def test_normal_hides_deep_info(self, capsys):
+        configure_logging(verbosity="normal")
+        with stage("Outer"):
+            with stage("Inner"):
+                info("hidden implementation detail")
+        captured = capsys.readouterr()
+        assert "hidden implementation detail" not in captured.out
+        assert "Inner completed" in captured.out
+
+    def test_verbose_shows_work_messages(self, capsys):
+        configure_logging(verbosity="verbose")
+        try:
+            work("visible work")
+            captured = capsys.readouterr()
+            assert "visible work" in captured.out
+        finally:
+            configure_logging(verbosity="normal")
+
+    def test_invalid_verbosity_rejected(self):
+        with pytest.raises(ValueError, match="verbosity"):
+            configure_logging(verbosity="noisy")
+
+    def test_quiet_spinner_shows_current_stage_on_tty(self, monkeypatch, capsys):
+        from src.utils import logging_utils
+
+        monkeypatch.setattr(logging_utils, "_is_tty", lambda: True)
+        monkeypatch.setattr(
+            logging_utils._QUIET_SPINNER,
+            "_ensure_worker_locked",
+            lambda: None,
+        )
+        configure_logging(verbosity="quiet")
+        try:
+            with stage("Generating Spinner Test"):
+                pass
+            captured = capsys.readouterr()
+            assert "Generating Spinner Test" in captured.out
+            assert "[-]" in captured.out
+        finally:
+            configure_logging(verbosity="normal")
+
+    def test_quiet_spinner_is_disabled_for_redirected_output(self, capsys):
+        configure_logging(verbosity="quiet")
+        try:
+            with stage("Generating Redirected Test"):
+                pass
+            captured = capsys.readouterr()
+            assert "[-]" not in captured.out
+        finally:
+            configure_logging(verbosity="normal")
+
+    def test_write_metrics_never_print_to_terminal(self, capsys):
+        from src.utils.write_metrics import log_write_metric
+
+        configure_logging(verbosity="verbose")
+        try:
+            log_write_metric("test", elapsed_seconds=0.1, rows=10)
+            assert "Write metric" not in capsys.readouterr().out
+        finally:
+            configure_logging(verbosity="normal")
 
 
 class TestLogThreadSafety:
@@ -1093,6 +1162,13 @@ class TestBuildParser:
         args = parser.parse_args(["--regen-dimensions", "customers", "products"])
         assert args.regen_dimensions == ["customers", "products"]
 
+    def test_log_verbosity_flags(self):
+        parser = build_parser()
+        assert parser.parse_args(["--quiet"]).quiet is True
+        assert parser.parse_args(["--verbose"]).verbose is True
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--quiet", "--verbose"])
+
     def test_customers_override(self):
         parser = build_parser()
         args = parser.parse_args(["--customers", "5000"])
@@ -1123,6 +1199,8 @@ class TestBuildParser:
         assert args.dry_run is False
         assert args.regen_dimensions is None
         assert args.refresh_fx_master is False
+        assert args.quiet is False
+        assert args.verbose is False
         assert args.customers is None
         assert args.stores is None
         assert args.products is None

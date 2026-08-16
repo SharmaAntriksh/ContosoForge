@@ -167,6 +167,31 @@ def choose_plans_diverse(
     latest_start_ns: Optional[int] = None,
 ) -> np.ndarray:
     """Pick plans from distinct types that are launched by the customer horizon."""
+    eligible_type_idx, eligible_members, eligible_weights = _eligible_plan_groups(
+        unique_types,
+        type_members,
+        type_weights,
+        plan_launch_ns=plan_launch_ns,
+        latest_start_ns=latest_start_ns,
+    )
+    return _choose_from_eligible_groups(
+        rng,
+        n_subs,
+        eligible_type_idx,
+        eligible_members,
+        eligible_weights,
+    )
+
+
+def _eligible_plan_groups(
+    unique_types: np.ndarray,
+    type_members: List[np.ndarray],
+    type_weights: np.ndarray,
+    *,
+    plan_launch_ns: Optional[np.ndarray] = None,
+    latest_start_ns: Optional[int] = None,
+) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray]:
+    """Resolve plan groups available at one launch-date cutoff."""
     eligible_type_idx = np.arange(len(unique_types), dtype=np.intp)
     eligible_members = type_members
     if plan_launch_ns is not None and latest_start_ns is not None:
@@ -178,11 +203,23 @@ def choose_plans_diverse(
             idx for idx, members in enumerate(eligible_members) if len(members)
         ], dtype=np.intp)
 
+    eligible_weights = type_weights[eligible_type_idx]
+    if len(eligible_weights):
+        eligible_weights = eligible_weights / eligible_weights.sum()
+    return eligible_type_idx, eligible_members, eligible_weights
+
+
+def _choose_from_eligible_groups(
+    rng: np.random.Generator,
+    n_subs: int,
+    eligible_type_idx: np.ndarray,
+    eligible_members: List[np.ndarray],
+    eligible_weights: np.ndarray,
+) -> np.ndarray:
+    """Choose plans from launch-filtered groups without rebuilding the groups."""
     n_subs = min(n_subs, len(eligible_type_idx))
     if n_subs <= 0:
         return np.empty(0, dtype=np.intp)
-    eligible_weights = type_weights[eligible_type_idx]
-    eligible_weights = eligible_weights / eligible_weights.sum()
     chosen_type_idx = rng.choice(
         eligible_type_idx, size=n_subs, replace=False, p=eligible_weights,
     )
@@ -400,19 +437,47 @@ def generate_subscriptions_bulk(
     # 2. Plan selection — must respect diverse type selection per customer
     #    Loop over customers but the inner work is minimal (RNG + indexing)
     # ------------------------------------------------------------------
+    eligibility_buckets: Optional[np.ndarray] = None
+    eligibility_profiles: dict[
+        int, Tuple[np.ndarray, List[np.ndarray], np.ndarray]
+    ] = {}
+    if plan_launch_ns is not None:
+        launch_cutoffs = np.unique(plan_launch_ns)
+        eligibility_buckets = np.searchsorted(
+            launch_cutoffs,
+            eligible_hi,
+            side="right",
+        )
+        for bucket in np.unique(eligibility_buckets):
+            bucket_idx = int(bucket)
+            latest_start_ns = (
+                int(launch_cutoffs[bucket_idx - 1])
+                if bucket_idx > 0
+                else int(np.iinfo(np.int64).min)
+            )
+            eligibility_profiles[bucket_idx] = _eligible_plan_groups(
+                unique_types,
+                type_members,
+                type_weights,
+                plan_launch_ns=plan_launch_ns,
+                latest_start_ns=latest_start_ns,
+            )
+
     chosen_by_customer: List[np.ndarray] = []
     actual_counts = np.empty(n_eligible, dtype=np.int32)
     for i in range(n_eligible):
         ns = int(n_subs_arr[i])
-        chosen = choose_plans_diverse(
-            rng,
-            ns,
-            unique_types,
-            type_members,
-            type_weights,
-            plan_launch_ns=plan_launch_ns,
-            latest_start_ns=int(eligible_hi[i]),
-        )
+        if eligibility_buckets is None:
+            chosen = choose_plans_diverse(
+                rng,
+                ns,
+                unique_types,
+                type_members,
+                type_weights,
+            )
+        else:
+            profile = eligibility_profiles[int(eligibility_buckets[i])]
+            chosen = _choose_from_eligible_groups(rng, ns, *profile)
         chosen_by_customer.append(chosen.astype(np.int32, copy=False))
         actual_counts[i] = len(chosen)
     n_subs_arr = actual_counts

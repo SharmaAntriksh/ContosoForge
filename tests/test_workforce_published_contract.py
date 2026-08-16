@@ -1,4 +1,4 @@
-"""Phase 6 guards for the simplified workforce analytical contract."""
+"""Guards for the simplified workforce analytical contract."""
 from __future__ import annotations
 
 import re
@@ -100,7 +100,7 @@ def test_sql_views_publish_only_the_curated_workforce_contract() -> None:
     assert "[AssignmentSequence]" not in assignments
 
 
-def test_all_active_powerbi_models_apply_phase6_visibility_contract() -> None:
+def test_all_active_powerbi_models_apply_workforce_visibility_contract() -> None:
     templates = Path(__file__).parents[1] / "samples" / "powerbi" / "templates"
     employee_files = [
         path for path in templates.rglob("Employee.tmdl")

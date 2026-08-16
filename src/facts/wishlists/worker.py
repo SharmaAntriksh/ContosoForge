@@ -15,6 +15,7 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 
 from src.facts.wishlists.constants import bridge_schema
@@ -58,16 +59,30 @@ def _wishlist_worker_task(args: Tuple) -> Dict[str, Any]:
     Returns:
         dict with chunk_idx, rows, wkey_start (first WishlistKey in this chunk)
     """
-    (
-        chunk_idx,
-        seed,
-        n_chunks,
-        participant_data,
-        product_data,
-        purchased_pairs,
-        config_scalars,
-        out_path,
-    ) = args
+    if len(args) == 9:
+        (
+            chunk_idx,
+            seed,
+            n_chunks,
+            participant_data,
+            product_data,
+            purchased_pairs,
+            config_scalars,
+            out_path,
+            file_format,
+        ) = args
+    else:
+        (
+            chunk_idx,
+            seed,
+            n_chunks,
+            participant_data,
+            product_data,
+            purchased_pairs,
+            config_scalars,
+            out_path,
+        ) = args
+        file_format = "parquet"
 
     # --- Derive per-chunk RNG via SeedSequence for reproducible independence ---
     ss = np.random.SeedSequence(seed)
@@ -158,7 +173,16 @@ def _wishlist_worker_task(args: Tuple) -> Dict[str, Any]:
     write_chunk_rows = int(config_scalars.get("write_chunk_rows", 250_000))
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
-    writer = pq.ParquetWriter(out_path, schema)
+    if file_format == "csv":
+        writer = pa_csv.CSVWriter(
+            out_path,
+            schema,
+            write_options=pa_csv.WriteOptions(
+                include_header=True, quoting_style="needed"
+            ),
+        )
+    else:
+        writer = pq.ParquetWriter(out_path, schema)
     chunk = write_chunk_rows
     for s in range(0, total_rows, chunk):
         e = min(s + chunk, total_rows)

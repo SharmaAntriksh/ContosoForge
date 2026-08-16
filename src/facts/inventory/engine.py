@@ -37,6 +37,7 @@ class InventoryConfig:
     shrinkage_rate: float = 0.02
 
     min_demand_months: int = 3
+    write_chunk_rows: int = 2_000_000
 
     abc_filter: Optional[list] = None
 
@@ -78,6 +79,7 @@ def load_inventory_config(cfg: Dict[str, Any]) -> InventoryConfig:
         shrinkage_rate=float(getattr(shrinkage, "rate", 0.02)),
         abc_stock_multiplier=dict(abc),
         min_demand_months=int(getattr(raw, "min_demand_months", 3)),
+        write_chunk_rows=int(getattr(raw, "write_chunk_rows", 2_000_000)),
         abc_filter=abc_filter,
     )
 
@@ -374,28 +376,26 @@ def compute_inventory_snapshots(
         n_months,  # sentinel: pair never had demand (shouldn't happen, but safe)
     )
 
-    # Compute average demand without a full float64 copy
+    # Compute average monthly demand over the stocked lifetime, including
+    # zero-sale months. Averaging only nonzero months systematically overstates
+    # the stock target for intermittent products and destroys warehouse-level
+    # turnover alignment.
     demand_sum = demand_matrix.sum(axis=1).astype(np.float64)
-    demand_nonzero_months = (demand_matrix > 0).sum(axis=1)
-    avg_demand = np.where(demand_nonzero_months > 0, demand_sum / demand_nonzero_months, 1.0)
-    avg_demand = np.maximum(avg_demand, 1.0)
+    stocked_months = np.maximum(n_months - first_demand, 1)
+    avg_demand = demand_sum / stocked_months
 
     target_stock_months = np.where(
         np.isfinite(attr_turnover),
         12.0 / attr_turnover,
         icfg.initial_stock_multiplier,
     )
-    initial_stock = (
+    # Target end-of-month stock is the operating control for the entire
+    # simulation, not just an initial condition.  Keeping it explicit lets the
+    # replenishment loop order up to the warehouse's turnover-derived target.
+    target_qoh = (
         avg_demand * target_stock_months * attr_abc_mult * icfg.overstock_bias
     ).astype(np.int32)
-
-    reorder_qty = (
-        (attr_safety + avg_demand * attr_lead_months) * attr_abc_mult * icfg.overstock_bias
-    ).astype(np.int32)
-    reorder_qty = np.maximum(reorder_qty, (avg_demand * attr_lead_months * attr_abc_mult).astype(np.int32))
-
-    # Round reorder quantities up to CasePackQty multiples
-    reorder_qty = (np.ceil(reorder_qty / attr_case_pack) * attr_case_pack).astype(np.int32)
+    initial_stock = target_qoh.copy()
 
     monthly_shrinkage_base = (
         attr_shrinkage_rate / 12.0
@@ -457,6 +457,7 @@ def compute_inventory_snapshots(
     pending = np.zeros((n_pairs, n_months + max_lead_buffer), dtype=np.int32)
 
     qoh = np.zeros(n_pairs, dtype=np.int32)
+    outstanding = np.zeros(n_pairs, dtype=np.int32)
     shrinkage_carry = np.zeros(n_pairs, dtype=np.float64)
 
     for t in range(n_months):
@@ -468,6 +469,7 @@ def compute_inventory_snapshots(
         active_mask[:, t] = is_active
 
         received = pending[:, t]
+        outstanding = np.maximum(outstanding - received, 0)
         qoh += received * is_active
         out_received[:, t] = received * is_active
 
@@ -495,17 +497,35 @@ def compute_inventory_snapshots(
         cal_month = int(months_arr[t])
         if not (1 <= cal_month <= 12):
             raise ValueError(f"Inventory engine: invalid calendar month {cal_month} at timeline index {t}")
-        effective_reorder_pt = (attr_reorder_pt * seasonal_mult_table[cal_month]).astype(np.int32)
+        seasonal_mult = seasonal_mult_table[cal_month]
+        seasonal_target_qoh = np.ceil(target_qoh * seasonal_mult).astype(np.int32)
+        profile_reorder_pt = np.ceil(
+            attr_reorder_pt * seasonal_mult
+        ).astype(np.int32)
+        effective_reorder_pt = np.maximum(profile_reorder_pt, seasonal_target_qoh)
 
-        reorder_mask = (qoh <= effective_reorder_pt) & is_active
+        # Reorder against the inventory position (on hand + already ordered),
+        # preventing duplicate orders while a lead-time shipment is pending.
+        inventory_position = qoh + outstanding
+        reorder_mask = (inventory_position <= effective_reorder_pt) & is_active
         comply_mask = rand_compliance[:, t] < icfg.reorder_compliance
-        trigger_mask = reorder_mask & comply_mask
 
         lt_jittered = (
             attr_lead_months_f64 * (1.0 + rand_lt_jitter[:, t])
         ).astype(np.int32)
         arrival_offset = np.maximum(1, lt_jittered)
         arrival_t = t + arrival_offset
+
+        # Order up to the desired end-of-month stock plus expected lead-time
+        # demand.  This keeps TargetInventoryTurnover causal after month one.
+        order_up_to = seasonal_target_qoh + np.ceil(
+            avg_demand * arrival_offset
+        ).astype(np.int32)
+        reorder_qty = np.maximum(order_up_to - inventory_position, 0)
+        reorder_qty = (
+            np.ceil(reorder_qty / attr_case_pack) * attr_case_pack
+        ).astype(np.int32)
+        trigger_mask = reorder_mask & comply_mask & (reorder_qty > 0)
 
         triggered_idx = np.flatnonzero(trigger_mask)
         if triggered_idx.size > 0:
@@ -517,7 +537,9 @@ def compute_inventory_snapshots(
                 valid_arr_t = arr_t[valid]
                 valid_rq = rq[valid]
                 pending[valid_idx, valid_arr_t] += valid_rq
-            out_on_order[triggered_idx, t] = rq
+                outstanding[valid_idx] += valid_rq
+
+        out_on_order[:, t] = outstanding * is_active
 
         out_qoh[:, t] = qoh
         out_reorder[:, t] = reorder_mask.astype(np.int8)

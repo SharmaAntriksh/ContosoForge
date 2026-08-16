@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import zlib
 from collections.abc import Mapping
 from math import ceil
@@ -14,6 +15,7 @@ import numpy as np
 from src.exceptions import SalesError
 from src.utils.config_helpers import int_or as _int_or, float_or as _float_or, bool_or as _bool_or, str_or as _str_or
 from src.utils.logging_utils import debug, info, skip, warn
+from src.utils.write_metrics import log_write_metric
 from src.utils.shared_arrays import SharedArrayGroup
 from .sales_logic import State
 from .sales_logic.core import (
@@ -745,6 +747,7 @@ def generate_sales_fact(
     _max_lines_per_order = _int_or(getattr(sales_cfg, "max_lines_per_order", 5), 5)
 
     # Load dimensions + correlation lookups (one concern).
+    dimension_load_started = time.perf_counter()
     _pools = _load_sales_pools(
         parquet_folder_p, cfg, start_date, end_date, seed,
         active_product_np=getattr(State, "active_product_np", None),
@@ -756,6 +759,12 @@ def generate_sales_fact(
     _promos = _pools.promos
     _emps = _pools.employees
     _corr = _pools.correlations
+    log_write_metric(
+        "sales_dimension_loading",
+        elapsed_seconds=time.perf_counter() - dimension_load_started,
+        input_paths=[parquet_folder_p],
+        detail="dimension pools and correlation lookups",
+    )
 
     # The date pool drives order-id sizing, demand auto-adjust, and the plan.
     date_pool = _prod.date_pool
@@ -891,6 +900,7 @@ def generate_sales_fact(
         processes=n_workers,
         label="sales",
     )
+    worker_metric_started = time.perf_counter()
 
     try:
         for result in iter_imap_unordered(
@@ -910,13 +920,26 @@ def generate_sales_fact(
     finally:
         _shm.cleanup()
 
+    log_write_metric(
+        "sales_worker_generation_write",
+        elapsed_seconds=time.perf_counter() - worker_metric_started,
+        output_paths=[output_paths.table_out_dir(table) for table in tables],
+        rows=total_rows,
+        codec=file_format,
+        detail=(
+            f"chunks={total_units},workers={n_workers},"
+            f"build_worker_s={collector.metric_totals.get('build_seconds', 0.0):.3f},"
+            f"write_worker_s={collector.metric_totals.get('write_seconds', 0.0):.3f}"
+        ),
+    )
+
     # Final assembly (delta writes, CSV re-chunking, or parquet merge).
     # For Delta, hand the assembler the run's authoritative per-table schemas
     # (derived from the same worker_cfg the workers used) so the Delta commit
     # adopts that schema instead of sniffing an arbitrary part file.
     sales_schema_by_table = (
         build_worker_schemas_from_cfg(worker_cfg).schema_by_table
-        if file_format == "deltaparquet"
+        if file_format in {"parquet", "deltaparquet"}
         else None
     )
     return _assemble_output(

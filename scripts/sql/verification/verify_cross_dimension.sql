@@ -25,11 +25,11 @@ SELECT
     s.EmployeeCount - ISNULL(e.ActualCount, 0)                      AS Diff
 FROM Stores s
 LEFT JOIN (
-    SELECT StoreKey, COUNT(*) AS ActualCount
+    SELECT HomeStoreKey, COUNT(*) AS ActualCount
     FROM Employees
-    WHERE StoreKey IS NOT NULL AND StoreKey > 0
-    GROUP BY StoreKey
-) e ON e.StoreKey = s.StoreKey
+    WHERE HomeStoreKey IS NOT NULL AND HomeStoreKey > 0
+    GROUP BY HomeStoreKey
+) e ON e.HomeStoreKey = s.StoreKey
 WHERE s.Status = 'Open'
   AND ABS(s.EmployeeCount - ISNULL(e.ActualCount, 0)) > 0;
 -- EXPECTED: zero rows (run_employees syncs EmployeeCount back to stores.parquet)
@@ -40,7 +40,11 @@ SELECT
     s.Status,
     COUNT(e.EmployeeKey) AS ActiveEmployees
 FROM Stores s
-JOIN Employees e ON e.StoreKey = s.StoreKey AND e.IsActive = 1
+JOIN EmployeeStoreAssignments esa
+  ON esa.StoreKey = s.StoreKey
+ AND esa.IsCurrentAssignment = 1
+ AND esa.AssignmentStatus = 'Active'
+JOIN Employees e ON e.EmployeeKey = esa.EmployeeKey AND e.IsActive = 1
 WHERE s.Status = 'Closed'
 GROUP BY s.StoreKey, s.Status
 HAVING COUNT(e.EmployeeKey) > 0;
@@ -190,11 +194,11 @@ WHERE s.StoreKey IS NULL;
 -- EXPECTED: zero rows
 
 -- 6c. Every active store-level employee should have at least one assignment
-SELECT e.EmployeeKey, e.Title, e.StoreKey
+SELECT e.EmployeeKey, e.Title, e.HomeStoreKey
 FROM Employees e
 LEFT JOIN EmployeeStoreAssignments a ON a.EmployeeKey = e.EmployeeKey
 WHERE e.IsActive = 1
-  AND e.StoreKey > 0
+  AND e.HomeStoreKey > 0
   AND a.EmployeeKey IS NULL;
 -- EXPECTED: zero rows
 
@@ -263,9 +267,9 @@ SELECT
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS Result
 FROM Stores s
 LEFT JOIN (
-    SELECT StoreKey, COUNT(*) AS Cnt FROM Employees
-    WHERE StoreKey IS NOT NULL AND StoreKey > 0 GROUP BY StoreKey
-) e ON e.StoreKey = s.StoreKey
+    SELECT HomeStoreKey, COUNT(*) AS Cnt FROM Employees
+    WHERE HomeStoreKey IS NOT NULL AND HomeStoreKey > 0 GROUP BY HomeStoreKey
+) e ON e.HomeStoreKey = s.StoreKey
 WHERE s.Status = 'Open'
   AND ABS(s.EmployeeCount - ISNULL(e.Cnt, 0)) > 0
 

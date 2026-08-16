@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.exceptions import ConfigError, DimensionError
 from src.utils import info, skip, stage, warn
+from src.utils.logging_utils import debug
 from src.utils.config_helpers import int_or as _int_or, bool_or as _bool_or, as_dict
 from src.utils.output_utils import write_parquet_with_date32
 from src.utils.static_schemas import DATE_ALL_COLUMNS
@@ -134,4 +135,4 @@ def run_dates(cfg: "AppConfig", parquet_folder: Path) -> None:
         )
 
     save_version("dates", version_cfg, out_path)
-    info(f"Dates dimension written: {out_path.name}")
+    debug(f"Dates dimension written: {out_path.name}")

@@ -20,7 +20,7 @@ import pandas as pd
 
 from src.defaults import is_online_store_key, is_physical_store_key
 from src.exceptions import DimensionError
-from src.utils.logging_utils import info, skip, stage, warn
+from src.utils.logging_utils import debug, info, skip, stage, warn
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning import should_regenerate, save_version, frame_content_hash
 if TYPE_CHECKING:
@@ -685,4 +685,4 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
         )
 
     save_version("employee_store_assignments", version_cfg, out_path)
-    info(f"Employee Store Assignments written: {out_path.name}")
+    debug(f"Employee Store Assignments written: {out_path.name}")

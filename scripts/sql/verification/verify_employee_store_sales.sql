@@ -194,54 +194,107 @@ SELECT @st_info = STRING_AGG(CAST(AssignmentStatus AS VARCHAR(30)) + ':' + CAST(
 FROM (SELECT AssignmentStatus, COUNT(*) AS Cnt FROM dbo.EmployeeStoreAssignments GROUP BY AssignmentStatus) x;
 INSERT INTO #R VALUES ('ESA-Bridge', 'AssignmentStatus distribution', 'INFO', ISNULL(@st_info, '(empty)'));
 
--- 20. Renovation Reassignment current-assignment rules
---     Temp (store reopened) must be False; Permanent (store closed) must be True
-DECLARE @bad_temp_ip INT = 0, @bad_perm_ip INT = 0;
-DECLARE @n_temp INT = 0, @n_perm INT = 0;
+-- 20. Renovation Reassignment current flags
+--     A row is current only when it is the employee's latest segment.
+DECLARE @bad_rr_current INT = 0, @n_rr INT = 0;
 IF @n_reno > 0
 BEGIN
     SELECT
-        @n_temp      = ISNULL(SUM(CASE WHEN s.ClosingDate IS NULL THEN 1 ELSE 0 END), 0),
-        @bad_temp_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NULL  AND rr.IsCurrentAssignment = 1 THEN 1 ELSE 0 END), 0),
-        @n_perm      = ISNULL(SUM(CASE WHEN s.ClosingDate IS NOT NULL THEN 1 ELSE 0 END), 0),
-        @bad_perm_ip = ISNULL(SUM(CASE WHEN s.ClosingDate IS NOT NULL AND rr.IsCurrentAssignment = 0 THEN 1 ELSE 0 END), 0)
+        @n_rr = COUNT(*),
+        @bad_rr_current = ISNULL(SUM(CASE
+            WHEN rr.IsCurrentAssignment <>
+                 CASE WHEN rr.AssignmentSequence = latest.MaxSequence THEN 1 ELSE 0 END
+            THEN 1 ELSE 0 END), 0)
     FROM dbo.EmployeeStoreAssignments rr
-    JOIN dbo.EmployeeStoreAssignments init
-      ON init.EmployeeKey = rr.EmployeeKey AND init.TransferReason = 'Initial'
-    JOIN dbo.Stores s ON s.StoreKey = init.StoreKey
-    WHERE rr.TransferReason = 'Renovation Reassignment'
-      AND s.RenovationStartDate IS NOT NULL;
+    JOIN (
+        SELECT EmployeeKey, MAX(AssignmentSequence) AS MaxSequence
+        FROM dbo.EmployeeStoreAssignments
+        GROUP BY EmployeeKey
+    ) latest ON latest.EmployeeKey = rr.EmployeeKey
+    WHERE rr.TransferReason = 'Renovation Reassignment';
 
-    INSERT INTO #R VALUES ('ESA-Bridge', 'Renovation Reassignment current-assignment rules',
-        CASE WHEN @bad_temp_ip = 0 AND @bad_perm_ip = 0 THEN 'PASS' ELSE 'FAIL' END,
-        CAST(@n_temp AS VARCHAR) + ' temp (bad:' + CAST(@bad_temp_ip AS VARCHAR) + '), '
-        + CAST(@n_perm AS VARCHAR) + ' perm (bad:' + CAST(@bad_perm_ip AS VARCHAR) + ')');
+    INSERT INTO #R VALUES ('ESA-Bridge', 'Renovation Reassignment current flags',
+        CASE WHEN @bad_rr_current = 0 THEN 'PASS' ELSE 'FAIL' END,
+        CAST(@n_rr AS VARCHAR) + ' segment(s), ' + CAST(@bad_rr_current AS VARCHAR) + ' stale flag(s)');
 END
 
 -- 21. Renovation segments complete
---     Reopened stores: reassign + return. Closed stores: reassign only.
 IF @n_reno > 0
 BEGIN
-    DECLARE @miss_reassign INT, @miss_return INT, @unexpected_return INT;
+    DECLARE @miss_reassign INT, @miss_return INT, @malformed_return INT;
 
+    ;WITH EmployeeEnd AS (
+        SELECT EmployeeKey, MAX(EndDate) AS EmploymentEnd
+        FROM dbo.EmployeeStoreAssignments
+        GROUP BY EmployeeKey
+    ), ExpectedHomeRenovation AS (
+        SELECT
+            init.EmployeeKey,
+            s.StoreKey,
+            s.ClosingDate,
+            s.RenovationStartDate,
+            s.RenovationEndDate,
+            ee.EmploymentEnd,
+            CASE
+                WHEN init.StartDate > s.RenovationStartDate THEN init.StartDate
+                ELSE s.RenovationStartDate
+            END AS ExpectedReassignmentStart
+        FROM dbo.EmployeeStoreAssignments init
+        JOIN dbo.Stores s ON s.StoreKey = init.StoreKey
+        JOIN EmployeeEnd ee ON ee.EmployeeKey = init.EmployeeKey
+        WHERE init.TransferReason = 'Initial'
+          AND s.RenovationStartDate IS NOT NULL
+          AND s.RenovationEndDate IS NOT NULL
+          AND init.StartDate < s.RenovationEndDate
+          AND ee.EmploymentEnd >= s.RenovationStartDate
+    )
     SELECT
-        @miss_reassign     = COUNT(DISTINCT CASE WHEN s.ClosingDate IS NULL     AND ea.EmployeeKey IS NULL     THEN init.EmployeeKey END),
-        @miss_return       = COUNT(DISTINCT CASE WHEN s.ClosingDate IS NULL     AND er.EmployeeKey IS NULL     THEN init.EmployeeKey END),
-        @unexpected_return = COUNT(DISTINCT CASE WHEN s.ClosingDate IS NOT NULL AND er.EmployeeKey IS NOT NULL THEN init.EmployeeKey END)
-    FROM dbo.EmployeeStoreAssignments init
-    JOIN dbo.Stores s ON s.StoreKey = init.StoreKey
-    LEFT JOIN (SELECT DISTINCT EmployeeKey FROM dbo.EmployeeStoreAssignments WHERE TransferReason = 'Renovation Reassignment') ea
-      ON ea.EmployeeKey = init.EmployeeKey
-    LEFT JOIN (SELECT DISTINCT EmployeeKey FROM dbo.EmployeeStoreAssignments WHERE TransferReason = 'Renovation Return') er
-      ON er.EmployeeKey = init.EmployeeKey
-    WHERE init.TransferReason = 'Initial'
-      AND s.RenovationStartDate IS NOT NULL;
+        @miss_reassign = ISNULL(SUM(CASE
+            WHEN rr.EmployeeKey IS NULL THEN 1 ELSE 0 END), 0),
+        @miss_return = ISNULL(SUM(CASE
+            WHEN expected.ClosingDate IS NULL
+             AND expected.EmploymentEnd >= expected.RenovationEndDate
+             AND ret.EmployeeKey IS NULL
+            THEN 1 ELSE 0 END), 0)
+    FROM ExpectedHomeRenovation expected
+    LEFT JOIN (
+        SELECT DISTINCT EmployeeKey, StartDate
+        FROM dbo.EmployeeStoreAssignments
+        WHERE TransferReason = 'Renovation Reassignment'
+    ) rr
+      ON rr.EmployeeKey = expected.EmployeeKey
+     AND rr.StartDate = expected.ExpectedReassignmentStart
+    LEFT JOIN (
+        SELECT DISTINCT EmployeeKey, StoreKey, StartDate
+        FROM dbo.EmployeeStoreAssignments
+        WHERE TransferReason = 'Renovation Return'
+    ) ret
+      ON ret.EmployeeKey = expected.EmployeeKey
+     AND ret.StoreKey = expected.StoreKey
+     AND ret.StartDate = expected.RenovationEndDate;
+
+    SELECT @malformed_return = COUNT(*)
+    FROM dbo.EmployeeStoreAssignments ret
+    LEFT JOIN dbo.EmployeeStoreAssignments rr
+      ON rr.EmployeeKey = ret.EmployeeKey
+     AND rr.AssignmentSequence = ret.AssignmentSequence - 1
+    LEFT JOIN dbo.Stores s ON s.StoreKey = ret.StoreKey
+    WHERE ret.TransferReason = 'Renovation Return'
+      AND (
+           rr.TransferReason IS NULL
+        OR rr.TransferReason <> 'Renovation Reassignment'
+        OR s.StoreKey IS NULL
+        OR s.RenovationEndDate IS NULL
+        OR s.ClosingDate IS NOT NULL
+        OR ret.StartDate <> s.RenovationEndDate
+        OR rr.EndDate <> DATEADD(DAY, -1, ret.StartDate)
+      );
 
     INSERT INTO #R VALUES ('ESA-Bridge', 'Renovation segments complete',
-        CASE WHEN @miss_reassign = 0 AND @miss_return = 0 AND @unexpected_return = 0 THEN 'PASS' ELSE 'FAIL' END,
+        CASE WHEN @miss_reassign = 0 AND @miss_return = 0 AND @malformed_return = 0 THEN 'PASS' ELSE 'FAIL' END,
         'missing reassign:' + CAST(@miss_reassign AS VARCHAR)
         + ', missing return:' + CAST(@miss_return AS VARCHAR)
-        + ', unexpected return:' + CAST(@unexpected_return AS VARCHAR));
+        + ', malformed return:' + CAST(@malformed_return AS VARCHAR));
 END
 
 -- 22. No overlapping same-store assignments

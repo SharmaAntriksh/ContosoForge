@@ -1,4 +1,4 @@
-"""Small end-to-end acceptance test for Phase 2 temporal contracts."""
+"""Small end-to-end acceptance test for cross-fact temporal contracts."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,8 +17,8 @@ def _find_one(roots: list[Path], name: str) -> Path:
 
 
 @pytest.fixture(scope="module")
-def phase2_run(tmp_path_factory):
-    base = tmp_path_factory.mktemp("phase2_temporal")
+def temporal_contract_run(tmp_path_factory):
+    base = tmp_path_factory.mktemp("temporal_contract")
     dims = base / "dims"
     scratch = base / "scratch"
     final = base / "final"
@@ -60,8 +60,8 @@ def phase2_run(tmp_path_factory):
     return dims, scratch, final, cfg
 
 
-def test_phase2_temporal_contracts(phase2_run):
-    dims, scratch, final, cfg = phase2_run
+def test_cross_fact_temporal_contracts(temporal_contract_run):
+    dims, scratch, final, cfg = temporal_contract_run
     roots = [dims, scratch, final]
     global_end = pd.Timestamp(cfg["defaults"]["dates"]["end"])
 

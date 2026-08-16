@@ -1,14 +1,18 @@
 import shutil
+import time
 from pathlib import Path
 from urllib.parse import unquote
 
+from src.exceptions import PackagingError
 from src.utils.output_utils import create_final_output_folder
 from src.utils.logging_utils import info
+from src.utils.write_metrics import artifact_stats, log_write_metric
 
 from .paths import get_first_existing_path, tables_from_sales_cfg
 from .parquet_packager import copy_parquet_facts
 from .delta_packager import copy_delta_facts
 from .csv_packager import copy_csv_facts
+from .artifact_transfer import transfer_delta_dir, transfer_file
 from .sql_scripts import (
     write_bulk_insert_scripts,
     write_create_table_scripts,
@@ -46,8 +50,16 @@ def _write_sql_generation_manifest(final_folder: Path, sales_cfg, order_id_int64
     out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
-                   *, order_id_int64: bool | None = None, manifest=None):
+def package_output(
+    cfg,
+    sales_cfg,
+    parquet_dims: Path,
+    fact_out: Path,
+    *,
+    order_id_int64: bool | None = None,
+    manifest=None,
+    inventory_artifacts: list[str] | None = None,
+):
     """
     Orchestrates packaging:
       - Creates final packaged folder (dims + config copied by output_utils)
@@ -66,6 +78,7 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
     """
     file_format = str(sales_cfg.file_format).lower()
     is_csv = file_format == "csv"
+    promote = bool(getattr(getattr(cfg, "packaging", None), "clean_scratch_fact_out", False))
 
     _raw_folder = unquote(str(cfg.defaults.final_output))
     # Reject path traversal via an explicit ".." path segment. A bare substring
@@ -112,7 +125,7 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
             inv_delta = fact_out / "inventory_snapshot"
             if inv_delta.exists():
                 dst = facts_out / "inventory_snapshot"
-                shutil.copytree(inv_delta, dst, dirs_exist_ok=True)
+                transfer_delta_dir(inv_delta, dst, promote=promote)
             return
 
         inv_src = fact_out / "inventory"
@@ -122,20 +135,36 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
         if file_format == "parquet":
             parquets = sorted(inv_src.glob("*.parquet"))
             for f in parquets:
-                shutil.copy2(f, facts_out / f.name)
+                transfer_file(f, facts_out / f.name, promote=promote)
         elif file_format == "csv":
-            # Prefer merged file(s); fall back to raw chunks in subdirectory
-            merged = sorted(inv_src.glob("inventory_snapshot*.csv"))
-            if merged:
-                inv_dst = facts_out / "inventory_snapshot"
-                inv_dst.mkdir(parents=True, exist_ok=True)
-                for f in merged:
-                    shutil.copy2(f, inv_dst / f.name)
+            # The normal pipeline supplies the exact files written by this run.
+            # Legacy/direct callers retain path probing for compatibility.
+            if inventory_artifacts is not None:
+                inventory_root = inv_src.resolve()
+                csv_sources = []
+                for raw_path in inventory_artifacts:
+                    candidate = Path(raw_path).resolve()
+                    try:
+                        candidate.relative_to(inventory_root)
+                    except ValueError as exc:
+                        raise PackagingError(
+                            f"Inventory artifact is outside the scratch inventory folder: {candidate}"
+                        ) from exc
+                    if candidate.suffix.lower() != ".csv" or not candidate.is_file():
+                        raise PackagingError(
+                            f"Current-run Inventory CSV artifact is missing or invalid: {candidate}"
+                        )
+                    csv_sources.append(candidate)
             else:
-                inv_dst = facts_out / "inventory_snapshot"
-                inv_dst.mkdir(parents=True, exist_ok=True)
-                for f in inv_src.glob("*.csv"):
-                    shutil.copy2(f, inv_dst / f.name)
+                merged = sorted(inv_src.glob("inventory_snapshot*.csv"))
+                csv_sources = merged or sorted(inv_src.glob("*.csv"))
+
+            if not csv_sources:
+                return
+            inv_dst = facts_out / "inventory_snapshot"
+            inv_dst.mkdir(parents=True, exist_ok=True)
+            for f in sorted(csv_sources):
+                transfer_file(f, inv_dst / f.name, promote=promote)
 
 
     def _copy_budget_if_exists():
@@ -145,7 +174,7 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
             for name in ("budget_yearly", "budget_monthly"):
                 src = fact_out / name
                 if src.exists():
-                    shutil.copytree(src, facts_out / name, dirs_exist_ok=True)
+                    transfer_delta_dir(src, facts_out / name, promote=promote)
             return
 
         budget_src = fact_out / "budget"
@@ -157,11 +186,11 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
             src = budget_src / f"{name}.{ext}"
             if src.exists():
                 if file_format == "parquet":
-                    shutil.copy2(src, facts_out / src.name)
+                    transfer_file(src, facts_out / src.name, promote=promote)
                 else:
                     dst = facts_out / name
                     dst.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst / src.name)
+                    transfer_file(src, dst / src.name, promote=promote)
 
     def _copy_complaints_if_exists():
         """Copy complaints output into the packaged facts folder."""
@@ -171,15 +200,15 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
 
         if file_format == "parquet":
             for f in complaints_src.glob("*.parquet"):
-                shutil.copy2(f, facts_out / f.name)
+                transfer_file(f, facts_out / f.name, promote=promote)
         elif file_format == "csv":
             complaints_dst = facts_out / "complaints"
             complaints_dst.mkdir(parents=True, exist_ok=True)
             for f in complaints_src.glob("*.csv"):
-                shutil.copy2(f, complaints_dst / f.name)
+                transfer_file(f, complaints_dst / f.name, promote=promote)
         elif file_format == "deltaparquet":
             dst = facts_out / "complaints"
-            shutil.copytree(complaints_src, dst, dirs_exist_ok=True)
+            transfer_delta_dir(complaints_src, dst, promote=promote)
 
     def _copy_wishlists_if_exists():
         """Copy wishlists output into the packaged facts folder."""
@@ -189,44 +218,65 @@ def package_output(cfg, sales_cfg, parquet_dims: Path, fact_out: Path,
 
         if file_format == "parquet":
             for f in wl_src.glob("*.parquet"):
-                shutil.copy2(f, facts_out / f.name)
+                transfer_file(f, facts_out / f.name, promote=promote)
         elif file_format == "csv":
             wl_dst = facts_out / "customer_wishlists"
             wl_dst.mkdir(parents=True, exist_ok=True)
             for f in wl_src.glob("*.csv"):
-                shutil.copy2(f, wl_dst / f.name)
+                transfer_file(f, wl_dst / f.name, promote=promote)
         elif file_format == "deltaparquet":
             dst = facts_out / "customer_wishlists"
-            shutil.copytree(wl_src, dst, dirs_exist_ok=True)
+            transfer_delta_dir(wl_src, dst, promote=promote)
 
     tables = tables_from_sales_cfg(sales_cfg, cfg)
+    fact_metric_started = time.perf_counter()
+    fact_input_stats = artifact_stats([fact_out])
+
+    def _log_fact_packaging() -> None:
+        log_write_metric(
+            "fact_packaging",
+            elapsed_seconds=time.perf_counter() - fact_metric_started,
+            output_paths=[facts_out],
+            input_stats=fact_input_stats,
+            codec=file_format,
+            detail=f"format={file_format},promote={promote}",
+        )
 
     if file_format == "parquet":
         copy_parquet_facts(fact_out=fact_out, facts_out=facts_out, sales_cfg=sales_cfg,
-                           tables=tables, manifest=manifest)
+                           tables=tables, manifest=manifest, promote=promote)
         _copy_budget_if_exists()
         _copy_inventory_if_exists()
         _copy_complaints_if_exists()
         _copy_wishlists_if_exists()
+        _log_fact_packaging()
         return final_folder
 
     if file_format == "deltaparquet":
         copy_delta_facts(fact_out=fact_out, facts_out=facts_out, sales_cfg=sales_cfg,
-                         tables=tables, manifest=manifest)
+                         tables=tables, manifest=manifest, promote=promote)
         _copy_budget_if_exists()
         _copy_inventory_if_exists()
         _copy_complaints_if_exists()
         _copy_wishlists_if_exists()
+        _log_fact_packaging()
         return final_folder
 
     if file_format != "csv":
         raise ValueError(f"Unsupported file_format in packaging: {file_format!r}")
 
-    copy_csv_facts(fact_out=fact_out, facts_out=facts_out, tables=tables, manifest=manifest)
+    copy_csv_facts(
+        fact_out=fact_out,
+        facts_out=facts_out,
+        tables=tables,
+        manifest=manifest,
+        promote=promote,
+    )
     _copy_budget_if_exists()
     _copy_inventory_if_exists()
     _copy_complaints_if_exists()
     _copy_wishlists_if_exists()
+    _log_fact_packaging()
 
     # SQL SCRIPT GENERATION — CSV ONLY
     if is_csv:

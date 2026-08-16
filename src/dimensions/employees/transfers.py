@@ -91,6 +91,7 @@ def _clamp_dst_end(
     close_dates: Dict[int, pd.Timestamp],
     reno_start_dates: Optional[Dict[int, pd.Timestamp]],
     reno_end_dates: Optional[Dict[int, pd.Timestamp]],
+    original_status: str = "Active",
 ) -> Tuple[pd.Timestamp, str, bool]:
     """Clamp the new destination assignment's EndDate to the destination
     store's last open day before any close/renovation. Matches the convention
@@ -100,7 +101,7 @@ def _clamp_dst_end(
     abandon this candidate (transfer date falls inside the renovation window).
     """
     new_end = original_end
-    new_status = "Active"
+    new_status = original_status
 
     dest_close = close_dates.get(dest_sk)
     if dest_close is not None:
@@ -366,6 +367,7 @@ def apply_transfers(
             is_salesperson = role in salesperson_role_set
             employee_start = pd.Timestamp(start_ns[idx])
             original_end = pd.Timestamp(end_ns[idx])
+            original_status = str(col_status[idx])
 
             if transfer_date > original_end:
                 # The assignment already ended before the drawn transfer date;
@@ -397,6 +399,7 @@ def apply_transfers(
             new_end, new_status, dst_skip = _clamp_dst_end(
                 dest_sk, transfer_date, original_end,
                 close_dates, reno_start_dates, reno_end_dates,
+                original_status=original_status,
             )
             if dst_skip:
                 rejections["dst_renovation_window"] += 1
@@ -459,6 +462,7 @@ def apply_transfers(
                     transfer_date=transfer_date,
                     original_end=original_end,
                     dst_end=new_end,
+                    original_status=original_status,
                 ))
                 last_record_by_emp[emp_key] = new_rec_idx
             transfer_count += 1

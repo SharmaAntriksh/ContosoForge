@@ -91,6 +91,7 @@ def _inventory_worker_task(args: Tuple) -> Dict[str, Any]:
 
     n_rows = len(snapshots)
     stockout_sum = 0
+    output_files: list[str] = []
 
     if n_rows > 0:
         stockout_sum = int(snapshots["StockoutFlag"].sum())
@@ -98,32 +99,42 @@ def _inventory_worker_task(args: Tuple) -> Dict[str, Any]:
         out_dir = Path(output_base).parent
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Always write parquet (used as dataset, and fast)
-        pq_path = output_base + ".parquet"
-        table = pa.Table.from_pandas(snapshots, preserve_index=False)
-        # Cast SnapshotDate to date32 so Power Query reads Date, not
-        # DateTime (matching Sales behaviour).
-        table = _cast_snapshot_date(table)
-        pq.write_table(
-            table,
-            pq_path,
-            compression="snappy",
-            row_group_size=500_000,
-            use_dictionary=True,
-        )
-
-        # Write CSV chunk alongside if requested
         if file_format == "csv":
-            csv_path = output_base + ".csv"
             csv_df = _prepare_csv(snapshots)
-            # Force LF to match the BULK INSERT ROWTERMINATOR='0x0a' (pandas
-            # to_csv defaults to CRLF on Windows).
-            csv_df.to_csv(csv_path, index=False, lineterminator="\n")
+            chunk_rows = max(1, int(icfg.write_chunk_rows))
+            part_count = (n_rows + chunk_rows - 1) // chunk_rows
+            for part_idx, start in enumerate(range(0, n_rows, chunk_rows)):
+                if part_count == 1:
+                    csv_path = Path(output_base + ".csv")
+                else:
+                    csv_path = Path(f"{output_base}_part{part_idx:05d}.csv")
+                # Force LF to match the BULK INSERT ROWTERMINATOR='0x0a'
+                # (pandas to_csv defaults to CRLF on Windows).
+                csv_df.iloc[start:start + chunk_rows].to_csv(
+                    csv_path, index=False, lineterminator="\n"
+                )
+                output_files.append(str(csv_path))
+        else:
+            # Parquet is the final/staging representation for Parquet and
+            # Delta modes. CSV chunks are already final artifacts, so writing
+            # an unused Parquet twin in CSV mode only adds encode + merge I/O.
+            pq_path = output_base + ".parquet"
+            table = pa.Table.from_pandas(snapshots, preserve_index=False)
+            table = _cast_snapshot_date(table)
+            pq.write_table(
+                table,
+                pq_path,
+                compression="snappy",
+                row_group_size=500_000,
+                use_dictionary=True,
+            )
+            output_files.append(pq_path)
 
     return {
         "chunk_idx": chunk_idx,
         "rows": n_rows,
         "stockout_sum": stockout_sum,
+        "files": output_files,
     }
 
 

@@ -8,10 +8,12 @@ import re
 import shutil
 import ntpath
 import posixpath
+import time
 from pathlib import Path
 from typing import Optional
 
 from src.exceptions import PackagingError
+from src.utils.write_metrics import log_write_metric
 
 
 PBIP_TEMPLATES_ROOT = Path("samples/powerbi/templates")
@@ -83,11 +85,20 @@ def maybe_attach_pbip_project(
     if template_root is None:
         return False
 
+    metric_started = time.perf_counter()
     attach_pbip_project(
         final_folder=final_folder,
         pbip_template_root=template_root,
         expression_name=expression_name,
         pbip_dst_name=pbip_dst_name,
+    )
+    pbip_dst = final_folder / (pbip_dst_name or template_root.name)
+    log_write_metric(
+        "pbip_packaging",
+        elapsed_seconds=time.perf_counter() - metric_started,
+        input_paths=[template_root],
+        output_paths=[pbip_dst],
+        detail=f"format={str(file_format).lower()}",
     )
     return True
 

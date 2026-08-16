@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.dimensions.stores.generator import GeoContext, generate_store_table
 from src.dimensions.stores.lifecycle import backfill_close_reason
@@ -170,7 +171,87 @@ def test_inventory_targets_drive_stock_and_emit_actual_shrinkage(tmp_path) -> No
     assert "ShrinkageQuantity" in dict(STATIC_SCHEMAS["InventorySnapshot"])
 
 
-def test_all_active_powerbi_models_publish_phase5_contract() -> None:
+def test_inventory_turnover_target_controls_recurring_replenishment(tmp_path) -> None:
+    pd.DataFrame({
+        "WarehouseKey": [1, 2],
+        "TargetInventoryTurnover": [4.0, 12.0],
+        "TargetShrinkageRatePct": [0.0, 0.0],
+    }).to_parquet(tmp_path / "warehouses.parquet", index=False)
+
+    rows = []
+    for warehouse_key in (1, 2):
+        for date in pd.date_range("2022-01-01", "2024-12-01", freq="MS"):
+            rows.append({
+                "ProductKey": 1,
+                "WarehouseKey": warehouse_key,
+                "Year": date.year,
+                "Month": date.month,
+                "QuantitySold": 100,
+            })
+
+    snapshots = compute_inventory_snapshots(
+        pd.DataFrame(rows),
+        tmp_path,
+        InventoryConfig(
+            enabled=True,
+            seed=7,
+            reorder_compliance=1.0,
+            lead_time_variance=0.0,
+            overstock_bias=1.0,
+            shrinkage_enabled=False,
+            min_demand_months=1,
+            abc_stock_multiplier={"A": 1.0, "B": 1.0, "C": 1.0},
+        ),
+    )
+
+    by_warehouse = snapshots.groupby("WarehouseKey").agg(
+        sold=("QuantitySold", "sum"),
+        qoh=("QuantityOnHand", "sum"),
+    )
+    actual_turnover = 12.0 * by_warehouse["sold"] / by_warehouse["qoh"]
+
+    assert actual_turnover.loc[1] == pytest.approx(4.0, rel=0.15)
+    assert actual_turnover.loc[2] == pytest.approx(12.0, rel=0.15)
+    assert actual_turnover.loc[2] > actual_turnover.loc[1]
+
+
+def test_inventory_turnover_uses_zero_sale_months_in_demand_rate(tmp_path) -> None:
+    pd.DataFrame({
+        "WarehouseKey": [1],
+        "TargetInventoryTurnover": [6.0],
+        "TargetShrinkageRatePct": [0.0],
+    }).to_parquet(tmp_path / "warehouses.parquet", index=False)
+    demand = pd.DataFrame({
+        "ProductKey": [1] * 24,
+        "WarehouseKey": [1] * 24,
+        "Year": [2023] * 12 + [2024] * 12,
+        "Month": list(range(1, 13)) * 2,
+        "QuantitySold": [12, 0, 0, 0, 0, 0] * 4,
+    })
+
+    snapshots = compute_inventory_snapshots(
+        demand,
+        tmp_path,
+        InventoryConfig(
+            enabled=True,
+            seed=7,
+            reorder_compliance=1.0,
+            lead_time_variance=0.0,
+            overstock_bias=1.0,
+            shrinkage_enabled=False,
+            min_demand_months=1,
+            abc_stock_multiplier={"A": 1.0, "B": 1.0, "C": 1.0},
+        ),
+    )
+    actual_turnover = (
+        12.0 * snapshots["QuantitySold"].sum()
+        / snapshots["QuantityOnHand"].sum()
+    )
+
+    assert actual_turnover == pytest.approx(6.0, rel=0.35)
+
+
+def test_all_active_powerbi_models_publish_store_warehouse_contract() -> None:
     templates = Path(__file__).parents[1] / "samples" / "powerbi" / "templates"
     store_files = [
         path

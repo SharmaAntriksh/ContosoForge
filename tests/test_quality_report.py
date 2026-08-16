@@ -17,6 +17,7 @@ from src.engine.quality_report import (
     _check_subscription_lifecycle,
     _check_wishlist_conversion_chronology,
     _check_inventory_stockout_semantics,
+    _check_inventory_turnover_alignment,
     _check_employee_assignment_temporal_integrity,
     _check_salesperson_assignment_integrity,
     _check_current_headcount_reconciliation,
@@ -210,7 +211,7 @@ class TestOrderIntegrity:
         assert fk is not None and fk.passed is True
 
 
-class TestPhase7WorkforceReferentialIntegrity:
+class TestWorkforceReferentialIntegrity:
     @pytest.fixture
     def dims_facts(self, tmp_path):
         dims = tmp_path / "dimensions"
@@ -336,7 +337,7 @@ class TestPhase7WorkforceReferentialIntegrity:
             assert orphan in check.details
 
 
-class TestPhase7AssignmentTemporalIntegrity:
+class TestAssignmentTemporalIntegrity:
     @staticmethod
     def _find(report, name):
         return next(check for check in report.checks if check.name == name)
@@ -407,7 +408,7 @@ class TestPhase7AssignmentTemporalIntegrity:
         assert "Assignment segments are contiguous" in report_html
 
 
-class TestPhase7SalespersonAndHeadcountIntegrity:
+class TestSalespersonAndHeadcountIntegrity:
     @staticmethod
     def _find(report, name):
         return next(check for check in report.checks if check.name == name)
@@ -500,6 +501,30 @@ class TestPhase7SalespersonAndHeadcountIntegrity:
         assert "1 missing active" in check.message
         assert "1 inactive/unexpected" in check.message
 
+    def test_current_assignment_status_label_mismatch_is_flagged(self):
+        employees = pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "HomeStoreKey": [10, 10],
+            "IsActive": [True, False],
+        })
+        assignments = pd.DataFrame({
+            "EmployeeKey": [1, 2],
+            "StoreKey": [10, 10],
+            "StartDate": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+            "EndDate": pd.to_datetime(["2024-12-31", "2024-06-30"]),
+            "IsCurrentAssignment": [True, True],
+            "AssignmentStatus": ["Active", "Active"],
+        })
+        report = QualityReport()
+
+        _check_current_headcount_reconciliation(report, employees, assignments)
+
+        check = self._find(
+            report, "Current assignment headcount reconciles to active employees",
+        )
+        assert not check.passed
+        assert "1 current/status label mismatch" in check.message
+
     def test_generated_report_includes_salesperson_and_headcount_checks(
         self, tmp_path,
     ):
@@ -535,7 +560,7 @@ class TestPhase7SalespersonAndHeadcountIntegrity:
         )
 
 
-class TestPhase7OrganizationalQualityContract:
+class TestOrganizationalQualityContract:
     @staticmethod
     def _find(report, name):
         return next(check for check in report.checks if check.name == name)
@@ -718,7 +743,7 @@ class TestPhase7OrganizationalQualityContract:
         assert 'class="fail-count">4 failed' in html
 
 
-class TestPhase2AnalyticalIntegrity:
+class TestLifecycleAndPromotionAnalyticalIntegrity:
     @staticmethod
     def _find(report, name):
         return next(c for c in report.checks if c.name == name)
@@ -822,7 +847,7 @@ class TestPhase2AnalyticalIntegrity:
         assert self._find(report, "Wishlist dated conversion").passed
 
 
-class TestPhase4AnalyticalIntegrity:
+class TestPublishedFactAnalyticalIntegrity:
     @staticmethod
     def _find(report, name):
         return next(c for c in report.checks if c.name == name)
@@ -839,6 +864,47 @@ class TestPhase4AnalyticalIntegrity:
         check = self._find(report, "Inventory stockout flag/day consistency")
         assert check.passed is False
         assert "1 contradictory" in check.message
+
+    def test_inventory_turnover_targets_align_with_realized_inventory(self):
+        report = QualityReport()
+        inventory = pd.DataFrame({
+            "WarehouseKey": np.repeat([1, 2, 3], 12),
+            "QuantitySold": [100] * 36,
+            "QuantityOnHand": np.repeat([300, 150, 100], 12),
+        })
+        warehouses = pd.DataFrame({
+            "WarehouseKey": [1, 2, 3],
+            "TargetInventoryTurnover": [4.0, 8.0, 12.0],
+        })
+
+        _check_inventory_turnover_alignment(report, inventory, warehouses)
+
+        check = self._find(
+            report, "Inventory turnover target-to-realized alignment",
+        )
+        assert check.passed
+        assert "correlation=1.000" in check.message
+        assert "in-band warehouses=100.0%" in check.message
+
+    def test_inventory_turnover_target_disconnection_is_flagged(self):
+        report = QualityReport()
+        inventory = pd.DataFrame({
+            "WarehouseKey": np.repeat([1, 2, 3], 12),
+            "QuantitySold": [100] * 36,
+            "QuantityOnHand": np.repeat([2400, 1800, 1200], 12),
+        })
+        warehouses = pd.DataFrame({
+            "WarehouseKey": [1, 2, 3],
+            "TargetInventoryTurnover": [12.0, 8.0, 4.0],
+        })
+
+        _check_inventory_turnover_alignment(report, inventory, warehouses)
+
+        check = self._find(
+            report, "Inventory turnover target-to-realized alignment",
+        )
+        assert not check.passed
+        assert "median actual/target" in check.message
 
     def test_post_sale_fact_dates_are_covered_by_dates_dimension(self, tmp_path):
         dims = tmp_path / "dimensions"

@@ -11,6 +11,7 @@ import pandas as pd
 
 from src.dimensions.employees.transfers import (
     _build_open_store_candidates,
+    _clamp_dst_end,
     _classify_transfer_reason,
     _pick_destination,
     apply_transfers,
@@ -34,6 +35,24 @@ from src.dimensions.employees.assignment_core import (
 # ---------------------------------------------------------------------------
 
 ROLE = ["Sales Associate"]
+
+
+def test_transfer_destination_preserves_completed_employee_status() -> None:
+    end_date = pd.Timestamp("2025-07-07")
+
+    new_end, status, skip = _clamp_dst_end(
+        10,
+        pd.Timestamp("2024-03-14"),
+        end_date,
+        close_dates={},
+        reno_start_dates=None,
+        reno_end_dates=None,
+        original_status="Completed",
+    )
+
+    assert new_end == end_date
+    assert status == "Completed"
+    assert not skip
 
 
 def _stores(keys, opening="2020-01-01", closing=None, reno=None):
@@ -450,6 +469,16 @@ class TestRollbackChain:
         # Exactly one primary per employee, no overlaps left behind.
         for _ek, grp in df.groupby("EmployeeKey"):
             assert int(grp["IsCurrentAssignment"].astype(bool).sum()) == 1
+
+    def test_rollback_restores_completed_status(self):
+        df, budget, records = self._setup()
+        records[0].original_status = "Completed"
+
+        n = _surgical_rollback(df, budget, records)
+
+        assert n == 2
+        restored = df.loc[df["EmployeeKey"] == 101].iloc[0]
+        assert restored["AssignmentStatus"] == "Completed"
 
 
 # ---------------------------------------------------------------------------

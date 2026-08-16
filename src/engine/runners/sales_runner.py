@@ -7,7 +7,7 @@ pipeline.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Mapping
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -17,6 +17,7 @@ import pandas as pd
 
 from src.exceptions import ConfigError, SalesError
 from src.utils.logging_utils import stage, info
+from src.utils.write_metrics import log_write_metric
 from src.engine.packaging import package_output
 from src.engine.powerbi_packaging import maybe_attach_pbip_project
 from src.facts.sales.sales import generate_sales_fact
@@ -353,12 +354,17 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
 
         _run_step("Generating Budget", _do_budget)
 
+    # Exact current-run Inventory artifacts are passed to packaging so retained
+    # scratch from an interrupted/older run can never be selected by probing.
+    inventory_artifacts: list[str] = []
+
     # --- Step 2b: Inventory (uses its own multiprocessing pool — run alone)
     if inventory_acc is not None and inventory_acc.has_data:
         from src.facts.inventory.runner import run_inventory_pipeline
 
         def _do_inventory():
-            run_inventory_pipeline(
+            nonlocal inventory_artifacts
+            result = run_inventory_pipeline(
                 accumulator=inventory_acc,
                 parquet_dims=ctx.parquet_dims,
                 fact_out=ctx.fact_out,
@@ -366,6 +372,7 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
                 file_format=ctx.fmt,
                 workers=ctx.sales_cfg.workers,
             )
+            inventory_artifacts = list(result.get("artifacts", [])) if result else []
 
         _run_step("Generating Inventory Snapshots", _do_inventory)
 
@@ -424,7 +431,10 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
         nonlocal final_folder_result
         final_folder_result = package_output(
             ctx.cfg_for_run, ctx.sales_cfg, ctx.parquet_dims, ctx.fact_out,
-            order_id_int64=order_id_int64, manifest=sales_manifest)
+            order_id_int64=order_id_int64,
+            manifest=sales_manifest,
+            inventory_artifacts=inventory_artifacts,
+        )
 
         # PBIP templates now live under:
         #   samples/powerbi/templates/{csv|parquet}/{Sales|Orders|Sales and Orders}
@@ -442,7 +452,13 @@ def run_sales_pipeline(sales_cfg, fact_out, parquet_dims, cfg, *, force_regenera
         from src.engine.quality_report import generate_quality_report
 
         def _do_report():
+            metric_started = time.perf_counter()
             generate_quality_report(final_folder_result, cfg=ctx.cfg)
+            log_write_metric(
+                "quality_report",
+                elapsed_seconds=time.perf_counter() - metric_started,
+                output_paths=[final_folder_result / "data_quality_report.html"],
+            )
 
         _run_step("Quality Report", _do_report)
 

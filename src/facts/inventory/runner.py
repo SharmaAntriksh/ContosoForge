@@ -5,13 +5,11 @@ Uses the InventoryAccumulator that was populated during sales generation.
 
 For large datasets (many product-warehouse pairs), partitions demand by
 warehouse groups and runs the simulation in parallel across multiple
-processes.  Each worker writes its own chunk files directly (CSV +
-parquet), avoiding the need to build a single massive DataFrame in one
-process.
+processes. Each worker writes the requested staging/final chunk format
+directly, avoiding both cross-process DataFrame transfer and unused artifacts.
 
-After parallel chunks are written, they are merged into a single Parquet
-file (like Sales).  For deltaparquet mode, chunks are consolidated into a
-Delta Lake table partitioned by Year + Month.
+Parquet chunks retain the compatibility single-file merge. Delta streams those
+chunks into one partitioned transaction; CSV worker chunks are final.
 """
 from __future__ import annotations
 
@@ -32,7 +30,12 @@ from src.facts.shared.writers import write_fact_table
 
 from .accumulator import InventoryAccumulator
 from .engine import load_inventory_config, compute_inventory_snapshots, InventoryConfig, _load_product_attrs
-from .worker import _inventory_worker_task, _cast_snapshot_date, _prepare_csv as _prepare_inventory_csv
+from .worker import (
+    _INVENTORY_CSV_COLUMNS,
+    _INVENTORY_CSV_INT_COLS,
+    _inventory_worker_task,
+    _cast_snapshot_date,
+)
 from src.defaults import INVENTORY_PARALLEL_THRESHOLD as _PARALLEL_THRESHOLD, FACT_MAX_PARALLEL_CHUNKS
 
 
@@ -286,8 +289,6 @@ def run_inventory_pipeline(
         # Write updated ABC back to product_profile so Power BI sees it
         _update_product_profile_abc(parquet_dims, product_attrs_arrays)
 
-    csv_chunk_size = int(getattr(icfg, "write_chunk_rows", 2_000_000))
-
     if qualified_pairs >= _PARALLEL_THRESHOLD and n_warehouses >= 2:
         result = _run_parallel(
             demand, parquet_dims, icfg, inv_out, file_format, n_warehouses,
@@ -298,7 +299,6 @@ def run_inventory_pipeline(
             partition_by=partition_by,
             product_attrs_arrays=product_attrs_arrays,
             compression=compression,
-            csv_chunk_size=csv_chunk_size,
         )
     else:
         result = _run_single(demand, parquet_dims, icfg, inv_out, file_format, partition_by=partition_by,
@@ -339,7 +339,14 @@ def _run_single(
         product_attrs_arrays=product_attrs_arrays,
     )
 
-    _write_inventory(snapshots, inv_out, "inventory_snapshot", file_format, partition_by=partition_by)
+    artifacts = _write_inventory(
+        snapshots,
+        inv_out,
+        "inventory_snapshot",
+        file_format,
+        partition_by=partition_by,
+        csv_chunk_size=icfg.write_chunk_rows,
+    )
 
     # For deltaparquet the delta table is written outside inv_out;
     # remove the empty temporary directory.
@@ -359,6 +366,7 @@ def _run_single(
         "rows": n_rows,
         "product_warehouse_pairs": n_pairs,
         "stockout_pct": round(stockout_pct, 2),
+        "artifacts": artifacts,
     }
 
 
@@ -402,7 +410,6 @@ def _run_parallel(
     partition_by: Optional[List[str]] = None,
     product_attrs_arrays: Optional[Dict[str, np.ndarray]] = None,
     compression: str = "snappy",
-    csv_chunk_size: int = 2_000_000,
 ) -> Dict[str, Any]:
     """Partition by warehouse groups and run simulation in parallel."""
     from src.utils.pool import PoolRunSpec, iter_imap_unordered
@@ -452,6 +459,7 @@ def _run_parallel(
     total_rows = 0
     total_stockout = 0
     completed = 0
+    created_files: list[str] = []
 
     for result in iter_imap_unordered(
         tasks=tasks,
@@ -461,6 +469,7 @@ def _run_parallel(
         completed += 1
         total_rows += result["rows"]
         total_stockout += result["stockout_sum"]
+        created_files.extend(str(path) for path in result.get("files", []))
 
     work(f"{completed}/{n_chunks} inventory chunks completed ({total_rows:,} total rows)")
 
@@ -469,8 +478,9 @@ def _run_parallel(
         stockout_pct = total_stockout / total_rows * 100
 
     # ------------------------------------------------------------------
-    # Post-processing: merge chunk parquets into a single file, or
-    # consolidate into a Delta Lake table with Year+Month partitioning.
+    # Post-processing: CSV worker chunks are already final artifacts. Parquet
+    # is merged to the compatibility single-file layout, while Delta streams
+    # the Parquet staging chunks into one transaction.
     # ------------------------------------------------------------------
     if total_rows > 0:
         chunk_files = sorted(inv_out.glob("inventory_chunk_*.parquet"))
@@ -487,17 +497,13 @@ def _run_parallel(
                 inv_out.rmdir()
             except OSError:
                 pass
-        elif merge_enabled and file_format in ("parquet", "csv"):
+        elif merge_enabled and file_format == "parquet":
             _merge_inventory_chunks(
                 chunk_files=chunk_files,
                 merged_path=inv_out / merge_file,
                 delete_chunks=delete_chunks,
                 compression=compression,
             )
-            # Merge CSV chunks into fewer files so the packager and
-            # SQL import see a handful of BULK INSERTs instead of N small ones.
-            if file_format == "csv":
-                _merge_csv_chunks(inv_out, chunk_size=csv_chunk_size, delete_chunks=delete_chunks)
 
     n_pairs = demand.groupby(["ProductKey", "WarehouseKey"]).ngroups
     return {
@@ -505,6 +511,7 @@ def _run_parallel(
         "product_warehouse_pairs": n_pairs,
         "stockout_pct": round(stockout_pct, 2),
         "chunks": completed,
+        "artifacts": sorted(created_files) if file_format == "csv" else [],
     }
 
 
@@ -517,11 +524,10 @@ def _add_year_month_to_table(table: pa.Table) -> pa.Table:
     import pyarrow.compute as pc
 
     dates = table.column("SnapshotDate")
-    year = pc.year(dates).cast(pa.int16())
-    month = pc.month(dates).cast(pa.int8())
-
-    table = table.append_column("Year", year)
-    table = table.append_column("Month", month)
+    if "Year" not in table.column_names:
+        table = table.append_column("Year", pc.year(dates).cast(pa.int16()))
+    if "Month" not in table.column_names:
+        table = table.append_column("Month", pc.month(dates).cast(pa.int8()))
     return table
 
 
@@ -576,72 +582,6 @@ def _merge_inventory_chunks(
     done(f"Merged chunks: {merged_path.name}")
 
 
-def _merge_csv_chunks(
-    inv_out: Path,
-    chunk_size: int = 2_000_000,
-    delete_chunks: bool = True,
-) -> None:
-    """Re-chunk inventory CSV files to respect the configured chunk_size.
-
-    Reads all inventory_chunk_*.csv files and writes merged output files
-    of up to *chunk_size* data rows each.  A single file is named
-    ``inventory_snapshot.csv``; multiple files are named
-    ``inventory_snapshot_00000.csv``, etc.
-    """
-    csv_chunks = sorted(inv_out.glob("inventory_chunk_*.csv"))
-    if len(csv_chunks) <= 1:
-        return
-
-    # Read header from first chunk
-    with open(csv_chunks[0], "r", encoding="utf-8") as f:
-        header = f.readline()
-
-    out_files: list[Path] = []
-    out_f = None
-    rows_in_current = 0
-    file_idx = 0
-
-    def _open_next():
-        nonlocal out_f, rows_in_current, file_idx
-        if out_f is not None:
-            out_f.close()
-        path = inv_out / f"inventory_snapshot_{file_idx:05d}.csv"
-        out_files.append(path)
-        out_f = open(path, "w", newline="", encoding="utf-8")
-        out_f.write(header)
-        rows_in_current = 0
-        file_idx += 1
-
-    try:
-        _open_next()
-        for chunk_path in csv_chunks:
-            with open(chunk_path, "r", encoding="utf-8") as in_f:
-                next(in_f, None)  # skip header
-                for line in in_f:
-                    if rows_in_current >= chunk_size:
-                        _open_next()
-                    out_f.write(line)
-                    rows_in_current += 1
-    finally:
-        if out_f is not None:
-            out_f.close()
-
-    # If only one output file, rename to the non-numbered name
-    if len(out_files) == 1:
-        single = inv_out / "inventory_snapshot.csv"
-        out_files[0].rename(single)
-        out_files = [single]
-
-    if delete_chunks:
-        for f in csv_chunks:
-            try:
-                f.unlink()
-            except OSError:
-                pass
-
-    info(f"Merged {len(csv_chunks)} CSV chunks into {len(out_files)} file(s)")
-
-
 def _merge_chunks_to_delta(
     chunk_files: list[Path],
     inv_out: Path,
@@ -650,10 +590,9 @@ def _merge_chunks_to_delta(
 ) -> None:
     """Consolidate inventory chunk parquets into a partitioned Delta Lake table.
 
-    Concatenates the parts and writes them in ONE overwrite commit. The previous
-    overwrite-then-append-per-part loop paid Delta's full-state log replay on
-    every part (O(N^2) in the number of parts) and scattered tiny files; a single
-    commit produces one log entry and lets delta-rs size the output files.
+    Streams Parquet batches into ONE overwrite commit. This keeps peak memory
+    bounded to a batch instead of materialising every chunk and a second
+    concatenated table, while still producing one coherent Delta transaction.
     """
     if not chunk_files:
         return
@@ -667,27 +606,50 @@ def _merge_chunks_to_delta(
     delta_dir.mkdir(parents=True, exist_ok=True)
 
     needs_year_month = any(c in partition_by for c in ("Year", "Month"))
+    ordered_chunks = sorted(chunk_files)
+    source_schema = pq.ParquetFile(str(ordered_chunks[0])).schema_arrow
+    fields = list(source_schema)
+    names = set(source_schema.names)
+    if needs_year_month and "Year" not in names:
+        fields.append(pa.field("Year", pa.int16()))
+    if needs_year_month and "Month" not in names:
+        fields.append(pa.field("Month", pa.int8()))
+    target_schema = pa.schema(fields, metadata=source_schema.metadata)
 
-    tables = []
-    for chunk_path in sorted(chunk_files):
-        table = pq.read_table(str(chunk_path))
-        if needs_year_month and "Year" not in table.column_names:
-            table = _add_year_month_to_table(table)
-        tables.append(table)
+    def _batch_stream():
+        for chunk_path in ordered_chunks:
+            parquet_file = pq.ParquetFile(str(chunk_path))
+            for batch in parquet_file.iter_batches(batch_size=500_000):
+                table = pa.Table.from_batches([batch])
+                if needs_year_month:
+                    table = _add_year_month_to_table(table)
+                for output_batch in table.to_batches():
+                    if not output_batch.schema.equals(target_schema):
+                        output_batch = pa.record_batch(
+                            output_batch.columns, schema=target_schema
+                        )
+                    yield output_batch
 
-    merged = pa.concat_tables(tables, promote_options="default")
-    del tables
-
-    # Validate partition cols against actual schema
-    pcols = [c for c in partition_by if c in merged.column_names]
-
-    write_deltalake(
-        str(delta_dir),
-        merged,
-        mode="overwrite",
-        partition_by=pcols if pcols else None,
-    )
-    del merged
+    # Validate partition cols against the streamed schema. Rebuild the reader
+    # for the compatibility retry because RecordBatchReader is single-use.
+    pcols = [c for c in partition_by if c in target_schema.names]
+    last_type_error: Optional[TypeError] = None
+    for extra in ({"target_file_size": 256 * 1024 * 1024}, {}):
+        reader = pa.RecordBatchReader.from_batches(target_schema, _batch_stream())
+        try:
+            write_deltalake(
+                str(delta_dir),
+                reader,
+                mode="overwrite",
+                partition_by=pcols if pcols else None,
+                **extra,
+            )
+            last_type_error = None
+            break
+        except TypeError as exc:
+            last_type_error = exc
+    if last_type_error is not None:
+        raise last_type_error
 
     info(f"[DELTA] Wrote {len(chunk_files)} parts (Arrow -> Delta, single commit) table=InventorySnapshot")
 
@@ -709,7 +671,8 @@ def _write_inventory(
     name: str,
     file_format: str,
     partition_by: Optional[List[str]] = None,
-) -> None:
+    csv_chunk_size: Optional[int] = None,
+) -> list[str]:
     """Write an inventory DataFrame in the requested format."""
     if file_format == "deltaparquet":
         # Inventory-specific: partition by Year/Month for Delta Lake
@@ -736,13 +699,29 @@ def _write_inventory(
             f"Wrote {name}: {len(df):,} rows -> {short_path(delta_dir)}/"
             + (f" (partitioned by {pcols})" if pcols else "")
         )
-        return
+        return []
 
     if file_format == "csv":
-        write_fact_table(df, out_dir, name, file_format,
-                         csv_prep_fn=_prepare_inventory_csv)
+        write_fact_table(
+            df,
+            out_dir,
+            name,
+            file_format,
+            csv_columns=_INVENTORY_CSV_COLUMNS,
+            csv_int_columns=_INVENTORY_CSV_INT_COLS,
+            csv_fill_null_ints=True,
+            csv_chunk_size=csv_chunk_size,
+        )
+        chunk_rows = max(1, int(csv_chunk_size or len(df) or 1))
+        if len(df) > chunk_rows:
+            count = (len(df) + chunk_rows - 1) // chunk_rows
+            return [
+                str(out_dir / f"{name}_{idx:05d}.csv")
+                for idx in range(count)
+            ]
+        return [str(out_dir / f"{name}.csv")]
     else:
         table = pa.Table.from_pandas(df, preserve_index=False)
         table = _cast_snapshot_date(table)
-        write_fact_table(table, out_dir, name, file_format,
-                         csv_prep_fn=_prepare_inventory_csv)
+        write_fact_table(table, out_dir, name, file_format)
+        return []

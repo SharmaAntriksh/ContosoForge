@@ -1,4 +1,3 @@
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -8,6 +7,7 @@ from src.utils.logging_utils import info, done
 from src.facts.sales.output_paths import TABLE_SALES
 
 from .paths import table_dir_name
+from .artifact_transfer import transfer_file
 
 
 def resolve_csv_table_dir(fact_out: Path, table: str) -> Optional[Path]:
@@ -53,7 +53,8 @@ def _manifest_csv_dir(manifest, table: str) -> Optional[Path]:
     return None
 
 
-def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str], manifest=None) -> None:
+def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str], manifest=None,
+                   promote: bool = False) -> None:
     """
     Copy CSV fact chunk files into the packaged facts folder.
 
@@ -67,7 +68,6 @@ def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str], manife
       - 1 INFO line with totals + per-table counts
       - 1 DONE line with total copied
     """
-    copied_files = 0
     missing_dirs: list[str] = []
 
     multi_table = len(tables) > 1
@@ -133,14 +133,14 @@ def copy_csv_facts(*, fact_out: Path, facts_out: Path, tables: list[str], manife
             copy_pairs.append((f, target))
 
     # Parallel copy (IO-bound, benefits from threading)
-    def _copy(pair: tuple[Path, Path]) -> None:
-        shutil.copy2(pair[0], pair[1])
+    def _copy(pair: tuple[Path, Path]) -> bool:
+        return transfer_file(pair[0], pair[1], promote=promote)
 
     if len(copy_pairs) > 4:
         with ThreadPoolExecutor(max_workers=min(8, len(copy_pairs))) as pool:
-            list(pool.map(_copy, copy_pairs))
+            promoted = sum(pool.map(_copy, copy_pairs))
     else:
-        for pair in copy_pairs:
-            _copy(pair)
+        promoted = sum(_copy(pair) for pair in copy_pairs)
 
-    done(f"Copied {len(copy_pairs)} CSV fact file(s).")
+    action = f"; promoted {promoted}" if promote else ""
+    done(f"Packaged {len(copy_pairs)} CSV fact file(s){action}.")

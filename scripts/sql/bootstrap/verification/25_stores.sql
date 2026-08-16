@@ -104,9 +104,10 @@ BEGIN
         DECLARE @count_mismatch INT;
         SELECT @count_mismatch = COUNT(*) FROM dbo.Stores s
         LEFT JOIN (
-            SELECT StoreKey, COUNT(*) AS Cnt FROM dbo.Employees
-            WHERE StoreKey IS NOT NULL AND StoreKey > 0 AND IsActive = 1 GROUP BY StoreKey
-        ) e ON e.StoreKey = s.StoreKey
+            SELECT HomeStoreKey, COUNT(*) AS Cnt FROM dbo.Employees
+            WHERE HomeStoreKey IS NOT NULL AND HomeStoreKey > 0 AND IsActive = 1
+            GROUP BY HomeStoreKey
+        ) e ON e.HomeStoreKey = s.StoreKey
         WHERE s.Status = 'Open'
           AND ABS(s.EmployeeCount - ISNULL(e.Cnt, 0)) > 0;
         INSERT INTO #R VALUES ('Referential', 'EmployeeCount matches actual',
@@ -114,15 +115,26 @@ BEGIN
             CASE WHEN @count_mismatch = 0 THEN 'PASS' ELSE 'FAIL' END,
             CAST(@count_mismatch AS VARCHAR) + ' mismatched');
 
-        -- Closed stores have no active employees
-        DECLARE @closed_active INT;
-        SELECT @closed_active = COUNT(DISTINCT s.StoreKey) FROM dbo.Stores s
-        JOIN dbo.Employees e ON e.StoreKey = s.StoreKey AND e.IsActive = 1
-        WHERE s.Status = 'Closed';
-        INSERT INTO #R VALUES ('Referential', 'Closed stores have no active staff',
-            'No active employees should be assigned to closed stores',
-            CASE WHEN @closed_active = 0 THEN 'PASS' ELSE 'FAIL' END,
-            CAST(@closed_active AS VARCHAR) + ' closed stores with active staff');
+        -- Closed stores have no active current assignments. HomeStoreKey is an
+        -- immutable origin attribute, so current location comes from the bridge.
+        IF OBJECT_ID(N'dbo.EmployeeStoreAssignments', N'U') IS NOT NULL
+        BEGIN
+            DECLARE @closed_active INT;
+            SELECT @closed_active = COUNT(DISTINCT s.StoreKey)
+            FROM dbo.Stores s
+            JOIN dbo.EmployeeStoreAssignments esa
+              ON esa.StoreKey = s.StoreKey
+             AND esa.IsCurrentAssignment = 1
+             AND esa.AssignmentStatus = 'Active'
+            JOIN dbo.Employees e
+              ON e.EmployeeKey = esa.EmployeeKey
+             AND e.IsActive = 1
+            WHERE s.Status = 'Closed';
+            INSERT INTO #R VALUES ('Referential', 'Closed stores have no active staff',
+                'No active current assignment should target a closed store',
+                CASE WHEN @closed_active = 0 THEN 'PASS' ELSE 'FAIL' END,
+                CAST(@closed_active AS VARCHAR) + ' closed stores with active staff');
+        END
     END
 
     -- Geography FK

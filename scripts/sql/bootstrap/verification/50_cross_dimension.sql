@@ -85,7 +85,7 @@ BEGIN
         DECLARE @no_asgn INT;
         SELECT @no_asgn = COUNT(*) FROM dbo.Employees e
         LEFT JOIN dbo.EmployeeStoreAssignments a ON a.EmployeeKey = e.EmployeeKey
-        WHERE e.IsActive = 1 AND e.StoreKey > 0 AND a.EmployeeKey IS NULL;
+        WHERE e.IsActive = 1 AND e.HomeStoreKey > 0 AND a.EmployeeKey IS NULL;
         INSERT INTO #R VALUES ('Referential', 'Active employees have assignments',
             'Every active store-level employee should have at least one assignment',
             CASE WHEN @no_asgn = 0 THEN 'PASS' ELSE 'FAIL' END,

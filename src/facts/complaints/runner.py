@@ -992,9 +992,15 @@ def _prepare_complaints_csv(df: pd.DataFrame) -> pd.DataFrame:
 def _write_complaints(table: pa.Table, complaints_dir: Path, file_format: str,
                       csv_chunk_size: Optional[int] = None) -> None:
     """Write complaints table in the requested format (parquet, csv, or delta)."""
-    write_fact_table(table, complaints_dir, "complaints", file_format,
-                     csv_prep_fn=_prepare_complaints_csv,
-                     csv_chunk_size=csv_chunk_size)
+    write_fact_table(
+        table,
+        complaints_dir,
+        "complaints",
+        file_format,
+        csv_columns=_COMPLAINTS_CSV_COLUMNS,
+        csv_int_columns=_COMPLAINTS_CSV_INT_COLS,
+        csv_chunk_size=csv_chunk_size,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -543,6 +543,34 @@ class TestMergeParquetFiles:
         result = merge_parquet_files([], str(merged), log=False)
         assert result is None
 
+    def test_authoritative_schema_skips_discovery_pass(self, tmp_path, monkeypatch):
+        from src.facts.sales.sales_writer import parquet_merge as pm
+
+        schema = pa.schema([pa.field("value", pa.int32())])
+        chunk = tmp_path / "chunk.parquet"
+        merged = tmp_path / "merged.parquet"
+        _write_parquet(
+            chunk,
+            pa.Table.from_arrays(
+                [pa.array([1, 2], type=pa.int32())], schema=schema
+            ),
+        )
+
+        def discovery_must_not_run(*args, **kwargs):
+            raise AssertionError("authoritative schema was ignored")
+
+        monkeypatch.setattr(pm, "_pm_build_canonical_schema", discovery_must_not_run)
+        result = merge_parquet_files(
+            [str(chunk)],
+            str(merged),
+            canonical_schema=schema,
+            table_name="Returns",
+            log=False,
+        )
+
+        assert result is not None
+        assert pq.read_table(merged).to_pydict() == {"value": [1, 2]}
+
     def test_nonexistent_files_returns_none(self, tmp_path):
         merged = tmp_path / "out.parquet"
         result = merge_parquet_files(

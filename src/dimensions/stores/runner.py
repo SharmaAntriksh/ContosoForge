@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 from src.exceptions import DimensionError
-from src.utils.logging_utils import info, skip, stage, warn
+from src.utils.logging_utils import debug, skip, stage, warn
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning.version_store import should_regenerate, save_version
 from src.utils.name_pools import load_people_pools, resolve_people_folder
@@ -227,8 +227,8 @@ def run_stores(cfg: AppConfig, parquet_folder: Path) -> None:
             cast_all_datetime=False,
             compression="snappy",
         )
-        info(f"Warehouses written: {warehouses_path.name}")
+        debug(f"Warehouses written: {warehouses_path.name}")
 
     save_version("stores", version_cfg, out_path)
     save_version("warehouses", build_warehouse_version_cfg(cfg, df), warehouses_path)
-    info(f"Stores dimension written: {out_path.name}")
+    debug(f"Stores dimension written: {out_path.name}")

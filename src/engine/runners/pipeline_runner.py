@@ -18,7 +18,8 @@ from src.engine.config.config_loader import load_config, load_config_file
 from src.engine.runners.dimensions_runner import generate_dimensions
 from src.engine.runners.sales_runner import run_sales_pipeline
 from src.exceptions import ConfigError, PipelineError
-from src.utils.logging_utils import info, fail, fmt_sec
+from src.utils.logging_utils import debug, done, info, fail, fmt_sec
+from src.utils.write_metrics import artifact_stats, log_write_metric
 from src.utils.promotion_buckets import PROMOTION_BUCKET_KEYS, distribute_total
 
 
@@ -217,7 +218,7 @@ def run_pipeline(
         clean_scratch = bool(packaging_cfg.clean_scratch_fact_out)
 
         if reset_scratch:
-            info(f"Resetting fact output folder: {fact_out}")
+            debug(f"Resetting fact output folder: {fact_out}")
             if fact_out.exists():
                 try:
                     shutil.rmtree(fact_out)
@@ -228,7 +229,7 @@ def run_pipeline(
                     )
             fact_out.mkdir(parents=True, exist_ok=True)
         else:
-            info(f"Keeping existing fact_out folder (packaging.reset_scratch_fact_out=false): {fact_out}")
+            debug(f"Keeping existing fact_out folder (packaging.reset_scratch_fact_out=false): {fact_out}")
             fact_out.mkdir(parents=True, exist_ok=True)
 
         # ----------------------------
@@ -272,7 +273,9 @@ def run_pipeline(
         # Final cleanup (scratch)
         # ----------------------------
         if clean_scratch:
-            info(f"Cleaning scratch fact_out folder: {fact_out}")
+            debug(f"Cleaning scratch fact_out folder: {fact_out}")
+            cleanup_started = time.perf_counter()
+            cleanup_input_stats = artifact_stats([fact_out])
             try:
                 shutil.rmtree(fact_out)
             except OSError as e:
@@ -280,11 +283,17 @@ def run_pipeline(
                 logging.getLogger(__name__).warning(
                     "Could not fully remove %s: %s", fact_out, e
                 )
+            log_write_metric(
+                "scratch_cleanup",
+                elapsed_seconds=time.perf_counter() - cleanup_started,
+                input_stats=cleanup_input_stats,
+                output_paths=[fact_out],
+            )
         else:
-            info(f"Keeping scratch fact_out folder (packaging.clean_scratch_fact_out=false): {fact_out}")
+            debug(f"Keeping scratch fact_out folder (packaging.clean_scratch_fact_out=false): {fact_out}")
 
         elapsed = time.time() - start_ts
-        info(f"All pipelines completed in {fmt_sec(elapsed)}.")
+        done(f"All pipelines completed in {fmt_sec(elapsed)}.")
 
         return {
             "ok": True,

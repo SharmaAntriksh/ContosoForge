@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 
 from src.exceptions import ValidationError
@@ -288,6 +289,7 @@ def _write_bridge(
     g_start: pd.Timestamp,
     g_end: pd.Timestamp,
     out_path: Path,
+    file_format: str = "parquet",
     scd2_lookup: Optional[Tuple[np.ndarray, ...]] = None,
     product_key_to_idx: Optional[pd.Series] = None,
     product_start_ns: Optional[np.ndarray] = None,
@@ -359,24 +361,44 @@ def _write_bridge(
         out_price = prod_prices[out_prod_idx]
     out_dates_dt = out_date_ns.view("datetime64[ns]").astype("datetime64[ms]")
 
-    writer = pq.ParquetWriter(str(out_path), schema)
-    chunk = c.write_chunk_rows
-    for start in range(0, total_rows, chunk):
-        end = min(start + chunk, total_rows)
-        batch = pa.record_batch(
-            [
-                pa.array(out_wkey[start:end], type=pa.int64()),
-                pa.array(out_ckey[start:end], type=pa.int64()),
-                pa.array(out_pkey[start:end], type=pa.int64()),
-                pa.array(out_dates_dt[start:end], type=pa.date32()),
-                pa.array(out_priority[start:end], type=pa.string()),
-                pa.array(out_quantity[start:end], type=pa.int32()),
-                pa.array(out_price[start:end], type=pa.float64()),
-            ],
-            schema=schema,
-        )
-        writer.write_batch(batch)
-    writer.close()
+    def _batches():
+        chunk = c.write_chunk_rows
+        for start in range(0, total_rows, chunk):
+            end = min(start + chunk, total_rows)
+            yield pa.record_batch(
+                [
+                    pa.array(out_wkey[start:end], type=pa.int64()),
+                    pa.array(out_ckey[start:end], type=pa.int64()),
+                    pa.array(out_pkey[start:end], type=pa.int64()),
+                    pa.array(out_dates_dt[start:end], type=pa.date32()),
+                    pa.array(out_priority[start:end], type=pa.string()),
+                    pa.array(out_quantity[start:end], type=pa.int32()),
+                    pa.array(out_price[start:end], type=pa.float64()),
+                ],
+                schema=schema,
+            )
+
+    if file_format == "csv":
+        with pa_csv.CSVWriter(
+            str(out_path),
+            schema,
+            write_options=pa_csv.WriteOptions(
+                include_header=True, quoting_style="needed"
+            ),
+        ) as writer:
+            for batch in _batches():
+                writer.write_batch(batch)
+    elif file_format == "deltaparquet":
+        try:
+            from deltalake import write_deltalake
+        except ImportError:
+            from deltalake.writer import write_deltalake
+        reader = pa.RecordBatchReader.from_batches(schema, _batches())
+        write_deltalake(str(out_path), reader, mode="overwrite")
+    else:
+        with pq.ParquetWriter(str(out_path), schema) as writer:
+            for batch in _batches():
+                writer.write_batch(batch)
 
     return total_rows
 
@@ -464,16 +486,48 @@ def _merge_chunk_parquets(
     schema: pa.Schema,
     delete_chunks: bool = True,
 ) -> None:
-    """Concatenate chunk parquets in order into a single output parquet."""
-    writer = pq.ParquetWriter(str(out_path), schema)
-    for cp in sorted(chunk_paths):
-        tbl = pq.read_table(str(cp))
-        writer.write_table(tbl)
-    writer.close()
+    """Stream chunk parquets in order into a single output parquet."""
+    with pq.ParquetWriter(str(out_path), schema) as writer:
+        for cp in sorted(chunk_paths):
+            source = pq.ParquetFile(str(cp))
+            for batch in source.iter_batches(batch_size=250_000):
+                writer.write_batch(batch)
     if delete_chunks:
         for cp in chunk_paths:
             try:
                 cp.unlink()
+            except OSError:
+                pass
+
+
+def _write_chunk_parquets_to_delta(
+    chunk_paths: List[Path],
+    out_path: Path,
+    schema: pa.Schema,
+    delete_chunks: bool = True,
+) -> None:
+    """Stream wishlist Parquet parts into one Delta overwrite transaction."""
+    try:
+        from deltalake import write_deltalake
+    except ImportError:
+        from deltalake.writer import write_deltalake
+
+    def _batches():
+        for chunk_path in sorted(chunk_paths):
+            source = pq.ParquetFile(str(chunk_path))
+            yield from source.iter_batches(batch_size=250_000)
+
+    reader = pa.RecordBatchReader.from_batches(schema, _batches())
+    write_deltalake(str(out_path), reader, mode="overwrite")
+    if delete_chunks:
+        for chunk_path in chunk_paths:
+            try:
+                chunk_path.unlink()
+            except OSError:
+                pass
+        if chunk_paths:
+            try:
+                chunk_paths[0].parent.rmdir()
             except OSError:
                 pass
         if chunk_paths:
@@ -492,6 +546,7 @@ def _run_parallel(
     g_start: pd.Timestamp,
     g_end: pd.Timestamp,
     out_path: Path,
+    file_format: str = "parquet",
     workers: Optional[int] = None,
     scd2_lookup: Optional[Tuple[np.ndarray, ...]] = None,
     product_key_to_idx: Optional[pd.Series] = None,
@@ -584,7 +639,10 @@ def _run_parallel(
 
     tasks = []
     for idx, (pdata, pmap) in enumerate(zip(participant_chunks, chunk_purchased_maps)):
-        chunk_out = str(chunk_dir / f"wishlist_chunk_{idx:05d}.parquet")
+        if file_format == "csv":
+            chunk_out = str(out_path / f"customer_wishlists_{idx:05d}.csv")
+        else:
+            chunk_out = str(chunk_dir / f"wishlist_chunk_{idx:05d}.parquet")
         tasks.append((
             idx,
             c.seed,
@@ -594,6 +652,7 @@ def _run_parallel(
             pmap,
             config_scalars,
             chunk_out,
+            file_format,
         ))
 
     pool_spec = PoolRunSpec(
@@ -610,8 +669,17 @@ def _run_parallel(
     info(f"Wishlists: {completed}/{n_chunks} chunks done ({total_written:,} rows)")
 
     chunk_files = sorted(chunk_dir.glob("wishlist_chunk_*.parquet"))
-    if chunk_files:
+    if chunk_files and file_format == "parquet":
         _merge_chunk_parquets(chunk_files, out_path, bridge_schema(), delete_chunks=True)
+    elif chunk_files and file_format == "deltaparquet":
+        _write_chunk_parquets_to_delta(
+            chunk_files, out_path, bridge_schema(), delete_chunks=True
+        )
+    elif file_format == "csv":
+        try:
+            chunk_dir.rmdir()
+        except OSError:
+            pass
 
     return total_written
 
@@ -714,7 +782,12 @@ def run_wishlist_pipeline(
 
     wishlists_dir = fact_out / "customer_wishlists"
     wishlists_dir.mkdir(parents=True, exist_ok=True)
-    pq_path = wishlists_dir / "customer_wishlists.parquet"
+    if file_format == "csv":
+        output_path = wishlists_dir
+    elif file_format == "deltaparquet":
+        output_path = wishlists_dir
+    else:
+        output_path = wishlists_dir / "customer_wishlists.parquet"
 
     # Estimate total rows to decide serial vs parallel
     _rng_est = np.random.default_rng(c.seed)
@@ -738,7 +811,8 @@ def run_wishlist_pipeline(
             c=c,
             g_start=g_start,
             g_end=g_end,
-            out_path=pq_path,
+            out_path=output_path,
+            file_format=file_format,
             workers=_workers,
             scd2_lookup=scd2_lookup,
             product_key_to_idx=product_key_to_idx,
@@ -753,37 +827,15 @@ def run_wishlist_pipeline(
             c=c,
             g_start=g_start,
             g_end=g_end,
-            out_path=pq_path,
+            out_path=(
+                output_path / "customer_wishlists.csv"
+                if file_format == "csv" else output_path
+            ),
+            file_format=file_format,
             scd2_lookup=scd2_lookup,
             product_key_to_idx=product_key_to_idx,
             product_start_ns=product_start_ns,
         )
-
-    # Format-specific post-processing
-    if file_format == "csv" and n_rows > 0:
-        _csv_chunk = int(getattr(_sales_cfg, "chunk_size", 0)) if _sales_cfg else 0
-        df = pq.read_table(str(pq_path)).to_pandas()
-        pq_path.unlink()
-
-        # Force LF: the generated BULK INSERT uses ROWTERMINATOR='0x0a', but pandas
-        # to_csv defaults to CRLF on Windows (trailing \r breaks the last column).
-        if _csv_chunk and _csv_chunk > 0 and n_rows > _csv_chunk:
-            n_files = 0
-            for start in range(0, n_rows, _csv_chunk):
-                chunk_path = wishlists_dir / f"customer_wishlists_{n_files:05d}.csv"
-                df.iloc[start:start + _csv_chunk].to_csv(str(chunk_path), index=False, lineterminator="\n")
-                n_files += 1
-        else:
-            df.to_csv(str(wishlists_dir / "customer_wishlists.csv"), index=False, lineterminator="\n")
-
-    elif file_format == "deltaparquet" and n_rows > 0:
-        table = pq.read_table(str(pq_path))
-        try:
-            from deltalake import write_deltalake
-        except ImportError:
-            from deltalake.writer import write_deltalake
-        write_deltalake(str(wishlists_dir), table, mode="overwrite")
-        pq_path.unlink()
 
     info(f"Customer wishlists: {n_rows:,} rows")
 

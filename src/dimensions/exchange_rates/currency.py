@@ -10,7 +10,7 @@ from typing import List
 
 import pandas as pd
 
-from src.utils.logging_utils import info, skip, stage, warn
+from src.utils.logging_utils import debug, skip, stage, warn
 from src.utils.output_utils import write_parquet_with_date32
 from src.versioning.version_store import should_regenerate, save_version
 
@@ -120,4 +120,4 @@ def run_currency(cfg, parquet_folder: Path) -> None:
         )
 
     save_version("currency", version_cfg, out_path)
-    info(f"Currency dimension written: {out_path.name}")
+    debug(f"Currency dimension written: {out_path.name}")

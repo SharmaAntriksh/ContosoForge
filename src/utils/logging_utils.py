@@ -5,7 +5,6 @@ import sys
 import time
 import atexit
 import threading
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -60,7 +59,7 @@ def _shorten_path_in_msg(msg: Any) -> Any:
 ENABLE_COLORS = True          # Console colors (effective only if terminal supports)
 ENABLE_FILE_LOG = False       # Save logs to file
 LOG_FILE = "logs/generator.log"
-LOG_VERBOSITY = "normal"      # "normal" (all messages) or "quiet" (top-level + warnings only)
+LOG_VERBOSITY = "normal"      # "quiet" | "normal" | "verbose"
 
 COLORS = {
     "INFO":  "\033[94m",   # Blue
@@ -88,6 +87,7 @@ _LOG_FILE_PATH: Optional[Path] = None
 _INDENT = threading.local()
 _INDENT_STR = "  "
 _LAZY_STACK = threading.local()
+_SPINNER_FRAMES = ("-", "\\", "|", "/")
 
 
 def _indent_level() -> int:
@@ -114,6 +114,7 @@ def _activate_pending() -> None:
                 _write_to_file(line)
             _INDENT.level = saved
             s._activated = True
+            s._start_spinner()
             for buffered_line in s._skip_buffer:
                 if _should_emit("SKIP", depth=s._depth):
                     _flush(buffered_line)
@@ -129,16 +130,124 @@ def _is_tty() -> bool:
         return False
 
 
+class _QuietSpinner:
+    """Single-line stage indicator used only by quiet interactive terminals."""
+
+    def __init__(self) -> None:
+        self._active: list[tuple[object, str, float]] = []
+        self._frame_index = 0
+        self._rendered_width = 0
+        self._wake = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _enabled() -> bool:
+        return LOG_VERBOSITY == "quiet" and _is_tty()
+
+    def _ensure_worker_locked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="quiet-log-spinner",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            with _PRINT_LOCK:
+                active = bool(self._active) and self._enabled()
+            self._wake.wait(0.12 if active else None)
+            self._wake.clear()
+            with _PRINT_LOCK:
+                if self._active and self._enabled():
+                    self._render_locked()
+
+    def _render_locked(self) -> None:
+        if not self._active or not self._enabled():
+            return
+        _token, message, started = self._active[-1]
+        frame = _SPINNER_FRAMES[self._frame_index % len(_SPINNER_FRAMES)]
+        self._frame_index += 1
+        elapsed = max(0.0, time.time() - started)
+        text = f"  [{frame}] {message}  {elapsed:.0f}s"
+        width = max(self._rendered_width, len(text))
+        try:
+            sys.stdout.write("\r" + text.ljust(width))
+            sys.stdout.flush()
+            self._rendered_width = width
+        except (AttributeError, OSError, UnicodeError):
+            self._rendered_width = 0
+
+    def _clear_locked(self) -> None:
+        if not self._rendered_width:
+            return
+        try:
+            sys.stdout.write("\r" + (" " * self._rendered_width) + "\r")
+            sys.stdout.flush()
+        except (AttributeError, OSError, UnicodeError):
+            pass
+        self._rendered_width = 0
+
+    def push(self, token: object, message: str) -> bool:
+        if not self._enabled():
+            return False
+        with _PRINT_LOCK:
+            self._clear_locked()
+            self._active.append((token, str(message), time.time()))
+            self._frame_index = 0
+            self._ensure_worker_locked()
+            self._render_locked()
+            self._wake.set()
+        return True
+
+    def pop(self, token: object) -> None:
+        with _PRINT_LOCK:
+            match = next(
+                (i for i, (active_token, _msg, _started) in enumerate(self._active)
+                 if active_token is token),
+                None,
+            )
+            if match is None:
+                return
+            self._clear_locked()
+            self._active.pop(match)
+            self._frame_index = 0
+            if self._active and self._enabled():
+                self._render_locked()
+            self._wake.set()
+
+    def refresh(self) -> None:
+        """Clear or redraw after runtime verbosity changes."""
+        with _PRINT_LOCK:
+            self._clear_locked()
+            if self._active and self._enabled():
+                self._ensure_worker_locked()
+                self._render_locked()
+            self._wake.set()
+
+
+_QUIET_SPINNER = _QuietSpinner()
+
+
 def _should_emit(level: str, depth: Optional[int] = None) -> bool:
     """Return True if a message at *level* and *depth* should print to console.
 
-    In ``quiet`` mode only top-level messages (depth 0) and WARN/FAIL are shown.
-    ``normal`` mode shows everything.
+    ``normal`` keeps operator-facing progress while suppressing ``WORK`` messages.
+    ``verbose`` shows every console-capable level.
+    ``quiet`` shows only top-level messages plus warnings and failures.
     """
-    if LOG_VERBOSITY == "normal":
-        return True
-    # quiet mode: always show warnings and failures
     if level in ("WARN", "FAIL"):
+        return True
+    if LOG_VERBOSITY == "verbose":
+        return True
+    if LOG_VERBOSITY == "normal":
+        if level == "WORK":
+            return False
+        if level == "INFO":
+            d = depth if depth is not None else _indent_level()
+            return d <= 1
         return True
     d = depth if depth is not None else _indent_level()
     return d == 0
@@ -168,8 +277,8 @@ def configure_logging(
     """
     Optional runtime configuration without touching import sites.
 
-    *verbosity* accepts ``"normal"`` (default, all messages) or ``"quiet"``
-    (only top-level stage messages, warnings, and failures).
+    *verbosity* accepts ``"normal"`` (concise progress), ``"verbose"``
+    (diagnostic detail), or ``"quiet"`` (top-level messages and problems only).
     """
     global ENABLE_COLORS, ENABLE_FILE_LOG, LOG_FILE, LOG_VERBOSITY
     global _LOG_FILE_PATH, _LOG_DIR_READY, _LOG_FD
@@ -195,7 +304,14 @@ def configure_logging(
                 _LOG_FD = None
 
     if verbosity is not None:
-        LOG_VERBOSITY = verbosity
+        normalized = str(verbosity).strip().lower()
+        if normalized not in {"quiet", "normal", "verbose"}:
+            raise ValueError(
+                "verbosity must be one of: quiet, normal, verbose"
+            )
+        LOG_VERBOSITY = normalized
+
+    _QUIET_SPINNER.refresh()
 
 
 def fmt_sec(sec: float) -> str:
@@ -287,8 +403,10 @@ def _flush(line: str) -> None:
     (expected), but each call flushes promptly.
     """
     with _PRINT_LOCK:
+        _QUIET_SPINNER._clear_locked()
         print(line, flush=True)
         _write_to_file(line)
+        _QUIET_SPINNER._render_locked()
 
 
 # ============================================================================
@@ -297,8 +415,8 @@ def _flush(line: str) -> None:
 def info(msg: Any) -> None:
     msg = _shorten_path_in_msg(msg)
     line = _line("INFO", msg)
+    _activate_pending()
     if _should_emit("INFO"):
-        _activate_pending()
         _flush(line)
     else:
         _write_to_file(line)
@@ -335,6 +453,7 @@ def skip(msg: Any) -> None:
 
 def done(msg: Any) -> None:
     line = _line("DONE", msg)
+    _activate_pending()
     if _should_emit("DONE"):
         _flush(line)
     else:
@@ -364,13 +483,24 @@ class stage:
         self._activated = not lazy
         self._depth = 0
         self._skip_buffer: list = []
+        self._spinner_started = False
         self.start: Optional[float] = None
+
+    def _start_spinner(self) -> None:
+        if not self._spinner_started:
+            self._spinner_started = _QUIET_SPINNER.push(self, self.msg)
+
+    def _stop_spinner(self) -> None:
+        if self._spinner_started:
+            _QUIET_SPINNER.pop(self)
+            self._spinner_started = False
 
     def __enter__(self) -> "stage":
         self.start = time.time()
         self._depth = _indent_level()
         if not self._lazy:
             info(self.msg)
+            self._start_spinner()
         stack = getattr(_LAZY_STACK, "stack", None)
         if stack is None:
             _LAZY_STACK.stack = []
@@ -384,6 +514,7 @@ class stage:
         stack = getattr(_LAZY_STACK, "stack", [])
         if stack and stack[-1] is self:
             stack.pop()
+        self._stop_spinner()
         elapsed = fmt_sec(time.time() - (self.start or time.time()))
         if exc_type is not None:
             if not self._activated:
@@ -404,7 +535,7 @@ class stage:
 # ============================================================================
 def work(msg: str = "", *, outfile: Any = None, **_ignore: Any) -> None:
     """
-    WORK logger (multiprocessing-safe).
+    Verbose WORK logger (multiprocessing-safe).
 
     - Message is authoritative
     - If msg is empty and outfile is provided, log outfile name
@@ -421,8 +552,8 @@ def work(msg: str = "", *, outfile: Any = None, **_ignore: Any) -> None:
         final = ""
 
     line = _line("WORK", final)
+    _activate_pending()
     if _should_emit("WORK"):
-        _activate_pending()
         _flush(line)
     else:
         _write_to_file(line)

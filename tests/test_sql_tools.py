@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.tools.sql import sql_server_import as sql_server_import_module
 from src.tools.sql.sql_helpers import (
     sql_escape_literal,
     quote_ident,
@@ -887,3 +888,42 @@ class TestOrderNumberDDLPromotion:
         sql_false = self._facts_sql_flag(tmp_path / "b", _INT32_HALF + 1, order_id_int64=False)
         assert re.search(r"OrderNumber\W+INT\b", sql_false)
         assert not re.search(r"OrderNumber\W+BIGINT\b", sql_false)
+
+
+class TestVerificationConsoleOutput:
+    def test_success_details_are_summarized_but_failures_remain_visible(self, monkeypatch):
+        class _Cursor:
+            description = None
+
+            def __init__(self):
+                self.query = ""
+
+            def execute(self, query):
+                self.query = query
+                return self
+
+            def fetchone(self):
+                if "sys.procedures" in self.query:
+                    return (1,)
+                return (2, 1, 1, 0, "1 FAILED")
+
+            def fetchall(self):
+                return [
+                    ("Stores", "Domain", "good check", "good check", "PASS", "0 invalid"),
+                    ("Stores", "Domain", "bad check", "why it failed", "FAIL", "1 invalid"),
+                ]
+
+            def nextset(self):
+                return True
+
+        logs = []
+        monkeypatch.setattr(sql_server_import_module, "_log", lambda level, msg: logs.append((level, msg)))
+        monkeypatch.setattr(sql_server_import_module, "_drain_results", lambda cursor: None)
+
+        sql_server_import_module._run_verify(_Cursor())
+
+        rendered = "\n".join(msg for _level, msg in logs)
+        assert "good check" not in rendered
+        assert "bad check" in rendered
+        assert "why it failed" in rendered
+        assert "1 passed, 1 failed, 0 info" in rendered

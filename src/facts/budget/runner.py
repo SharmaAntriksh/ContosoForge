@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from src.utils.logging_utils import stage, info, done, short_path
+from src.utils.logging_utils import info
 from src.facts.shared.writers import write_fact_table
 
 from .accumulator import BudgetAccumulator
@@ -68,12 +68,22 @@ def run_budget_pipeline(
     budget_out = fact_out / "budget"
     budget_out.mkdir(parents=True, exist_ok=True)
 
-    write_fact_table(yearly, budget_out, "budget_yearly", file_format,
-                     csv_prep_fn=lambda df: _prepare_budget_csv(df, "budget_yearly"),
-                     csv_float_format="%.6f")
-    write_fact_table(monthly, budget_out, "budget_monthly", file_format,
-                     csv_prep_fn=lambda df: _prepare_budget_csv(df, "budget_monthly"),
-                     csv_float_format="%.6f")
+    write_fact_table(
+        yearly, budget_out, "budget_yearly", file_format,
+        csv_columns=_BUDGET_CSV_COLUMNS["budget_yearly"],
+        csv_int_columns=_BUDGET_CSV_INT_COLS,
+        csv_round=_BUDGET_CSV_ROUND,
+        csv_fill_null_ints=True,
+        csv_float_scale=6,
+    )
+    write_fact_table(
+        monthly, budget_out, "budget_monthly", file_format,
+        csv_columns=_BUDGET_CSV_COLUMNS["budget_monthly"],
+        csv_int_columns=_BUDGET_CSV_INT_COLS,
+        csv_round=_BUDGET_CSV_ROUND,
+        csv_fill_null_ints=True,
+        csv_float_scale=6,
+    )
 
     # For deltaparquet the delta tables are written outside budget_out;
     # remove the empty temporary directory.

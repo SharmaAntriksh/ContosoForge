@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, List, Optional, Sequence, TYPE_CHECKING, Union
 
@@ -9,6 +10,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 from src.exceptions import SalesError
+from src.utils.write_metrics import log_write_metric
 from .utils import _arrow, info, warn
 from .encoding import _validate_required
 from .projection import project_table_to_schema
@@ -305,6 +307,7 @@ def write_delta_from_parquet_parts(
 
     suffix = f" table={table_name}" if table_name else ""
     info(f"[DELTA] Writing {len(part_files)} parts (Arrow -> Delta, single commit){suffix}")
+    metric_started = time.perf_counter()
 
     write_delta_single_commit(
         part_files=part_files,
@@ -315,6 +318,23 @@ def write_delta_from_parquet_parts(
         sort_row_limit=sort_row_limit,
         write_deltalake=write_deltalake,
         pa=pa, pq=pq,
+    )
+
+    rows = 0
+    for part_file in part_files:
+        try:
+            metadata = pq.ParquetFile(part_file).metadata
+            rows += int(metadata.num_rows) if metadata is not None else 0
+        except (OSError, ValueError):
+            pass
+    log_write_metric(
+        "delta_commit",
+        elapsed_seconds=time.perf_counter() - metric_started,
+        input_paths=part_files,
+        output_paths=[delta_output_abs],
+        rows=rows,
+        codec="delta",
+        detail=f"table={table_name or 'unknown'},parts={len(part_files)}",
     )
 
     if cleanup_parts_folder and parts is None:

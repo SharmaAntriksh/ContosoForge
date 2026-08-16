@@ -34,3 +34,4 @@ class ChunkResult:
     chunk_idx: int
     outputs: Dict[str, ChunkRef] = field(default_factory=dict)
     aggs: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, float] = field(default_factory=dict)
