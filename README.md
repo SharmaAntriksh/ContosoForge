@@ -583,7 +583,6 @@ rebuild automatically while working; see the
 | Business models and trend presets | [Models guide](docs/MODELS_GUIDE.md) |
 | Pipeline architecture | [Pipeline flowchart](docs/PIPELINE_FLOWCHART.md) |
 | Parquet, Delta, and database operations | [Operations guides](docs/operations/) |
-| Web log retention and preview performance | [Web UI performance](docs/WEB_UI_PERFORMANCE.md) |
 
 ## License
 
