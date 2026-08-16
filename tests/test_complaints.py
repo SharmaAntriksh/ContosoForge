@@ -28,6 +28,7 @@ from src.facts.complaints.runner import (
     _GENERAL_TYPES_FLAT,
     _COMPLAINT_TYPES_ORDER,
     _COMPLAINT_TYPES_GENERAL,
+    _DELIVERY_ANCHORED_TYPES,
     _COMPLAINT_DETAILS,
 )
 
@@ -247,6 +248,8 @@ class TestBuildOrderLookup:
             "CustomerKey": np.array([1, 1, 2, 2, 3], dtype=np.int64),
             "OrderNumber": np.array([100, 101, 200, 201, 300], dtype=np.int64),
             "OrderLineNumber": np.array([1, 1, 1, 2, 1], dtype=np.int64),
+            "OrderDateNs": np.arange(5, dtype=np.int64),
+            "DeliveryDateNs": np.arange(5, dtype=np.int64) + 10,
         }
         lookup = _build_order_lookup(order_arrays)
         assert 1 in lookup
@@ -255,6 +258,8 @@ class TestBuildOrderLookup:
         assert len(lookup[1][0]) == 2  # customer 1 has 2 orders
         assert len(lookup[2][0]) == 2  # customer 2 has 2 orders
         assert len(lookup[3][0]) == 1  # customer 3 has 1 order
+        np.testing.assert_array_equal(lookup[1][2], [0, 1])
+        np.testing.assert_array_equal(lookup[1][3], [10, 11])
 
     def test_empty_arrays(self):
         order_arrays = {
@@ -380,9 +385,10 @@ class TestGenerateRowsBatch:
         assert np.all(result["date_ns"] >= g_start)
         assert np.all(result["date_ns"] <= g_end)
 
-    def test_linked_dates_follow_order_anchor_and_customer_lifecycle(self):
+    def test_linked_dates_follow_type_specific_anchor_and_customer_lifecycle(self):
         day = self.NS_PER_DAY
-        anchor = 100 * day
+        order_anchor = 100 * day
+        delivery_anchor = 110 * day
         result = _generate_rows_batch(
             np.random.default_rng(42),
             complainer_keys=np.array([1], dtype=np.int64),
@@ -390,7 +396,8 @@ class TestGenerateRowsBatch:
             cust_orders={1: (
                 np.array([500], dtype=np.int64),
                 np.array([1], dtype=np.int64),
-                np.array([anchor], dtype=np.int64),
+                np.array([order_anchor], dtype=np.int64),
+                np.array([delivery_anchor], dtype=np.int64),
             )},
             customer_bounds={1: (50 * day, 140 * day)},
             g_start_ns=0,
@@ -405,8 +412,51 @@ class TestGenerateRowsBatch:
 
         linked = result["so"] != -1
         assert linked.any()
-        assert np.all(result["date_ns"][linked] == anchor + 5 * day)
+        delivery_linked = linked & np.isin(
+            result["type"], tuple(_DELIVERY_ANCHORED_TYPES),
+        )
+        order_linked = linked & ~delivery_linked
+        assert delivery_linked.any()
+        assert np.all(
+            result["date_ns"][delivery_linked] == delivery_anchor + 5 * day
+        )
+        if order_linked.any():
+            assert np.all(
+                result["date_ns"][order_linked] == order_anchor + 5 * day
+            )
         assert np.all(result["date_ns"] >= 50 * day)
+        assert np.all(result["date_ns"] <= 140 * day)
+
+    def test_unobservable_delivery_event_is_not_linked(self):
+        day = self.NS_PER_DAY
+        result = _generate_rows_batch(
+            np.random.default_rng(42),
+            complainer_keys=np.array([1], dtype=np.int64),
+            complaints_per=np.array([100], dtype=np.int32),
+            cust_orders={1: (
+                np.array([1001], dtype=np.int64),
+                np.array([1], dtype=np.int64),
+                np.array([100 * day], dtype=np.int64),
+                np.array([150 * day], dtype=np.int64),
+            )},
+            customer_bounds={1: (50 * day, 140 * day)},
+            g_start_ns=0,
+            g_end_ns=200 * day,
+            event_end_ns=200 * day,
+            cfg=_ComplaintsCfg(
+                resolution_rate=0.0,
+                min_days_after_anchor=0,
+                max_days_after_anchor=0,
+            ),
+        )
+
+        linked = result["so"] >= 0
+        assert linked.any()
+        assert np.all(result["type"][linked] == "Billing Error")
+        delivery_issue = np.isin(
+            result["type"], tuple(_DELIVERY_ANCHORED_TYPES),
+        )
+        assert np.all(result["so"][delivery_issue] == -1)
         assert np.all(result["date_ns"] <= 140 * day)
 
         resolved = result["res_date_ns"] != -1

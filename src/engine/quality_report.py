@@ -96,6 +96,16 @@ class _TableCache:
             if col_key in self._partial:
                 return self._partial[col_key]
 
+            # Reuse a cached wider projection when it contains every requested
+            # column.  A projection is not the full table: treating it as one
+            # can silently hide columns from later analytical checks.
+            requested = set(columns)
+            for (partial_path, _), partial_df in self._partial.items():
+                if partial_path == key and requested.issubset(partial_df.columns):
+                    result = partial_df[columns]
+                    self._partial[col_key] = result
+                    return result
+
         # Load from disk
         df = _read_table_uncached(path, columns=columns)
         if df is None:
@@ -403,10 +413,7 @@ def _check_referential_integrity(
         if src_path is not None:
             # Combine FK cols + date cols for a single read
             all_cols = list(fk_cols) + _extra_cols_by_table.get(src_name, [])
-            _preloaded = cache.get(src_path, columns=all_cols)
-            if _preloaded is not None:
-                # Store as full so subsequent column-specific requests slice from it
-                cache.put_full(src_path, _preloaded)
+            cache.get(src_path, columns=all_cols)
 
     # Cache dimension PK unique values (small, reused across multiple FK checks)
     _dim_key_cache: Dict[str, np.ndarray] = {}
@@ -745,8 +752,14 @@ def _check_complaint_chronology(
     customers: Optional[pd.DataFrame] = None,
 ) -> None:
     """Check linked complaint causality, lifecycle, and response arithmetic."""
-    required_sales = ["OrderNumber", "OrderLineNumber", "OrderDate", "CustomerKey"]
-    required_complaints = ["OrderNumber", "LineNumber", "ComplaintDate", "CustomerKey"]
+    required_sales = [
+        "OrderNumber", "OrderLineNumber", "OrderDate", "DeliveryDate",
+        "CustomerKey",
+    ]
+    required_complaints = [
+        "OrderNumber", "LineNumber", "ComplaintDate", "ComplaintType",
+        "CustomerKey",
+    ]
     if not _has_columns(sales, required_sales) or not _has_columns(
         complaints, required_complaints):
         return
@@ -763,21 +776,32 @@ def _check_complaint_chronology(
     )
     complaint_dates = pd.to_datetime(joined["ComplaintDate"], errors="coerce")
     order_dates = pd.to_datetime(joined["OrderDate"], errors="coerce")
-    missing_anchor = int(order_dates.isna().sum())
-    before_sale = int((complaint_dates < order_dates).fillna(False).sum())
+    delivery_dates = pd.to_datetime(joined["DeliveryDate"], errors="coerce")
+    delivery_anchored_types = {
+        "Product Defect", "Wrong Item", "Late Delivery",
+        "Damaged In Transit", "Missing Parts",
+    }
+    delivery_anchored = joined["ComplaintType"].isin(delivery_anchored_types)
+    anchor_dates = order_dates.where(~delivery_anchored, delivery_dates)
+    missing_anchor = int(anchor_dates.isna().sum())
+    before_anchor = int((complaint_dates < anchor_dates).fillna(False).sum())
     customer_mismatch = int((
         joined["CustomerKey_complaint"].notna()
         & joined["CustomerKey_sale"].notna()
         & (joined["CustomerKey_complaint"] != joined["CustomerKey_sale"])
     ).sum())
-    chronology_passed = missing_anchor == 0 and before_sale == 0 and customer_mismatch == 0
+    chronology_passed = (
+        missing_anchor == 0
+        and before_anchor == 0
+        and customer_mismatch == 0
+    )
     report.checks.append(CheckResult(
         name="Complaint chronology (linked sale)",
         passed=chronology_passed,
         message=(
-            "All linked complaints occur on or after their sale"
+            "All linked complaints occur on or after their causal anchor"
             if chronology_passed else
-            f"{before_sale} before sale; {missing_anchor} missing anchor; "
+            f"{before_anchor} before causal anchor; {missing_anchor} missing anchor; "
             f"{customer_mismatch} customer mismatch(es)"
         ),
         category="Analytical Integrity",
@@ -829,6 +853,7 @@ def _check_subscription_lifecycle(
     customers: pd.DataFrame,
     *,
     global_end: Any = None,
+    trial_days: int = 14,
 ) -> None:
     """Check subscription billing periods against customer/global boundaries."""
     period_start_col = (
@@ -881,6 +906,37 @@ def _check_subscription_lifecycle(
             category="Analytical Integrity",
         ))
 
+    termination_cols = {
+        "SubscriptionKey", "TerminationReason", period_start_col, period_end_col,
+    }
+    if termination_cols.issubset(subscriptions.columns):
+        subscription_bounds = subscriptions.groupby(
+            "SubscriptionKey", as_index=False,
+        ).agg(
+            Start=(period_start_col, "min"),
+            End=(period_end_col, "max"),
+            TerminationReason=("TerminationReason", "last"),
+        )
+        observed_days = (
+            pd.to_datetime(subscription_bounds["End"], errors="coerce")
+            - pd.to_datetime(subscription_bounds["Start"], errors="coerce")
+        ).dt.days + 1
+        premature_nonconversion = (
+            subscription_bounds["TerminationReason"].eq("TrialNonConversion")
+            & (observed_days < max(1, int(trial_days)))
+        )
+        premature_count = int(premature_nonconversion.fillna(True).sum())
+        report.checks.append(CheckResult(
+            name="Subscription trial outcome is observed",
+            passed=premature_count == 0,
+            message=(
+                "All trial non-conversions occur after the full trial window"
+                if premature_count == 0 else
+                f"{premature_count} right-censored trial(s) labeled non-conversion"
+            ),
+            category="Analytical Integrity",
+        ))
+
 
 def _rank_correlation(left: pd.Series, right: pd.Series) -> float:
     """Compute Spearman-style rank correlation without a scipy dependency."""
@@ -894,6 +950,7 @@ def _check_promotion_alignment(
     sales: pd.DataFrame,
     promotions: pd.DataFrame,
     customers: Optional[pd.DataFrame] = None,
+    channels: Optional[pd.DataFrame] = None,
     *,
     min_rank_correlation: float = 0.5,
     new_customer_window_months: Optional[int] = None,
@@ -912,6 +969,10 @@ def _check_promotion_alignment(
         None,
     )
     promo_extra = [audience_col] if audience_col is not None else []
+    promo_extra.extend(
+        column for column in ["PromotionCategory", "StartDate", "EndDate"]
+        if column in promotions.columns and column not in promo_extra
+    )
     merged = sales.merge(
         promotions[promo_cols + promo_extra].drop_duplicates("PromotionKey"),
         on="PromotionKey",
@@ -942,6 +1003,57 @@ def _check_promotion_alignment(
         details=f"Required correlation >= {min_rank_correlation:.3f}",
         category="Analytical Integrity",
     ))
+
+    if _has_columns(sales, ["OrderDate"]) and _has_columns(
+        promotions, ["StartDate", "EndDate"]
+    ):
+        order_date = pd.to_datetime(merged["OrderDate"], errors="coerce")
+        start_date = pd.to_datetime(merged["StartDate"], errors="coerce")
+        end_date = pd.to_datetime(merged["EndDate"], errors="coerce")
+        invalid_date = (
+            start_date.isna()
+            | end_date.isna()
+            | (order_date < start_date)
+            | (order_date > end_date)
+        )
+        invalid_count = int(invalid_date.fillna(True).sum())
+        report.checks.append(CheckResult(
+            name="Promotion active-date eligibility",
+            passed=invalid_count == 0,
+            message=(
+                "All selected promotions are active on the sale date"
+                if invalid_count == 0 else f"{invalid_count} out-of-window sale(s)"
+            ),
+            category="Analytical Integrity",
+        ))
+
+    if (
+        channels is not None
+        and _has_columns(sales, ["ChannelKey"])
+        and _has_columns(promotions, ["PromotionCategory"])
+        and _has_columns(channels, ["ChannelKey", "IsPhysical", "IsDigital"])
+    ):
+        channel_aligned = merged.merge(
+            channels[["ChannelKey", "IsPhysical", "IsDigital"]]
+            .drop_duplicates("ChannelKey"),
+            on="ChannelKey",
+            how="left",
+        )
+        category = channel_aligned["PromotionCategory"].astype("string")
+        invalid_channel = (
+            (category.eq("Store") & ~channel_aligned["IsPhysical"].fillna(False))
+            | (category.eq("Online") & ~channel_aligned["IsDigital"].fillna(False))
+        )
+        invalid_count = int(invalid_channel.sum())
+        report.checks.append(CheckResult(
+            name="Promotion channel eligibility",
+            passed=invalid_count == 0,
+            message=(
+                "All Store/Online promotions match the sale channel group"
+                if invalid_count == 0 else f"{invalid_count} channel mismatch(es)"
+            ),
+            category="Analytical Integrity",
+        ))
 
     if (
         customers is not None
@@ -1165,8 +1277,8 @@ def _check_analytical_integrity(
     customers_path = _find_table(dims_folder, "customers")
     sales = _load_available_columns(cache, sales_path, [
         "OrderNumber", "OrderLineNumber", "CustomerKey", "ProductKey",
-        "OrderDate", "Quantity", "UnitPrice", "NetPrice", "DiscountAmount",
-        "PromotionKey",
+        "OrderDate", "DeliveryDate", "Quantity", "UnitPrice", "NetPrice",
+        "DiscountAmount", "PromotionKey", "ChannelKey",
     ])
     customers = _load_available_columns(cache, customers_path, [
         "CustomerKey", "CustomerStartDate", "CustomerEndDate", "LoyaltyTierKey",
@@ -1199,7 +1311,7 @@ def _check_analytical_integrity(
         _find_table(facts_folder, "complaints"),
         [
             "OrderNumber", "LineNumber", "CustomerKey", "ComplaintDate",
-            "ResolutionDate", "ResponseDays",
+            "ComplaintType", "ResolutionDate", "ResponseDays",
         ],
     )
     if complaints is not None:
@@ -1209,24 +1321,37 @@ def _check_analytical_integrity(
         cache,
         _find_table(dims_folder, "customer_subscriptions"),
         [
-            "CustomerKey", "PeriodStartDate", "PeriodEndDate", "PeriodStart",
-            "PeriodEnd",
+            "SubscriptionKey", "CustomerKey", "PeriodStartDate", "PeriodEndDate",
+            "PeriodStart", "PeriodEnd", "TerminationReason",
         ],
     )
     if subscriptions is not None and customers is not None:
         global_end = _config_value(cfg, "defaults", "dates", "end", default=None)
+        trial_days = _config_value(
+            cfg, "subscriptions", "trial_days", default=14,
+        )
         _check_subscription_lifecycle(
-            report, subscriptions, customers, global_end=global_end)
+            report,
+            subscriptions,
+            customers,
+            global_end=global_end,
+            trial_days=int(trial_days if trial_days is not None else 14),
+        )
 
     promotions = _load_available_columns(
         cache,
         _find_table(dims_folder, "promotions"),
         [
             "PromotionKey", "DiscountPct", "SeasonType", "PromotionType",
-            "PromotionName",
+            "PromotionName", "PromotionCategory", "StartDate", "EndDate",
         ],
     )
     if promotions is not None:
+        channels = _load_available_columns(
+            cache,
+            _find_table(dims_folder, "channels"),
+            ["ChannelKey", "IsPhysical", "IsDigital"],
+        )
         window = _config_value(
             cfg, "promotions", "new_customer_window_months", default=None)
         _check_promotion_alignment(
@@ -1234,6 +1359,7 @@ def _check_analytical_integrity(
             sales,
             promotions,
             customers,
+            channels,
             new_customer_window_months=window,
         )
 

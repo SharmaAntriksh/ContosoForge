@@ -152,7 +152,7 @@ Customer wishlist fact table. Generates product wishlists linked to customers.
 | Key | Description | Example |
 |-----|-------------|---------|
 | `wishlists.enabled` | Master toggle for wishlist generation. | `true` |
-| `wishlists.participation_rate` | Fraction of customers who have wishlists. | `0.35` |
+| `wishlists.participation_rate` | Fraction of customers who have wishlists. Participants are sampled independently of future purchases. | `0.35` |
 | `wishlists.avg_items` | Mean wishlist items per participating customer (Poisson lambda). Actual counts vary randomly. | `3.5` |
 | `wishlists.max_items` | Hard cap on wishlist items per customer. | `20` |
 | `wishlists.pre_browse_days` | How many days before a customer's start date they can begin wishlisting products. Simulates browsing before first purchase. | `90` |
@@ -174,6 +174,8 @@ Customer complaint fact table. Generates complaint/resolution records.
 | `complaints.max_complaints` | Maximum complaints per customer. | `5` |
 | `complaints.resolution_rate` | Fraction of complaints that reach a resolution. Remaining complaints stay open or get escalated. | `0.85` |
 | `complaints.escalation_rate` | Fraction of unresolved complaints that get escalated to management. The rest remain in "Open" status. | `0.10` |
+| `complaints.min_days_after_anchor` | Minimum lag after the causal event. Product/fulfillment issues use delivery date; billing issues use order date. | `0` |
+| `complaints.max_days_after_anchor` | Maximum lag after the same type-specific causal event. | `30` |
 | `complaints.avg_response_days` | Mean days to resolve a complaint (exponential distribution). | `5` |
 | `complaints.max_response_days` | Hard cap on resolution time in days. | `30` |
 | `complaints.seed` | Random seed for complaint generation. | `600` |
@@ -194,6 +196,7 @@ Customer subscription bridge table for DAX many-to-many patterns.
 | `subscriptions.churn_rate` | Fraction of subscriptions that are cancelled before their natural expiry date. | `0.25` |
 | `subscriptions.trial_rate` | Fraction of new subscriptions that start with a free trial period. | `0.30` |
 | `subscriptions.trial_conversion_rate` | Fraction of trial users who convert to a paid subscription after the trial ends. | `0.85` |
+| `subscriptions.trial_days` | Inclusive free-trial window. Non-conversion is emitted only when the full window is observable; otherwise the trial is right-censored. | `14` |
 | `subscriptions.seed` | Random seed for subscription generation. | `700` |
 
 ---

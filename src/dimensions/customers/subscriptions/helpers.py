@@ -477,7 +477,10 @@ def generate_subscriptions_bulk(
     observable_end_ns = np.minimum(hi_ns, np.int64(g_end_ns))
     churn_ok = is_churned & converts & (end_ns <= observable_end_ns)
     cancel_ns[churn_ok] = end_ns[churn_ok]
-    has_cancel = cancel_ns >= 0
+    # A scheduled cancellation is an observed outcome only when it falls inside
+    # the customer/global observation window. Trials whose decision date lies
+    # beyond that boundary are right-censored, not failed conversions.
+    has_cancel = (cancel_ns >= 0) & (cancel_ns <= observable_end_ns)
 
     effective_end_ns = np.minimum(observable_end_ns, np.where(
         has_cancel, cancel_ns, observable_end_ns,
@@ -488,7 +491,8 @@ def generate_subscriptions_bulk(
     lifecycle_end = (~has_cancel) & (hi_ns < np.int64(g_end_ns))
     termination_reason[lifecycle_end] = "CustomerLifecycleEnd"
     termination_reason[churn_ok] = "VoluntaryChurn"
-    termination_reason[no_convert] = "TrialNonConversion"
+    observed_no_convert = no_convert & has_cancel
+    termination_reason[observed_no_convert] = "TrialNonConversion"
 
     # RNG consumption for payment method (maintain stream compatibility)
     rng.choice(len(PAYMENT_METHODS), size=total_subs, p=_PAYMENT_WEIGHTS)

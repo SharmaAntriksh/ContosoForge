@@ -43,6 +43,14 @@ _COMPLAINT_TYPES_GENERAL = [
     "Billing Error",
 ]
 
+_DELIVERY_ANCHORED_TYPES = frozenset({
+    "Product Defect",
+    "Wrong Item",
+    "Late Delivery",
+    "Damaged In Transit",
+    "Missing Parts",
+})
+
 _COMPLAINT_DETAILS: Dict[str, list] = {
     "Product Defect": [
         "Item stopped working after a few uses",
@@ -158,7 +166,8 @@ def _generate_rows_batch(
     """Fully vectorized complaint generation — no Python row loop.
 
     Args:
-        cust_orders: {customer_key: (so_array, ln_array)} — numpy tuple format.
+        cust_orders: Mapping of CustomerKey to arrays for order number, line
+            number, order-date nanoseconds, and delivery-date nanoseconds.
     """
     n_complainers = len(complainer_keys)
     total_rows = int(complaints_per.sum())
@@ -180,18 +189,22 @@ def _generate_rows_batch(
     # ------------------------------------------------------------------
     all_so: List[np.ndarray] = []
     all_ln: List[np.ndarray] = []
-    all_anchor_ns: List[np.ndarray] = []
+    all_order_ns: List[np.ndarray] = []
+    all_delivery_ns: List[np.ndarray] = []
     order_starts = np.zeros(n_complainers + 1, dtype=np.int64)
     for i in range(n_complainers):
         orders = cust_orders.get(int(complainer_keys[i]))
         if orders is not None:
             all_so.append(orders[0])
             all_ln.append(orders[1])
-            all_anchor_ns.append(
+            order_ns = (
                 orders[2]
                 if len(orders) > 2
                 else np.full(len(orders[0]), g_start_ns, dtype=np.int64)
             )
+            delivery_ns = orders[3] if len(orders) > 3 else order_ns
+            all_order_ns.append(order_ns)
+            all_delivery_ns.append(delivery_ns)
             order_starts[i + 1] = order_starts[i] + len(orders[0])
         else:
             order_starts[i + 1] = order_starts[i]
@@ -199,11 +212,13 @@ def _generate_rows_batch(
     if all_so:
         orders_so_flat = np.concatenate(all_so)
         orders_ln_flat = np.concatenate(all_ln)
-        orders_anchor_flat = np.concatenate(all_anchor_ns)
+        orders_order_ns_flat = np.concatenate(all_order_ns)
+        orders_delivery_ns_flat = np.concatenate(all_delivery_ns)
     else:
         orders_so_flat = np.empty(0, dtype=np.int64)
         orders_ln_flat = np.empty(0, dtype=np.int64)
-        orders_anchor_flat = np.empty(0, dtype=np.int64)
+        orders_order_ns_flat = np.empty(0, dtype=np.int64)
+        orders_delivery_ns_flat = np.empty(0, dtype=np.int64)
     has_any_orders = len(orders_so_flat) > 0
 
     n_orders_per_cust = np.diff(order_starts)  # shape (n_complainers,)
@@ -279,10 +294,25 @@ def _generate_rows_batch(
     n_orders_per_row = n_orders_per_cust[cust_idx]
     is_order_linked = (order_linked_rolls < _ORDER_LINKED_RATE) & (n_orders_per_row > 0)
 
+    # Choose the type before the date because the causal anchor depends on what
+    # the customer could have observed. Delivery/product complaints cannot
+    # occur before delivery; checkout billing complaints may use OrderDate.
+    aot, aod = _ORDER_TYPES_FLAT, _ORDER_DETAILS_FLAT
+    agt, agd = _GENERAL_TYPES_FLAT, _GENERAL_DETAILS_FLAT
+    order_td_idx = np.minimum(
+        (type_detail_rolls * len(aot)).astype(np.int64), len(aot) - 1,
+    )
+    general_td_idx = np.minimum(
+        (type_detail_rolls * len(agt)).astype(np.int64), len(agt) - 1,
+    )
+    out_type = np.where(is_order_linked, aot[order_td_idx], agt[general_td_idx])
+    out_detail = np.where(is_order_linked, aod[order_td_idx], agd[general_td_idx])
+
     # Order selection for order-linked rows
     out_so = np.full(total_rows, -1, dtype=np.int64)
     out_ln = np.full(total_rows, -1, dtype=np.int64)
-    out_anchor_ns = np.full(total_rows, -1, dtype=np.int64)
+    out_order_ns = np.full(total_rows, -1, dtype=np.int64)
+    out_delivery_ns = np.full(total_rows, -1, dtype=np.int64)
     if has_any_orders:
         order_start_per_row = order_starts[:-1][cust_idx]
         order_offset = np.minimum(
@@ -295,28 +325,37 @@ def _generate_rows_batch(
         safe_flat_idx = np.clip(flat_idx, 0, max(len(orders_so_flat) - 1, 0))
         out_so[ol_mask] = orders_so_flat[safe_flat_idx[ol_mask]]
         out_ln[ol_mask] = orders_ln_flat[safe_flat_idx[ol_mask]]
-        out_anchor_ns[ol_mask] = orders_anchor_flat[safe_flat_idx[ol_mask]]
+        out_order_ns[ol_mask] = orders_order_ns_flat[safe_flat_idx[ol_mask]]
+        out_delivery_ns[ol_mask] = orders_delivery_ns_flat[safe_flat_idx[ol_mask]]
 
-    linked_date_ns = out_anchor_ns + linked_lag_days * _NS_PER_DAY
+    delivery_anchored = np.isin(out_type, tuple(_DELIVERY_ANCHORED_TYPES))
+    linked_anchor_ns = np.where(
+        delivery_anchored, out_delivery_ns, out_order_ns,
+    )
+    linked_upper_ns = np.minimum(customer_hi, np.int64(event_end_ns))
+    has_observable_anchor = (
+        is_order_linked
+        & (linked_anchor_ns != np.iinfo(np.int64).min)
+        & (linked_anchor_ns <= linked_upper_ns)
+    )
+    unobservable_link = is_order_linked & ~has_observable_anchor
+    if unobservable_link.any():
+        # The chosen event cannot be observed within the customer's lifecycle.
+        # Preserve the complaint count, but do not fabricate an impossible link
+        # or move the complaint before its causal event.
+        out_type[unobservable_link] = agt[general_td_idx[unobservable_link]]
+        out_detail[unobservable_link] = agd[general_td_idx[unobservable_link]]
+        out_so[unobservable_link] = -1
+        out_ln[unobservable_link] = -1
+        is_order_linked = has_observable_anchor
+
+    safe_anchor_ns = np.where(
+        has_observable_anchor, linked_anchor_ns, customer_lo,
+    )
+    linked_date_ns = safe_anchor_ns + linked_lag_days * _NS_PER_DAY
     linked_date_ns = np.maximum(linked_date_ns, customer_lo)
-    linked_date_ns = np.minimum(
-        linked_date_ns,
-        np.minimum(customer_hi, np.int64(event_end_ns)),
-    )
+    linked_date_ns = np.minimum(linked_date_ns, linked_upper_ns)
     out_date_ns = np.where(is_order_linked, linked_date_ns, out_date_ns)
-
-    # Type and detail selection
-    aot, aod = _ORDER_TYPES_FLAT, _ORDER_DETAILS_FLAT
-    agt, agd = _GENERAL_TYPES_FLAT, _GENERAL_DETAILS_FLAT
-
-    order_td_idx = np.minimum(
-        (type_detail_rolls * len(aot)).astype(np.int64), len(aot) - 1,
-    )
-    general_td_idx = np.minimum(
-        (type_detail_rolls * len(agt)).astype(np.int64), len(agt) - 1,
-    )
-    out_type = np.where(is_order_linked, aot[order_td_idx], agt[general_td_idx])
-    out_detail = np.where(is_order_linked, aod[order_td_idx], agd[general_td_idx])
 
     # --- Resolution logic ---
     is_resolved = resolution_rolls < cfg.resolution_rate
@@ -369,32 +408,40 @@ def _generate_rows_batch(
 
 def _build_order_lookup(
     order_arrays: Dict[str, np.ndarray],
-) -> Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Build customer order-line arrays with their OrderDate causal anchor."""
+) -> Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Build customer order-line arrays with order and delivery anchors."""
     ck_arr = order_arrays["CustomerKey"]
     so_arr = order_arrays["OrderNumber"]
     ln_arr = order_arrays["OrderLineNumber"]
-    anchor_arr = order_arrays.get(
+    order_date_arr = order_arrays.get(
         "OrderDateNs",
         np.zeros(len(ck_arr), dtype=np.int64),
     )
+    delivery_date_arr = order_arrays.get("DeliveryDateNs", order_date_arr)
 
-    cust_orders: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    cust_orders: Dict[
+        int, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    ] = {}
     if len(ck_arr) > 0:
         sort_idx = np.argsort(ck_arr, kind="stable")
         sorted_ck = ck_arr[sort_idx]
         sorted_so = so_arr[sort_idx]
         sorted_ln = ln_arr[sort_idx]
-        sorted_anchor = anchor_arr[sort_idx]
+        sorted_order_date = order_date_arr[sort_idx]
+        sorted_delivery_date = delivery_date_arr[sort_idx]
         boundaries = np.where(np.diff(sorted_ck))[0] + 1
         ck_groups = np.split(sorted_ck, boundaries)
         so_groups = np.split(sorted_so, boundaries)
         ln_groups = np.split(sorted_ln, boundaries)
-        anchor_groups = np.split(sorted_anchor, boundaries)
-        for g_ck, g_so, g_ln, g_anchor in zip(
-            ck_groups, so_groups, ln_groups, anchor_groups,
+        order_date_groups = np.split(sorted_order_date, boundaries)
+        delivery_date_groups = np.split(sorted_delivery_date, boundaries)
+        for g_ck, g_so, g_ln, g_order_date, g_delivery_date in zip(
+            ck_groups, so_groups, ln_groups,
+            order_date_groups, delivery_date_groups,
         ):
-            cust_orders[int(g_ck[0])] = (g_so, g_ln, g_anchor)
+            cust_orders[int(g_ck[0])] = (
+                g_so, g_ln, g_order_date, g_delivery_date,
+            )
     return cust_orders
 
 
@@ -412,7 +459,8 @@ def _complaints_worker_task(args: Tuple) -> Dict[str, np.ndarray]:
         complainer_keys_chunk: np.ndarray[int64] — CustomerKeys for this chunk
         complaints_per_chunk:  np.ndarray[int32] — complaint counts per customer
         order_arrays_chunk:    dict of numpy arrays — order data for this chunk's customers
-            Keys: "CustomerKey", "OrderNumber", "OrderLineNumber"
+            Keys: "CustomerKey", "OrderNumber", "OrderLineNumber",
+            "OrderDateNs", "DeliveryDateNs"
         complaints_cfg:        _ComplaintsCfg — complaint config (frozen dataclass, picklable)
         date_range:            tuple[int, int] — (g_start_ns, g_end_ns)
 
@@ -676,6 +724,9 @@ def _generate_complaints_serial(
         "OrderDateNs": pd.to_datetime(filtered["OrderDate"]).to_numpy(
             dtype="datetime64[ns]",
         ).view(np.int64),
+        "DeliveryDateNs": pd.to_datetime(filtered["DeliveryDate"]).to_numpy(
+            dtype="datetime64[ns]",
+        ).view(np.int64),
     })
 
     result = _generate_rows_batch(
@@ -754,6 +805,9 @@ def _generate_complaints_parallel(
     orders_anchor = pd.to_datetime(filtered["OrderDate"]).to_numpy(
         dtype="datetime64[ns]",
     ).view(np.int64)
+    orders_delivery = pd.to_datetime(filtered["DeliveryDate"]).to_numpy(
+        dtype="datetime64[ns]",
+    ).view(np.int64)
 
     # --- Partition complainers into chunks ---
     # Chunk COUNT depends only on the data (not the worker count), so per-chunk
@@ -782,6 +836,7 @@ def _generate_complaints_parallel(
             "OrderNumber": orders_so[mask],
             "OrderLineNumber": orders_ln[mask],
             "OrderDateNs": orders_anchor[mask],
+            "DeliveryDateNs": orders_delivery[mask],
         }
         customer_bounds_chunk = {
             int(key): customer_bounds.get(

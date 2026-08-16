@@ -393,6 +393,36 @@ class TestSubscriptionLifecycleContract:
         assert not df["IsChurnPeriod"].any()
         assert df["PeriodPrice"].sum() == 0.0
 
+    def test_right_censored_trial_does_not_claim_non_conversion(self):
+        lo = pd.Timestamp("2026-01-01")
+        hi = pd.Timestamp("2026-01-31")
+        df = generate_subscriptions_bulk(
+            eligible_ck=np.array([1], dtype=np.int32),
+            eligible_lo=np.array([lo.value], dtype=np.int64),
+            eligible_hi=np.array([hi.value], dtype=np.int64),
+            eligible_span=np.array([(hi - lo).days + 1], dtype=np.int64),
+            plan_keys=np.array([7], dtype=np.int32),
+            plan_cycle_prices=np.array([31.0]),
+            plan_cycle_months=np.array([1], dtype=np.int32),
+            unique_types=np.array(["Streaming"], dtype=object),
+            type_members=[np.array([0], dtype=np.int64)],
+            type_weights=np.array([1.0]),
+            g_end_ns=hi.value,
+            max_subs=1,
+            avg_subscriptions=1.0,
+            churn_rate=0.0,
+            trial_rate=1.0,
+            trial_conversion_rate=0.0,
+            trial_days=14,
+            rng=np.random.default_rng(1),
+            plan_launch_ns=np.array([hi.value], dtype=np.int64),
+        ).to_pandas()
+
+        assert df["PeriodStartDate"].iloc[0] == hi.date()
+        assert df["PeriodEndDate"].iloc[-1] == hi.date()
+        assert df["TerminationReason"].iloc[-1] == "DatasetEnd"
+        assert not df["IsChurnPeriod"].any()
+
     def test_voluntary_churn_is_explicit(self):
         df = _generate_one_customer_subscriptions(churn_rate=1.0)
         if df["TerminationReason"].iloc[-1] == "VoluntaryChurn":

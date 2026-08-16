@@ -212,12 +212,14 @@ class TestPhase2AnalyticalIntegrity:
             "OrderNumber": [100],
             "OrderLineNumber": [1],
             "OrderDate": pd.to_datetime(["2024-02-10"]),
+            "DeliveryDate": pd.to_datetime(["2024-02-11"]),
             "CustomerKey": [7],
         })
         complaints = pd.DataFrame({
             "OrderNumber": [100],
             "LineNumber": [1],
             "ComplaintDate": pd.to_datetime(["2024-02-12"]),
+            "ComplaintType": ["Late Delivery"],
             "ResolutionDate": pd.to_datetime(["2024-02-15"]),
             "ResponseDays": [3],
             "CustomerKey": [7],
@@ -256,6 +258,33 @@ class TestPhase2AnalyticalIntegrity:
             report, "Subscription period within customer lifecycle",
         ).passed
         assert self._find(report, "Subscription period within global end").passed
+
+    def test_subscription_guard_rejects_censored_trial_nonconversion(self):
+        subscriptions = pd.DataFrame({
+            "SubscriptionKey": [1],
+            "CustomerKey": [7],
+            "PeriodStartDate": pd.to_datetime(["2024-06-28"]),
+            "PeriodEndDate": pd.to_datetime(["2024-06-30"]),
+            "TerminationReason": ["TrialNonConversion"],
+        })
+        customers = pd.DataFrame({
+            "CustomerKey": [7],
+            "CustomerStartDate": pd.to_datetime(["2024-01-01"]),
+            "CustomerEndDate": pd.to_datetime(["2024-06-30"]),
+        })
+        report = QualityReport()
+
+        _check_subscription_lifecycle(
+            report,
+            subscriptions,
+            customers,
+            global_end="2024-12-31",
+            trial_days=14,
+        )
+
+        assert not self._find(
+            report, "Subscription trial outcome is observed",
+        ).passed
 
     def test_wishlist_dated_conversion_rate(self):
         sales = pd.DataFrame({

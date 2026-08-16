@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from src.facts.complaints.runner import _DELIVERY_ANCHORED_TYPES
 from tests import sales_gen
 
 
@@ -116,6 +117,7 @@ def test_phase2_temporal_contracts(phase2_run):
 
     sales = sales_gen.load_sales(scratch, final)
     sales["OrderDate"] = pd.to_datetime(sales["OrderDate"])
+    sales["DeliveryDate"] = pd.to_datetime(sales["DeliveryDate"])
 
     complaints = pd.read_parquet(_find_one(roots, "complaints.parquet"))
     complaints["ComplaintDate"] = pd.to_datetime(complaints["ComplaintDate"])
@@ -138,14 +140,19 @@ def test_phase2_temporal_contracts(phase2_run):
         )
     ).all()
     linked = complaints[complaints["OrderNumber"].notna()].merge(
-        sales[["OrderNumber", "OrderLineNumber", "OrderDate"]],
+        sales[["OrderNumber", "OrderLineNumber", "OrderDate", "DeliveryDate"]],
         left_on=["OrderNumber", "LineNumber"],
         right_on=["OrderNumber", "OrderLineNumber"],
         how="left",
         validate="many_to_one",
     )
     assert linked["OrderDate"].notna().all()
-    assert (linked["ComplaintDate"] >= linked["OrderDate"]).all()
+    assert linked["DeliveryDate"].notna().all()
+    causal_anchor = linked["OrderDate"].where(
+        ~linked["ComplaintType"].isin(_DELIVERY_ANCHORED_TYPES),
+        linked["DeliveryDate"],
+    )
+    assert (linked["ComplaintDate"] >= causal_anchor).all()
     resolved = complaints[complaints["ResolutionDate"].notna()]
     response_days = (
         resolved["ResolutionDate"] - resolved["ComplaintDate"]

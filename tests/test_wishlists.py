@@ -1,13 +1,20 @@
 """Tests for wishlists pipeline modules: accumulator, micro_agg, selection, scd2, constants."""
 from __future__ import annotations
 
+from math import comb
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pytest
 
+from src.exceptions import ValidationError
 from src.facts.wishlists.accumulator import WishlistAccumulator
 from src.facts.wishlists.micro_agg import micro_aggregate_wishlists
+from src.facts.wishlists.runner import (
+    _calibrate_conversion_probability,
+    _select_participant_indices,
+)
 from src.facts.wishlists.constants import (
     NS_PER_DAY,
     PRIORITY_VALUES,
@@ -210,6 +217,62 @@ class TestWishlistsConstants:
         assert wc.participation_rate == 0.5
         assert wc.seed == 42
         assert wc.max_items == 15
+
+
+class TestWishlistParticipantSelection:
+    def test_selection_is_independent_of_purchase_outcomes(self):
+        cust_keys = np.arange(1, 101, dtype=np.int64)
+
+        selected_a = _select_participant_indices(
+            np.random.default_rng(42), cust_keys, 35,
+        )
+        selected_b = _select_participant_indices(
+            np.random.default_rng(42), cust_keys, 35,
+        )
+
+        np.testing.assert_array_equal(selected_a, selected_b)
+        assert len(selected_a) == 35
+        assert len(np.unique(selected_a)) == 35
+        assert not np.array_equal(selected_a, np.arange(65, 100))
+
+    def test_selection_accepts_zero_participants(self):
+        selected = _select_participant_indices(
+            np.random.default_rng(42), np.arange(10), 0,
+        )
+        assert selected.size == 0
+
+    def test_selection_rejects_impossible_count(self):
+        with pytest.raises(ValidationError, match="n_participants"):
+            _select_participant_indices(
+                np.random.default_rng(42), np.arange(10), 11,
+            )
+
+
+class TestWishlistConversionCalibration:
+    def test_matches_expected_capped_conversion_total(self):
+        probability = _calibrate_conversion_probability(
+            participant_keys=np.array([1], dtype=np.int64),
+            items_per=np.array([5], dtype=np.int64),
+            purchased_map={1: [(10, 1), (11, 1)]},
+            target_rate=0.20,
+        )
+        expected = sum(
+            min(successes, 2)
+            * comb(5, successes)
+            * probability ** successes
+            * (1.0 - probability) ** (5 - successes)
+            for successes in range(6)
+        )
+        assert expected == pytest.approx(1.0, abs=1e-10)
+
+    def test_duplicate_purchase_versions_do_not_inflate_capacity(self):
+        probability = _calibrate_conversion_probability(
+            participant_keys=np.array([1], dtype=np.int64),
+            items_per=np.array([4], dtype=np.int64),
+            purchased_map={1: [(10, 1), (10, 2)]},
+            target_rate=0.50,
+        )
+        assert probability == 1.0
 
 
 # ===================================================================

@@ -148,7 +148,7 @@ complaints:
   max_complaints: 5                 # max complaints per customer
   resolution_rate: 0.85             # fraction of complaints that get resolved
   escalation_rate: 0.10             # fraction of unresolved that get escalated (rest stay open)
-  min_days_after_anchor: 0           # linked complaints occur after their OrderDate
+  min_days_after_anchor: 0           # after DeliveryDate for product/delivery issues; otherwise OrderDate
   max_days_after_anchor: 30
   avg_response_days: 5              # mean days to resolve
   max_response_days: 30             # cap on resolution time

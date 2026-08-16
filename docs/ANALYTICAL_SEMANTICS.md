@@ -37,12 +37,29 @@ model or validating a generated dataset.
 
 ## Wishlists
 
+- Wishlist participation is sampled independently of later sales outcomes;
+  future purchasers and high-frequency buyers receive no selection preference.
 - The reported conversion definition is a purchase of the same
   customer/product pair on or after `AddedDate`.
 - Converted wishlist rows are anchored to a stable purchase date; the configured
   `conversion_rate` targets this dated definition, not lifetime pair overlap.
 - `pre_browse_days` permits browsing before acquisition within the documented
   lookback window.
+
+## Complaints
+
+- Product and fulfillment complaints are dated on or after `DeliveryDate`.
+  Billing complaints are dated on or after `OrderDate`.
+- When the relevant causal event falls outside the customer's observable
+  lifecycle, the complaint remains a general-service event rather than being
+  assigned an impossible order-line link.
+
+## Subscriptions
+
+- A trial is labeled `TrialNonConversion` only after the complete configured
+  trial window has been observed. Trials cut off by the dataset or customer
+  lifecycle end are right-censored and retain the corresponding boundary
+  termination reason.
 
 ## Inventory
 

@@ -57,6 +57,7 @@ def test_complaint_guard_reproduces_pre_sale_and_response_mismatch() -> None:
         "OrderNumber": [1001],
         "OrderLineNumber": [1],
         "OrderDate": ["2024-02-10"],
+        "DeliveryDate": ["2024-02-12"],
         "CustomerKey": [7],
     })
     customers = pd.DataFrame({
@@ -69,6 +70,7 @@ def test_complaint_guard_reproduces_pre_sale_and_response_mismatch() -> None:
         "LineNumber": [1],
         "CustomerKey": [7],
         "ComplaintDate": ["2024-02-01"],
+        "ComplaintType": ["Late Delivery"],
         "ResolutionDate": ["2024-02-05"],
         "ResponseDays": [3],
     })
@@ -78,8 +80,8 @@ def test_complaint_guard_reproduces_pre_sale_and_response_mismatch() -> None:
     assert not _passed(report, "Complaint chronology (linked sale)")
     assert not _passed(report, "Complaint response-day arithmetic")
 
-    complaints.loc[0, "ComplaintDate"] = "2024-02-11"
-    complaints.loc[0, "ResolutionDate"] = "2024-02-14"
+    complaints.loc[0, "ComplaintDate"] = "2024-02-12"
+    complaints.loc[0, "ResolutionDate"] = "2024-02-15"
     report = QualityReport()
     _check_complaint_chronology(report, sales, complaints, customers)
     assert _passed(report, "Complaint chronology (linked sale)")
@@ -184,6 +186,40 @@ def test_new_customer_promotion_guard_uses_exact_date_window() -> None:
     assert _passed(report, "New-customer promotion window")
 
 
+def test_promotion_guard_checks_active_dates_and_channel_groups() -> None:
+    promotions = pd.DataFrame({
+        "PromotionKey": [2, 3],
+        "DiscountPct": [0.10, 0.20],
+        "PromotionCategory": ["Store", "Online"],
+        "StartDate": ["2024-02-01", "2024-02-01"],
+        "EndDate": ["2024-02-29", "2024-02-29"],
+    })
+    channels = pd.DataFrame({
+        "ChannelKey": [1, 2],
+        "IsPhysical": [True, False],
+        "IsDigital": [False, True],
+    })
+    sales = pd.DataFrame({
+        "PromotionKey": [2, 3],
+        "ChannelKey": [2, 1],
+        "OrderDate": ["2024-01-31", "2024-03-01"],
+        "UnitPrice": [100.0, 100.0],
+        "DiscountAmount": [10.0, 20.0],
+    })
+
+    report = QualityReport()
+    _check_promotion_alignment(report, sales, promotions, channels=channels)
+    assert not _passed(report, "Promotion active-date eligibility")
+    assert not _passed(report, "Promotion channel eligibility")
+
+    sales["ChannelKey"] = [1, 2]
+    sales["OrderDate"] = ["2024-02-01", "2024-02-29"]
+    report = QualityReport()
+    _check_promotion_alignment(report, sales, promotions, channels=channels)
+    assert _passed(report, "Promotion active-date eligibility")
+    assert _passed(report, "Promotion channel eligibility")
+
+
 def test_wishlist_guard_reproduces_purchase_before_added_date() -> None:
     sales = pd.DataFrame({
         "CustomerKey": [7],
@@ -283,3 +319,62 @@ def test_generate_report_includes_analytical_integrity_checks(tmp_path) -> None:
     assert "Analytical Integrity" in html
     assert "Return amount reconciliation" in html
     assert "20.00" in html and "60.00" in html
+
+
+def test_generate_report_does_not_treat_ri_projection_as_full_sales_table(
+    tmp_path,
+) -> None:
+    """A complete RI projection must not hide analytical-only columns."""
+    dims = tmp_path / "dimensions"
+    facts = tmp_path / "facts"
+    dims.mkdir()
+    facts.mkdir()
+
+    dimension_keys = {
+        "customers": ("CustomerKey", 7),
+        "products": ("ProductKey", 21),
+        "stores": ("StoreKey", 31),
+        "promotions": ("PromotionKey", 1),
+        "currency": ("CurrencyKey", 1),
+        "employees": ("EmployeeKey", 41),
+        "channels": ("ChannelKey", 1),
+        "time": ("TimeKey", 1),
+    }
+    for table, (column, value) in dimension_keys.items():
+        frame = pd.DataFrame({column: [value]})
+        if table == "customers":
+            frame["CustomerStartDate"] = pd.to_datetime(["2024-01-01"])
+            frame["CustomerEndDate"] = pd.to_datetime(["2024-12-31"])
+            frame["LoyaltyTierKey"] = [1]
+        frame.to_parquet(dims / f"{table}.parquet", index=False)
+
+    pd.DataFrame({
+        "OrderNumber": [1001],
+        "OrderLineNumber": [1],
+        "CustomerKey": [7],
+        "ProductKey": [21],
+        "StoreKey": [31],
+        "PromotionKey": [1],
+        "CurrencyKey": [1],
+        "EmployeeKey": [41],
+        "ChannelKey": [1],
+        "TimeKey": [1],
+        "OrderDate": pd.to_datetime(["2024-02-01"]),
+        "DueDate": pd.to_datetime(["2024-02-02"]),
+        "DeliveryDate": pd.to_datetime(["2024-02-03"]),
+        "Quantity": [2],
+        "UnitPrice": [30.0],
+        "NetPrice": [30.0],
+        "DiscountAmount": [0.0],
+    }).to_parquet(facts / "sales.parquet", index=False)
+    pd.DataFrame({
+        "OrderNumber": [1001],
+        "OrderLineNumber": [1],
+        "ReturnQuantity": [2],
+        "ReturnNetPrice": [20.0],
+    }).to_parquet(facts / "returns.parquet", index=False)
+
+    html = generate_quality_report(tmp_path).read_text(encoding="utf-8")
+
+    assert "Return amount reconciliation" in html
+    assert "1 amount mismatch(es)" in html

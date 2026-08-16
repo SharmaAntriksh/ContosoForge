@@ -13,6 +13,7 @@ and the main process merges them.  Small datasets use the serial path unchanged.
 """
 from __future__ import annotations
 
+from math import comb
 from multiprocessing import cpu_count
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +23,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.exceptions import ValidationError
 from src.facts.wishlists.accumulator import WishlistAccumulator
 from src.facts.wishlists.constants import (
     NS_PER_DAY,
@@ -186,70 +188,89 @@ def _calibrate_conversion_probability(
 ) -> float:
     """Convert a global dated-conversion target to an eligible-row probability.
 
-    Customers without a purchase anchor cannot produce an intentional
-    conversion. Raising the probability only among eligible rows keeps the
-    configured rate meaningful at the whole-wishlist level.
+    Each participant has a finite number of distinct purchase anchors, so the
+    realized conversions are a binomial draw capped at that capacity. Solve for
+    the row-level probability whose expected capped total matches the configured
+    whole-wishlist target.
     """
     total_rows = int(items_per.sum())
     if total_rows <= 0:
         return 0.0
-    # A customer can intentionally convert at most one wishlist row per
-    # distinct purchased product because wishlist (customer, product) pairs
-    # are unique.  Count that real capacity instead of treating every row for
-    # a purchaser as eligible; the latter systematically undershoots the
-    # configured global rate for light buyers.
-    eligible_rows = sum(
-        min(int(count), len(purchased_map.get(int(key), ())))
-        for key, count in zip(participant_keys, items_per)
-    )
-    if eligible_rows <= 0:
+
+    profiles: Dict[Tuple[int, int], int] = {}
+    total_capacity = 0
+    for key, count in zip(participant_keys, items_per):
+        n_items = int(count)
+        distinct_products = {
+            int(entry[0]) if isinstance(entry, (tuple, list)) else int(entry)
+            for entry in purchased_map.get(int(key), ())
+        }
+        capacity = min(n_items, len(distinct_products))
+        if capacity <= 0:
+            continue
+        profile = (n_items, capacity)
+        profiles[profile] = profiles.get(profile, 0) + 1
+        total_capacity += capacity
+
+    if total_capacity <= 0:
         return 0.0
-    return float(np.clip(float(target_rate) * total_rows / eligible_rows, 0.0, 1.0))
+
+    target_conversions = float(np.clip(
+        float(target_rate) * total_rows,
+        0.0,
+        float(total_capacity),
+    ))
+    if target_conversions <= 0.0:
+        return 0.0
+    if target_conversions >= total_capacity:
+        return 1.0
+
+    def expected_total(probability: float) -> float:
+        complement = 1.0 - probability
+        expected = 0.0
+        for (n_items, capacity), customer_count in profiles.items():
+            capped_mean = sum(
+                min(successes, capacity)
+                * comb(n_items, successes)
+                * probability ** successes
+                * complement ** (n_items - successes)
+                for successes in range(n_items + 1)
+            )
+            expected += customer_count * capped_mean
+        return expected
+
+    lower = 0.0
+    upper = 1.0
+    for _ in range(48):
+        midpoint = (lower + upper) / 2.0
+        if expected_total(midpoint) < target_conversions:
+            lower = midpoint
+        else:
+            upper = midpoint
+    return (lower + upper) / 2.0
 
 
 def _select_participant_indices(
     rng: np.random.Generator,
     cust_keys: np.ndarray,
     n_participants: int,
-    purchased_map: Dict[int, List[Tuple[int, int]]],
-    target_rate: float,
 ) -> np.ndarray:
-    """Select participants with enough purchase anchors to realize the target."""
-    all_indices = np.arange(len(cust_keys), dtype=np.int64)
-    purchaser_mask = np.array([
-        bool(purchased_map.get(int(key))) for key in cust_keys
-    ])
-    purchaser_indices = all_indices[purchaser_mask]
-    # Prefer customers with purchase anchors whenever conversion is requested.
-    # Item-level conversion also requires enough distinct purchased products,
-    # so using the full available purchaser pool avoids an artificial ceiling.
-    desired_share = 1.0 if float(target_rate) > 0.0 else 0.0
-    n_purchasers = min(
-        len(purchaser_indices),
-        n_participants,
-        int(np.ceil(n_participants * desired_share)),
-    )
-    if n_purchasers:
-        # Prefer customers with more distinct purchase anchors so the chosen
-        # population has enough unique products to realize the item-level
-        # conversion target.  Seeded jitter randomizes ties deterministically.
-        purchase_counts = np.array([
-            len(purchased_map[int(cust_keys[idx])])
-            for idx in purchaser_indices
-        ], dtype=np.int64)
-        tie_breaker = rng.random(len(purchaser_indices))
-        order = np.lexsort((tie_breaker, -purchase_counts))
-        selected_purchasers = purchaser_indices[order[:n_purchasers]]
-    else:
-        selected_purchasers = np.empty(0, dtype=np.int64)
-    remaining_pool = np.setdiff1d(
-        all_indices, selected_purchasers, assume_unique=False,
-    )
-    n_remaining = n_participants - n_purchasers
-    selected_remaining = rng.choice(
-        remaining_pool, size=n_remaining, replace=False,
-    )
-    selected = np.concatenate([selected_purchasers, selected_remaining])
+    """Select wishlist participants independently of future purchases.
+
+    Purchase anchors may determine which selected wishlist rows later convert,
+    but they must never determine who enters the wishlist cohort. Otherwise the
+    fact leaks the downstream sales outcome into participation and turns
+    wishlist membership into a proxy for heavy purchasing.
+    """
+    n_customers = len(cust_keys)
+    if n_participants < 0 or n_participants > n_customers:
+        raise ValidationError(
+            f"n_participants must be between 0 and {n_customers}, "
+            f"got {n_participants}"
+        )
+    selected = rng.choice(
+        n_customers, size=n_participants, replace=False,
+    ).astype(np.int64, copy=False)
     selected.sort()
     return selected
 
@@ -290,7 +311,7 @@ def _write_bridge(
         product_key_to_idx = pd.Series(np.arange(n_products), index=prod_keys)
     cust_purchased = _build_purchased_map(purchased_pairs, product_key_to_idx)
     participant_idx = _select_participant_indices(
-        rng, cust_keys, n_participants, cust_purchased, c.conversion_rate,
+        rng, cust_keys, n_participants,
     )
 
     pool, global_cdf = build_subcategory_pool(prod_subcat, product_weights)
@@ -510,7 +531,7 @@ def _run_parallel(
         product_key_to_idx = pd.Series(np.arange(n_products), index=prod_keys)
     full_purchased_map = _build_purchased_map(purchased_pairs, product_key_to_idx)
     participant_idx = _select_participant_indices(
-        rng, cust_keys, n_participants, full_purchased_map, c.conversion_rate,
+        rng, cust_keys, n_participants,
     )
     participant_cust_keys = cust_keys[participant_idx]
     participant_earliest_ns = earliest_ns[participant_idx]
