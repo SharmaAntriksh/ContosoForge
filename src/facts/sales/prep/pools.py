@@ -76,6 +76,7 @@ class CustomerPool:
     is_active_in_sales: np.ndarray
     customer_base_weight: Optional[np.ndarray]
     customer_geo_key: Optional[np.ndarray]
+    customer_gender_by_pool: Optional[np.ndarray]
     customer_first_eff_start_by_key: Optional[np.ndarray]
     customer_last_eff_end_by_key: Optional[np.ndarray]
     customer_loyalty_tier_by_key: Optional[np.ndarray]
@@ -87,6 +88,7 @@ class CustomerPool:
     customer_scd2_active: bool
     customer_scd2_starts: Optional[np.ndarray]
     customer_scd2_keys: Optional[np.ndarray]
+    customer_scd2_geography: Optional[np.ndarray]
     cust_key_to_pool_idx: Optional[np.ndarray]
 
 
@@ -97,6 +99,8 @@ class ProductPool:
     product_np: np.ndarray
     product_brand_key: Optional[np.ndarray]
     brand_names: Optional[np.ndarray]
+    product_brand_by_pool: Optional[np.ndarray]
+    product_color_by_pool: Optional[np.ndarray]
     product_subcat_key: Optional[np.ndarray]
     product_popularity: Optional[np.ndarray]
     product_seasonality: Optional[np.ndarray]

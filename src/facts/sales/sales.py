@@ -72,6 +72,10 @@ from .prep.worker_cfg_builder import (
     build_returns_policy,
 )
 from .prep.run_config import MonthPlan, ReturnsResolved, SalesPools, SalesRunConfig
+from .prep.temporal_mix_plan import (
+    build_customer_temporal_mix_plan,
+    build_product_temporal_mix_plan,
+)
 from .prep.worker_cfg_schema import SHARED_FIELDS
 
 
@@ -821,6 +825,26 @@ def generate_sales_fact(
         sales_output, skip_order_cols, _max_lines_per_order,
     )
 
+    _temporal_mix_plan = build_customer_temporal_mix_plan(
+        _cust,
+        _corr,
+        month_count=int(_month_plan.sales_rows_per_month.size),
+        resolved_trend=models_cfg.macro_demand,
+        run_seed=int(seed),
+    )
+    _product_temporal_mix_plan = build_product_temporal_mix_plan(
+        _prod,
+        month_count=int(_month_plan.sales_rows_per_month.size),
+        resolved_trend=models_cfg.macro_demand,
+        run_seed=int(seed),
+    )
+    _legacy_brand_cfg = models_cfg.brand_popularity
+    if getattr(_legacy_brand_cfg, "model_fields_set", set()):
+        warn(
+            "models.brand_popularity is deprecated and ignored; hierarchical "
+            "trend-derived product temporal mix now owns brand movement"
+        )
+
     # Build the base returns policy once (None when returns are disabled), so the
     # worker-config builder takes one object instead of 15 loose returns scalars.
     _returns_policy = build_returns_policy(
@@ -865,7 +889,8 @@ def generate_sales_fact(
         total_chunks=total_chunks,
     )
     worker_cfg = _build_worker_cfg(
-        _cust, _month_plan, _prod, _stores, _emps, _corr, _promos,
+        _cust, _month_plan, _temporal_mix_plan, _product_temporal_mix_plan,
+        _prod, _stores, _emps, _corr, _promos,
         cfg, sales_cfg, output_paths, _run_cfg,
         _returns_policy, models_cfg,
     )

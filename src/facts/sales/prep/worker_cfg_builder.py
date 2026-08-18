@@ -117,7 +117,8 @@ def build_returns_policy(
 
 
 def _build_worker_cfg(
-    cust, month_plan, prod, stores, emps, corr, promos,
+    cust, month_plan, temporal_mix_plan, product_temporal_mix_plan,
+    prod, stores, emps, corr, promos,
     cfg, sales_cfg, output_paths, run_cfg,
     returns_policy, models_cfg,
 ):
@@ -160,6 +161,20 @@ def _build_worker_cfg(
         product_np=prod.product_np,
         product_brand_key=prod.product_brand_key,
         brand_names=prod.brand_names,
+        product_category_id_by_pool=(
+            product_temporal_mix_plan.product_category_id_by_pool
+        ),
+        product_brand_id_by_pool=(
+            product_temporal_mix_plan.product_brand_id_by_pool
+        ),
+        product_color_id_by_pool=(
+            product_temporal_mix_plan.product_color_id_by_pool
+        ),
+        product_category_factors=(
+            product_temporal_mix_plan.product_category_factors
+        ),
+        product_brand_factors=product_temporal_mix_plan.product_brand_factors,
+        product_color_factors=product_temporal_mix_plan.product_color_factors,
         store_keys=stores.store_keys,
         store_open_month=stores.store_open_month,
         store_close_month=stores.store_close_month,
@@ -189,6 +204,17 @@ def _build_worker_cfg(
         customer_end_month=cust.customer_end_month,
         customer_base_weight=cust.customer_base_weight,
         customer_discovery_month=month_plan.customer_discovery_month,
+        customer_country_id_by_pool=(
+            temporal_mix_plan.customer_country_id_by_pool
+        ),
+        customer_gender_id_by_pool=(
+            temporal_mix_plan.customer_gender_id_by_pool
+        ),
+        customer_country_factors=temporal_mix_plan.customer_country_factors,
+        customer_gender_factors=temporal_mix_plan.customer_gender_factors,
+        geo_to_customer_country_id=(
+            temporal_mix_plan.geo_to_customer_country_id
+        ),
         customer_first_eff_start_by_key=cust.customer_first_eff_start_by_key,
         customer_last_eff_end_by_key=cust.customer_last_eff_end_by_key,
         customer_loyalty_tier_by_key=cust.customer_loyalty_tier_by_key,
@@ -284,6 +310,7 @@ def _build_worker_cfg(
         customer_scd2_active=cust.customer_scd2_active,
         customer_scd2_starts=cust.customer_scd2_starts,
         customer_scd2_keys=cust.customer_scd2_keys,
+        customer_scd2_geography=cust.customer_scd2_geography,
         cust_key_to_pool_idx=cust.cust_key_to_pool_idx,
     )
 

@@ -108,3 +108,36 @@ class MonthPlan:
     sales_rows_per_month: np.ndarray
     sales_orders_per_month: np.ndarray
     sales_distinct_target: np.ndarray
+
+
+@dataclass(frozen=True)
+class TemporalMixPlan:
+    """Compact customer-side temporal mix plan for one sales run.
+
+    Factor matrices are ``(relative month, group)``. Customer mappings are
+    pool-aligned, except ``geo_to_customer_country_id`` which is a dense
+    GeographyKey lookup used to resolve SCD2 relocation at month start.
+    """
+
+    customer_country_id_by_pool: np.ndarray
+    customer_gender_id_by_pool: np.ndarray
+    geo_to_customer_country_id: np.ndarray
+    customer_country_factors: np.ndarray
+    customer_gender_factors: np.ndarray
+
+
+@dataclass(frozen=True)
+class ProductTemporalMixPlan:
+    """Compact hierarchical product-side temporal mix plan for one sales run.
+
+    All three mappings are product-pool aligned. Brand and color group IDs are
+    category-qualified residual groups, so their factors are centered within
+    category instead of competing with the category layer.
+    """
+
+    product_category_id_by_pool: np.ndarray
+    product_brand_id_by_pool: np.ndarray
+    product_color_id_by_pool: np.ndarray
+    product_category_factors: np.ndarray
+    product_brand_factors: np.ndarray
+    product_color_factors: np.ndarray

@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 
+from src.exceptions import SalesError
 from .allocation import _stable_seed
 from ..eligibility import EligibilityWindow
 from ..weights import cdf_from_probs
@@ -154,27 +155,127 @@ def _weights_for_indices(indices: np.ndarray, base_weight: Optional[np.ndarray])
         return None
 
 
-def _weights_for_keys(keys: np.ndarray, base_weight: Optional[np.ndarray]) -> Optional[np.ndarray]:
+def _weights_for_keys(
+    keys: np.ndarray,
+    base_weight: Optional[np.ndarray],
+    key_to_pool_idx: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
     """
     Map CustomerKey (1-based) to base_weight indices and return a probability vector.
 
-    Contract: CustomerKey values are 1-based (key 1 -> base_weight[0]).
-    If mapping fails or keys are out of range, returns None (uniform sampling).
+    ``key_to_pool_idx`` is the canonical path and supports sparse SCD2 keys. The
+    legacy 1-based mapping remains as a fallback for direct callers and fixtures.
     """
     if base_weight is None:
         return None
     try:
         keys_i32 = np.asarray(keys, dtype=np.int32)
-
-        idx = keys_i32 - 1
-        if idx.size == 0:
+        if keys_i32.size == 0:
             return None
+
+        if key_to_pool_idx is None:
+            idx = keys_i32 - 1
+        else:
+            lookup = np.asarray(key_to_pool_idx, dtype=np.int32)
+            if keys_i32.min() < 0 or keys_i32.max() >= lookup.size:
+                return None
+            idx = lookup[keys_i32]
         if idx.min() < 0 or idx.max() >= base_weight.shape[0]:
             return None
         w = base_weight[idx]
         return _normalize_weights(w)
     except (IndexError, ValueError, TypeError):
         return None
+
+
+def effective_customer_weights_for_month(
+    *,
+    m_offset: int,
+    month_start_day: int,
+    eligible_idx: np.ndarray,
+    base_weight: Optional[np.ndarray],
+    country_id_by_pool: np.ndarray,
+    gender_id_by_pool: np.ndarray,
+    country_factors: np.ndarray,
+    gender_factors: np.ndarray,
+    customer_scd2_starts: Optional[np.ndarray] = None,
+    customer_scd2_geography: Optional[np.ndarray] = None,
+    geo_to_country_id: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Return one pool-aligned effective-weight vector for a relative month.
+
+    SCD2 country is resolved at the first day of the month. The combined country
+    and gender factor is centered over that month's eligible customer mass before
+    it is multiplied by ``CustomerBaseWeight``.
+    """
+    country_ids = np.asarray(country_id_by_pool, dtype=np.int32)
+    gender_ids = np.asarray(gender_id_by_pool, dtype=np.int32)
+    customer_count = country_ids.size
+    if gender_ids.ndim != 1 or gender_ids.size != customer_count:
+        raise SalesError("Customer temporal group mappings must align")
+
+    country_matrix = np.asarray(country_factors, dtype=np.float64)
+    gender_matrix = np.asarray(gender_factors, dtype=np.float64)
+    month = int(m_offset)
+    if (
+        country_matrix.ndim != 2
+        or gender_matrix.ndim != 2
+        or month < 0
+        or month >= country_matrix.shape[0]
+        or month >= gender_matrix.shape[0]
+    ):
+        raise SalesError("Customer temporal factor matrices do not cover the month")
+
+    if customer_scd2_starts is not None or customer_scd2_geography is not None:
+        if (
+            customer_scd2_starts is None
+            or customer_scd2_geography is None
+            or geo_to_country_id is None
+        ):
+            raise SalesError("Customer SCD2 temporal geography inputs are incomplete")
+        starts = np.asarray(customer_scd2_starts, dtype=np.int64)
+        geography = np.asarray(customer_scd2_geography, dtype=np.int32)
+        if starts.shape != geography.shape or starts.shape[0] != customer_count:
+            raise SalesError("Customer SCD2 geography grid must align with the pool")
+        slots = np.sum(starts <= int(month_start_day), axis=1, dtype=np.int32) - 1
+        np.clip(slots, 0, starts.shape[1] - 1, out=slots)
+        effective_geography = geography[np.arange(customer_count), slots]
+        geo_lookup = np.asarray(geo_to_country_id, dtype=np.int32)
+        if np.any(
+            (effective_geography < 0) | (effective_geography >= geo_lookup.size)
+        ):
+            raise SalesError("Customer SCD2 GeographyKey is outside the country lookup")
+        country_ids = geo_lookup[effective_geography]
+
+    if (
+        np.any(country_ids < 0)
+        or np.any(country_ids >= country_matrix.shape[1])
+        or np.any(gender_ids < 0)
+        or np.any(gender_ids >= gender_matrix.shape[1])
+    ):
+        raise SalesError("Customer temporal group id is outside its factor matrix")
+
+    if base_weight is None:
+        base = np.ones(customer_count, dtype=np.float64)
+    else:
+        base = np.asarray(base_weight, dtype=np.float64)
+        if base.ndim != 1 or base.size != customer_count:
+            raise SalesError("customer_base_weight must align with the customer pool")
+        base = np.where(np.isfinite(base) & (base > 0.0), base, 1e-12)
+
+    combined = country_matrix[month, country_ids] * gender_matrix[month, gender_ids]
+    eligible = np.asarray(eligible_idx, dtype=np.int64)
+    if eligible.size == 0:
+        return base * combined
+    if eligible.min() < 0 or eligible.max() >= customer_count:
+        raise SalesError("eligible customer index is outside the customer pool")
+    eligible_mass = base[eligible]
+    weighted_mean = float(
+        np.dot(eligible_mass, combined[eligible]) / eligible_mass.sum()
+    )
+    if not np.isfinite(weighted_mean) or weighted_mean <= 0.0:
+        raise SalesError("Customer temporal factor normalization is invalid")
+    return base * (combined / weighted_mean)
 
 
 def _choice(
@@ -420,6 +521,7 @@ def build_month_customer_pool(
     base_weight,
     end_month_norm,
     seed: int,
+    key_to_pool_idx=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Deterministic distinct-customer pool ``P`` and weighted CDF for month ``m``.
 
@@ -487,7 +589,7 @@ def build_month_customer_pool(
         return empty
 
     pool = np.asarray(pool, dtype=ck.dtype)
-    p_pool = _weights_for_keys(pool, base_weight)
+    p_pool = _weights_for_keys(pool, base_weight, key_to_pool_idx)
     if p_pool is None:
         p_pool = np.full(pool.size, 1.0 / pool.size, dtype=np.float64)
     return pool, cdf_from_probs(p_pool)

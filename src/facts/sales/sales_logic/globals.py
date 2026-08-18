@@ -135,6 +135,11 @@ class State:
     # chunk hot path so it isn't reallocated every chunk.
     customer_end_month_norm = None
     customer_base_weight = None  # optional float64
+    customer_country_id_by_pool = None  # int32 pool row -> temporal country id
+    customer_gender_id_by_pool = None   # int32 pool row -> temporal gender id
+    customer_country_factors = None     # float64[T, country]
+    customer_gender_factors = None      # float64[T, gender]
+    geo_to_customer_country_id = None   # dense GeographyKey -> temporal country id
     customer_first_eff_start_by_key = None  # dense key -> exact start epoch day
     customer_last_eff_end_by_key = None     # dense key -> exact end epoch day; max=open
     customer_new_promo_end_by_key = None    # dense key -> exact promotion deadline
@@ -242,6 +247,7 @@ class State:
     customer_scd2_active = None     # bool
     customer_scd2_starts = None     # np.ndarray (N_pool, max_ver) — version start epoch days
     customer_scd2_keys = None       # np.ndarray (N_pool, max_ver) — CustomerKey per version
+    customer_scd2_geography = None  # np.ndarray (N_pool, max_ver) — GeographyKey per version
     cust_key_to_pool_idx = None     # np.ndarray (max_key+1,) — IsCurrent CustomerKey → pool index
 
     # --------------------------------------------------------------
@@ -306,6 +312,12 @@ class State:
     brand_to_row_idx = None
     brand_prob_by_month = None
     product_brand_key = None
+    product_category_id_by_pool = None
+    product_brand_id_by_pool = None
+    product_color_id_by_pool = None
+    product_category_factors = None
+    product_brand_factors = None
+    product_color_factors = None
     product_popularity = None
     product_seasonality = None
     product_return_risk_by_key = None

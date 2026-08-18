@@ -84,7 +84,7 @@ def run_dates(cfg: "AppConfig", parquet_folder: Path) -> None:
     )
     info(
         f"Dates: {start_date.date()} to {end_date.date()} "
-        f"(buffer={buffer_years}yr, post-sale tail={post_sale_tail_days}d)"
+        f"(±{buffer_years}yr buffer)"
     )
 
     fiscal_start_month = _clamp_month(_int_or(dates_cfg.fiscal_start_month, 5))

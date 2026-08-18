@@ -131,21 +131,24 @@ def _build_scd2_customer_versions(
     customers_path: Path,
     pool_customer_keys: np.ndarray,
     pool_customer_ids: np.ndarray,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    pool_customer_geography: np.ndarray,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """Build per-entity version lookup tables for SCD2 customer resolution.
 
-    Returns (starts, keys, key_to_pool_idx):
+    Returns (starts, keys, geography, key_to_pool_idx):
       - starts: shape (N_pool, max_ver) int64 — EffectiveStartDate as epoch days,
         sorted ascending per entity, padded with INT64_MAX.
       - keys: shape (N_pool, max_ver) int32 — CustomerKey per version slot,
         padded with IsCurrent=1 key.
+      - geography: shape (N_pool, max_ver) int32 — GeographyKey per version
+        slot, padded with the IsCurrent geography.
       - key_to_pool_idx: dense int32 array mapping IsCurrent CustomerKey → pool index.
     """
     res = _scd2_version_index(
         customers_path,
         id_col="CustomerID",
         pool_ids=pool_customer_ids,
-        payload_cols={"CustomerKey": np.int32},
+        payload_cols={"CustomerKey": np.int32, "GeographyKey": np.int32},
     )
     if res is None:
         return None
@@ -161,4 +164,8 @@ def _build_scd2_customer_versions(
     keys[:] = pool_customer_keys.astype(np.int32)[:, np.newaxis]
     keys[ctx.pi, ctx.si] = ctx.payload["CustomerKey"][ctx.valid]
 
-    return starts, keys, key_to_pool_idx
+    geography = np.empty((ctx.n_pool, ctx.max_ver), dtype=np.int32)
+    geography[:] = np.asarray(pool_customer_geography, dtype=np.int32)[:, np.newaxis]
+    geography[ctx.pi, ctx.si] = ctx.payload["GeographyKey"][ctx.valid]
+
+    return starts, keys, geography, key_to_pool_idx
