@@ -31,6 +31,12 @@ class SalesWorkerCfg(TypedDict, total=False):
     product_np: Required[np.ndarray]
     product_brand_key: Optional[np.ndarray]
     brand_names: Optional[np.ndarray]
+    product_category_id_by_pool: Optional[np.ndarray]
+    product_brand_id_by_pool: Optional[np.ndarray]
+    product_color_id_by_pool: Optional[np.ndarray]
+    product_category_factors: Optional[np.ndarray]
+    product_brand_factors: Optional[np.ndarray]
+    product_color_factors: Optional[np.ndarray]
     product_popularity: Optional[np.ndarray]
     product_seasonality: Optional[np.ndarray]
     product_return_risk_by_key: Optional[np.ndarray]
@@ -69,6 +75,11 @@ class SalesWorkerCfg(TypedDict, total=False):
     customer_end_month: Optional[np.ndarray]
     customer_base_weight: Optional[np.ndarray]
     customer_discovery_month: Optional[np.ndarray]
+    customer_country_id_by_pool: Optional[np.ndarray]
+    customer_gender_id_by_pool: Optional[np.ndarray]
+    customer_country_factors: Optional[np.ndarray]
+    customer_gender_factors: Optional[np.ndarray]
+    geo_to_customer_country_id: Optional[np.ndarray]
     customer_geo_key: Optional[np.ndarray]
     customer_first_eff_start_by_key: Optional[np.ndarray]
     customer_last_eff_end_by_key: Optional[np.ndarray]
@@ -162,6 +173,7 @@ class SalesWorkerCfg(TypedDict, total=False):
     customer_scd2_active: bool
     customer_scd2_starts: Optional[np.ndarray]
     customer_scd2_keys: Optional[np.ndarray]
+    customer_scd2_geography: Optional[np.ndarray]
     cust_key_to_pool_idx: Optional[np.ndarray]
 
     # -- Assortment (post-construction) --------------------------------------
@@ -204,12 +216,23 @@ class SalesWorkerCfg(TypedDict, total=False):
 SHARED_FIELDS: List[str] = [
     "product_np",
     "product_brand_key",
+    "product_category_id_by_pool",
+    "product_brand_id_by_pool",
+    "product_color_id_by_pool",
+    "product_category_factors",
+    "product_brand_factors",
+    "product_color_factors",
     "customer_keys",
     "customer_is_active_in_sales",
     "customer_start_month",
     "customer_end_month",
     "customer_base_weight",
     "customer_discovery_month",
+    "customer_country_id_by_pool",
+    "customer_gender_id_by_pool",
+    "customer_country_factors",
+    "customer_gender_factors",
+    "geo_to_customer_country_id",
     "customer_first_eff_start_by_key",
     "customer_last_eff_end_by_key",
     "customer_loyalty_tier_by_key",
@@ -248,6 +271,7 @@ SHARED_FIELDS: List[str] = [
     "product_scd2_data",
     "customer_scd2_starts",
     "customer_scd2_keys",
+    "customer_scd2_geography",
     "cust_key_to_pool_idx",
 ]
 

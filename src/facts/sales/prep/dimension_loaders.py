@@ -57,6 +57,7 @@ def _load_customers(
     _cust_weight_cols = ["CustomerBaseWeight", "CustomerWeight"]
     # Geo column (previously a separate parquet open)
     _cust_geo_cols = ["GeographyKey"]
+    _cust_gender_cols = ["Gender"]
     _cust_loyalty_cols = ["LoyaltyTierKey"]
     _cust_segment_cols = ["CustomerType", "YearlyIncome"]
 
@@ -66,6 +67,7 @@ def _load_customers(
         + [c for c in _cust_scd2_cols_wanted if c in _cust_schema_names]
         + [c for c in _cust_weight_cols if c in _cust_schema_names]
         + [c for c in _cust_geo_cols if c in _cust_schema_names]
+        + [c for c in _cust_gender_cols if c in _cust_schema_names]
         + [c for c in _cust_loyalty_cols if c in _cust_schema_names]
         + [c for c in _cust_segment_cols if c in _cust_schema_names]
     ))
@@ -85,6 +87,16 @@ def _load_customers(
     if ("CustomerID" in cust_df_full.columns and "IsCurrent" in cust_df_full.columns
             and (cust_df_full["IsCurrent"] == 0).any()):
         _cust_scd2_detected = True
+        if "Gender" in cust_df_full.columns:
+            _gender_history = cust_df_full["Gender"].fillna("Unknown").astype(str)
+            _gender_variants = _gender_history.groupby(
+                cust_df_full["CustomerID"]
+            ).nunique()
+            if (_gender_variants > 1).any():
+                raise SalesError(
+                    "Customer SCD2 history changes Gender for the same CustomerID; "
+                    "temporal gender mapping requires an invariant value"
+                )
         _n_before = len(cust_df_full)
         # Keep only IsCurrent=1 rows for the sampling pool
         _is_current_mask = cust_df_full["IsCurrent"] == 1
@@ -100,6 +112,11 @@ def _load_customers(
 
     customer_keys = _as_np(cust_df["CustomerKey"], np.int32)
     _max_customer_key = int(customer_keys.max()) + 1
+    customer_gender_by_pool = None
+    if "Gender" in cust_df.columns:
+        customer_gender_by_pool = (
+            cust_df["Gender"].fillna("Unknown").astype(str).to_numpy(dtype=object)
+        )
 
     customer_loyalty_tier_by_key = None
     if "LoyaltyTierKey" in cust_df.columns:
@@ -337,14 +354,24 @@ def _load_customers(
     _customer_scd2_active = False
     _customer_scd2_starts = None
     _customer_scd2_keys = None
-    _cust_key_to_pool_idx = None
+    _customer_scd2_geography = None
+    _cust_key_to_pool_idx = np.full(_max_customer_key, -1, dtype=np.int32)
+    _cust_key_to_pool_idx[customer_keys] = np.arange(len(customer_keys), dtype=np.int32)
 
     if _cust_scd2_detected and _cust_pool_ids is not None:
+        if customer_geo_key is None:
+            raise SalesError("Customer SCD2 temporal geography requires GeographyKey")
+        _pool_geography = customer_geo_key[customer_keys]
         _cust_result = _build_scd2_customer_versions(
-            customers_path, customer_keys, _cust_pool_ids,
+            customers_path, customer_keys, _cust_pool_ids, _pool_geography,
         )
         if _cust_result is not None:
-            _customer_scd2_starts, _customer_scd2_keys, _cust_key_to_pool_idx = _cust_result
+            (
+                _customer_scd2_starts,
+                _customer_scd2_keys,
+                _customer_scd2_geography,
+                _cust_key_to_pool_idx,
+            ) = _cust_result
             _customer_scd2_active = True
             info(f"Customer SCD2: {_customer_scd2_starts.shape[1]} max versions × "
                  f"{_customer_scd2_starts.shape[0]:,} customers")
@@ -356,6 +383,7 @@ def _load_customers(
         is_active_in_sales=is_active_in_sales,
         customer_base_weight=customer_base_weight,
         customer_geo_key=customer_geo_key,
+        customer_gender_by_pool=customer_gender_by_pool,
         customer_first_eff_start_by_key=customer_first_eff_start_by_key,
         customer_last_eff_end_by_key=customer_last_eff_end_by_key,
         customer_loyalty_tier_by_key=customer_loyalty_tier_by_key,
@@ -369,6 +397,7 @@ def _load_customers(
         customer_scd2_active=_customer_scd2_active,
         customer_scd2_starts=_customer_scd2_starts,
         customer_scd2_keys=_customer_scd2_keys,
+        customer_scd2_geography=_customer_scd2_geography,
         cust_key_to_pool_idx=_cust_key_to_pool_idx,
     )
 
@@ -388,6 +417,8 @@ def _load_products(
     """
     product_brand_key = None
     brand_names = None
+    product_brand_by_pool = None
+    product_color_by_pool = None
     product_subcat_key = None
     products_path = parquet_folder_p / "products.parquet"
     assortment_cfg = (getattr(cfg, "stores", None) or {}).get("assortment") or {}
@@ -401,6 +432,7 @@ def _load_products(
     # Read schema once (metadata only) to discover available columns
     _prod_schema = set(_pq.read_schema(str(products_path)).names)
     _has_brand_col = "Brand" in _prod_schema
+    _has_color_col = "Color" in _prod_schema
     _has_subcat_col = "SubcategoryKey" in _prod_schema
     # Load SubcategoryKey whenever available: consumed by store assortment AND by
     # the basket-theme correlation (which is independent of assortment).
@@ -425,6 +457,8 @@ def _load_products(
         _prod_cols = ["ProductKey"]
         if _has_brand_col:
             _prod_cols.append("Brand")
+        if _has_color_col:
+            _prod_cols.append("Color")
         if _need_subcat:
             _prod_cols.append("SubcategoryKey")
         # Include SCD2 columns so we can reuse this DataFrame later
@@ -451,10 +485,26 @@ def _load_products(
                 codes, brand_names = _brand_codes_from_series(_prod_df_dedup["Brand"])
                 bk = np.full(len(active_keys), -1, dtype=np.int32)
                 bk[_found] = codes[_sort_idx][_pos[_found]]
+                _brand_values = (
+                    _prod_df_dedup["Brand"].fillna("Unknown").astype(str).to_numpy()
+                )
+                product_brand_by_pool = np.full(
+                    len(active_keys), "Unknown", dtype=object,
+                )
+                product_brand_by_pool[_found] = _brand_values[_sort_idx][_pos[_found]]
                 if np.any(bk < 0):
                     info("Brand mapping missing/invalid for some ProductKeys; disabling brand_popularity for this run.")
                 else:
                     product_brand_key = bk
+
+            if _has_color_col:
+                _color_values = (
+                    _prod_df_dedup["Color"].fillna("Unknown").astype(str).to_numpy()
+                )
+                product_color_by_pool = np.full(
+                    len(active_keys), "Unknown", dtype=object,
+                )
+                product_color_by_pool[_found] = _color_values[_sort_idx][_pos[_found]]
 
             if _need_subcat and "SubcategoryKey" in _prod_df_dedup.columns:
                 subcat_vals = _prod_df_dedup["SubcategoryKey"].to_numpy(dtype=np.int32)
@@ -474,6 +524,8 @@ def _load_products(
         _prod_cols = ["ProductKey", "ListPrice", "UnitCost"]
         if _has_brand_col:
             _prod_cols.append("Brand")
+        if _has_color_col:
+            _prod_cols.append("Color")
         if _need_subcat:
             _prod_cols.append("SubcategoryKey")
         # SCD2: load IsCurrent + ProductID to reuse for version table building
@@ -507,6 +559,14 @@ def _load_products(
         if _has_brand_col:
             codes, brand_names = _brand_codes_from_series(prod_df["Brand"])
             product_brand_key = codes if not np.any(codes < 0) else None
+            product_brand_by_pool = (
+                prod_df["Brand"].fillna("Unknown").astype(str).to_numpy(dtype=object)
+            )
+
+        if _has_color_col:
+            product_color_by_pool = (
+                prod_df["Color"].fillna("Unknown").astype(str).to_numpy(dtype=object)
+            )
 
         if _need_subcat and "SubcategoryKey" in prod_df.columns:
             product_subcat_key = prod_df["SubcategoryKey"].to_numpy(dtype=np.int32)
@@ -653,6 +713,23 @@ def _load_products(
             _has_history = False
 
         if _has_history:
+            for _taxonomy_col in ("SubcategoryKey", "Brand", "Color"):
+                if _taxonomy_col not in _prod_df_full.columns:
+                    continue
+                _taxonomy_values = (
+                    _prod_df_full[_taxonomy_col]
+                    .fillna("<missing>")
+                    .astype(str)
+                )
+                _taxonomy_variants = _taxonomy_values.groupby(
+                    _prod_df_full["ProductID"]
+                ).nunique()
+                if (_taxonomy_variants > 1).any():
+                    raise SalesError(
+                        "Product SCD2 history changes taxonomy for the same "
+                        f"ProductID ({_taxonomy_col}); temporal product mappings "
+                        "require category, brand, and color to remain invariant"
+                    )
             try:
                 _pid_current = _prod_df_full[_prod_df_full["IsCurrent"] == 1].drop_duplicates("ProductKey", keep="first")
                 _pid_map = pd.Series(
@@ -687,6 +764,8 @@ def _load_products(
         product_np=product_np,
         product_brand_key=product_brand_key,
         brand_names=brand_names,
+        product_brand_by_pool=product_brand_by_pool,
+        product_color_by_pool=product_color_by_pool,
         product_subcat_key=product_subcat_key,
         product_popularity=product_popularity,
         product_seasonality=product_seasonality,

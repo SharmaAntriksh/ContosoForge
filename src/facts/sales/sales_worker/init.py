@@ -550,6 +550,12 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     try:
         product_np = worker_cfg["product_np"]
         product_brand_key = worker_cfg.get("product_brand_key")
+        product_category_id_by_pool = worker_cfg.get("product_category_id_by_pool")
+        product_brand_id_by_pool = worker_cfg.get("product_brand_id_by_pool")
+        product_color_id_by_pool = worker_cfg.get("product_color_id_by_pool")
+        product_category_factors = worker_cfg.get("product_category_factors")
+        product_brand_factors = worker_cfg.get("product_brand_factors")
+        product_color_factors = worker_cfg.get("product_color_factors")
         store_keys = worker_cfg["store_keys"]
 
         store_to_geo = worker_cfg.get("store_to_geo")
@@ -570,6 +576,11 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         customer_end_month = worker_cfg.get("customer_end_month")
         customer_base_weight = worker_cfg.get("customer_base_weight")
         customer_discovery_month = worker_cfg.get("customer_discovery_month")
+        customer_country_id_by_pool = worker_cfg.get("customer_country_id_by_pool")
+        customer_gender_id_by_pool = worker_cfg.get("customer_gender_id_by_pool")
+        customer_country_factors = worker_cfg.get("customer_country_factors")
+        customer_gender_factors = worker_cfg.get("customer_gender_factors")
+        geo_to_customer_country_id = worker_cfg.get("geo_to_customer_country_id")
         customer_income_score_by_key = worker_cfg.get("customer_income_score_by_key")
         customer_is_organization_by_key = worker_cfg.get("customer_is_organization_by_key")
         customer_org_scale_score_by_key = worker_cfg.get("customer_org_scale_score_by_key")
@@ -671,6 +682,42 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         raise ConfigError(f"Missing worker_cfg key: {e}") from e
 
     product_np = np.asarray(product_np)
+    _product_count = int(product_np.shape[0])
+    for _mix_name, _mix_ids in (
+        ("product_category_id_by_pool", product_category_id_by_pool),
+        ("product_brand_id_by_pool", product_brand_id_by_pool),
+        ("product_color_id_by_pool", product_color_id_by_pool),
+    ):
+        if _mix_ids is None:
+            raise SalesError(f"{_mix_name} is required for product temporal mix")
+        _mix_ids = as_int32(_mix_ids)
+        if _mix_ids.ndim != 1 or _mix_ids.size != _product_count:
+            raise SalesError(f"{_mix_name} must align with product_np rows")
+        if _mix_ids.size and int(_mix_ids.min()) < 0:
+            raise SalesError(f"{_mix_name} cannot contain negative group ids")
+        worker_cfg[_mix_name] = _mix_ids
+    product_category_id_by_pool = worker_cfg["product_category_id_by_pool"]
+    product_brand_id_by_pool = worker_cfg["product_brand_id_by_pool"]
+    product_color_id_by_pool = worker_cfg["product_color_id_by_pool"]
+
+    for _factor_name, _factor_values, _group_ids in (
+        ("product_category_factors", product_category_factors, product_category_id_by_pool),
+        ("product_brand_factors", product_brand_factors, product_brand_id_by_pool),
+        ("product_color_factors", product_color_factors, product_color_id_by_pool),
+    ):
+        if _factor_values is None:
+            raise SalesError(f"{_factor_name} is required for product temporal mix")
+        _factor_values = np.asarray(_factor_values, dtype=np.float64)
+        if _factor_values.ndim != 2 or _factor_values.shape[0] == 0:
+            raise SalesError(f"{_factor_name} must be a non-empty month-by-group matrix")
+        if not np.all(np.isfinite(_factor_values)) or np.any(_factor_values <= 0.0):
+            raise SalesError(f"{_factor_name} must contain finite positive values")
+        if _group_ids.size and int(_group_ids.max()) >= _factor_values.shape[1]:
+            raise SalesError(f"{_factor_name} does not cover every product group id")
+        worker_cfg[_factor_name] = _factor_values
+    product_category_factors = worker_cfg["product_category_factors"]
+    product_brand_factors = worker_cfg["product_brand_factors"]
+    product_color_factors = worker_cfg["product_color_factors"]
 
     # Brand buckets come from the coordinator's pre-computed flat index +
     # offsets (shared memory, no per-worker argsort). The coordinator publishes
@@ -980,6 +1027,43 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
         if customer_discovery_month.shape[0] != customer_keys.shape[0]:
             raise SalesError("customer_discovery_month must align with customer_keys length")
 
+    for _mix_name, _mix_ids in (
+        ("customer_country_id_by_pool", customer_country_id_by_pool),
+        ("customer_gender_id_by_pool", customer_gender_id_by_pool),
+    ):
+        if _mix_ids is None:
+            raise SalesError(f"{_mix_name} is required for customer temporal mix")
+        _mix_ids = as_int32(_mix_ids)
+        if _mix_ids.ndim != 1 or _mix_ids.shape[0] != customer_keys.shape[0]:
+            raise SalesError(f"{_mix_name} must align with customer_keys length")
+        if _mix_ids.size and int(_mix_ids.min()) < 0:
+            raise SalesError(f"{_mix_name} cannot contain negative group ids")
+        worker_cfg[_mix_name] = _mix_ids
+    customer_country_id_by_pool = worker_cfg["customer_country_id_by_pool"]
+    customer_gender_id_by_pool = worker_cfg["customer_gender_id_by_pool"]
+
+    for _factor_name, _factor_values, _group_ids in (
+        ("customer_country_factors", customer_country_factors, customer_country_id_by_pool),
+        ("customer_gender_factors", customer_gender_factors, customer_gender_id_by_pool),
+    ):
+        if _factor_values is None:
+            raise SalesError(f"{_factor_name} is required for customer temporal mix")
+        _factor_values = np.asarray(_factor_values, dtype=np.float64)
+        if _factor_values.ndim != 2 or _factor_values.shape[0] == 0:
+            raise SalesError(f"{_factor_name} must be a non-empty month-by-group matrix")
+        if not np.all(np.isfinite(_factor_values)) or np.any(_factor_values <= 0.0):
+            raise SalesError(f"{_factor_name} must contain finite positive values")
+        if _group_ids.size and int(_group_ids.max()) >= _factor_values.shape[1]:
+            raise SalesError(f"{_factor_name} does not cover every customer group id")
+        worker_cfg[_factor_name] = _factor_values
+    customer_country_factors = worker_cfg["customer_country_factors"]
+    customer_gender_factors = worker_cfg["customer_gender_factors"]
+
+    if geo_to_customer_country_id is None:
+        raise SalesError("geo_to_customer_country_id is required for customer temporal mix")
+    geo_to_customer_country_id = as_int32(geo_to_customer_country_id)
+    worker_cfg["geo_to_customer_country_id"] = geo_to_customer_country_id
+
     # Global per-month plan arrays are length-T (months); coerce to int64.
     if sales_rows_per_month is not None:
         sales_rows_per_month = as_int64(sales_rows_per_month)
@@ -988,37 +1072,55 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
     if sales_distinct_target is not None:
         sales_distinct_target = as_int64(sales_distinct_target)
 
-    # Use pre-built brand_prob_by_month from shared memory if available
-    _prebuilt_bp = worker_cfg.get("_prebuilt_brand_prob_by_month")
-    if _prebuilt_bp is not None:
-        brand_prob_by_month = resolve_array(_prebuilt_bp)
-    else:
-        brand_prob_by_month = None
-        if isinstance(models_cfg, Mapping):
-            brand_cfg = models_cfg.get("brand_popularity") if isinstance(models_cfg, Mapping) else None
-            if brand_cfg:
-                T = infer_T_from_date_pool(date_pool)
-                B = int(product_brand_key.max()) + 1 if product_brand_key is not None and product_brand_key.size else 0
-                rng_bp = np.random.default_rng(int(int_or(brand_cfg.get("seed"), 1234)))
+    _month_count = int(sales_rows_per_month.size) if sales_rows_per_month is not None else 0
+    for _factor_name in ("customer_country_factors", "customer_gender_factors"):
+        _factor_values = worker_cfg[_factor_name]
+        if _factor_values.shape[0] != _month_count:
+            raise SalesError(
+                f"{_factor_name} month count must match sales_rows_per_month"
+            )
+    for _factor_name in (
+        "product_category_factors",
+        "product_brand_factors",
+        "product_color_factors",
+    ):
+        _factor_values = worker_cfg[_factor_name]
+        if _factor_values.shape[0] != _month_count:
+            raise SalesError(
+                f"{_factor_name} month count must match sales_rows_per_month"
+            )
 
-                bp_counts = None
-                if brand_to_row_idx is not None and len(brand_to_row_idx) == B:
-                    bp_counts = np.array(
-                        [len(b) if b is not None else 0 for b in brand_to_row_idx],
-                        dtype=np.float64,
-                    )
+    _pool_lookup = worker_cfg.get("cust_key_to_pool_idx")
+    if _pool_lookup is None:
+        raise SalesError("cust_key_to_pool_idx is required for customer temporal mix")
+    _pool_lookup = as_int32(_pool_lookup)
+    if customer_keys.size and (
+        int(customer_keys.min()) < 0 or int(customer_keys.max()) >= _pool_lookup.size
+    ):
+        raise SalesError("cust_key_to_pool_idx does not cover every CustomerKey")
+    if not np.array_equal(
+        _pool_lookup[customer_keys],
+        np.arange(customer_keys.size, dtype=np.int32),
+    ):
+        raise SalesError("cust_key_to_pool_idx does not map CustomerKey to pool row")
+    worker_cfg["cust_key_to_pool_idx"] = _pool_lookup
 
-                brand_prob_by_month = _build_brand_prob_by_month_rotate_winner(
-                    rng_bp,
-                    T=T,
-                    B=B,
-                    winner_boost=float_or(brand_cfg.get("winner_boost"), 2.5),
-                    noise_sd=float_or(brand_cfg.get("noise_sd"), 0.15),
-                    min_share=float_or(brand_cfg.get("min_share"), 0.02),
-                    year_len_months=int_or(brand_cfg.get("year_len_months"), 12),
-                    brand_product_counts=bp_counts,
-                    count_exponent=float_or(brand_cfg.get("count_exponent"), 0.25),
-                )
+    if bool(worker_cfg.get("customer_scd2_active", False)):
+        _scd2_starts = worker_cfg.get("customer_scd2_starts")
+        _scd2_keys = worker_cfg.get("customer_scd2_keys")
+        _scd2_geography = worker_cfg.get("customer_scd2_geography")
+        if _scd2_starts is None or _scd2_keys is None or _scd2_geography is None:
+            raise SalesError("Customer SCD2 version, key, and geography grids are required")
+        if not (
+            _scd2_starts.shape == _scd2_keys.shape == _scd2_geography.shape
+            and _scd2_starts.shape[0] == customer_keys.size
+        ):
+            raise SalesError("Customer SCD2 grids must share a pool-aligned shape")
+
+    # The legacy rotating-winner path is retained only for config compatibility.
+    # Unified hierarchical temporal mix is the sole production owner of brand
+    # movement, so no second brand probability layer is bound.
+    brand_prob_by_month = None
 
     store_to_geo_arr = dense_map(store_to_geo) if isinstance(store_to_geo, Mapping) else None
     geo_to_currency_arr = dense_map(geo_to_currency) if isinstance(geo_to_currency, Mapping) else None
@@ -1055,6 +1157,12 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "brand_to_row_idx": brand_to_row_idx,
             "product_brand_key": product_brand_key,
             "brand_prob_by_month": brand_prob_by_month,
+            "product_category_id_by_pool": product_category_id_by_pool,
+            "product_brand_id_by_pool": product_brand_id_by_pool,
+            "product_color_id_by_pool": product_color_id_by_pool,
+            "product_category_factors": product_category_factors,
+            "product_brand_factors": product_brand_factors,
+            "product_color_factors": product_color_factors,
             "store_keys": store_keys,
             "store_eligible_by_month": store_eligible_by_month,
             "store_open_day": _store_open_day_dense,
@@ -1077,6 +1185,11 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "customer_end_month": customer_end_month,
             "customer_base_weight": customer_base_weight,
             "customer_discovery_month": customer_discovery_month,
+            "customer_country_id_by_pool": customer_country_id_by_pool,
+            "customer_gender_id_by_pool": customer_gender_id_by_pool,
+            "customer_country_factors": customer_country_factors,
+            "customer_gender_factors": customer_gender_factors,
+            "geo_to_customer_country_id": geo_to_customer_country_id,
             # CustomerKey -> first start date (epoch days); clamps OrderDate forward
             # so no order predates the customer's day-granular start date.
             "customer_first_eff_start_by_key": worker_cfg.get("customer_first_eff_start_by_key"),
@@ -1179,6 +1292,7 @@ def init_sales_worker(worker_cfg: SalesWorkerCfg) -> None:
             "customer_scd2_active": bool(worker_cfg.get("customer_scd2_active", False)),
             "customer_scd2_starts": worker_cfg.get("customer_scd2_starts"),
             "customer_scd2_keys": worker_cfg.get("customer_scd2_keys"),
+            "customer_scd2_geography": worker_cfg.get("customer_scd2_geography"),
             "cust_key_to_pool_idx": worker_cfg.get("cust_key_to_pool_idx"),
 
             # Header invariant validation toggle (default False for perf)

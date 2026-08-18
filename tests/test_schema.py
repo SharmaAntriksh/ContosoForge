@@ -156,11 +156,21 @@ class TestModelsConfigFromYAML:
         assert len(ap.unit_price.bands) == 5
         assert ap.unit_price.bands[0].max == 100
 
-    def test_brand_popularity(self, raw_models):
-        m = ModelsConfig.from_raw_dict(raw_models)
-        bp = m.models.brand_popularity
-        assert bp.enabled is True
-        assert bp.winner_boost == 1.4
+    def test_brand_popularity_legacy_compatibility(self, raw_models):
+        assert "brand_popularity" not in raw_models["models"]
+
+        legacy = ModelsConfig.from_raw_dict(
+            {
+                "models": {
+                    "brand_popularity": {
+                        "enabled": True,
+                        "winner_boost": 1.4,
+                    }
+                }
+            }
+        )
+        assert legacy.models.brand_popularity.enabled is True
+        assert legacy.models.brand_popularity.winner_boost == 1.4
 
     def test_returns_reasons(self, raw_models):
         m = ModelsConfig.from_raw_dict(raw_models)

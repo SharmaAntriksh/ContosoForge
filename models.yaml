@@ -5,7 +5,7 @@
 # This file controls product-level sales behavior:
 #   - Basket size (quantity per order)
 #   - Price drift, markdowns, and snapping
-#   - Brand popularity rotation
+#   - Trend-derived temporal product mix
 #   - Return reasons and timing
 #
 # Business shape (growth trajectory, customer lifecycle, demand behavior)
@@ -123,17 +123,6 @@ models:
           - { max: 200,  step: 10 }
           - { max: 1000, step: 25 }
           - { max: 1e18, step: 50 }
-
-
-  # ================================================================
-  # BRAND POPULARITY — rotating "winner" brand each year
-  # ================================================================
-  brand_popularity:
-    enabled: true
-    seed: 123
-    winner_boost: 1.4
-
-
   # ================================================================
   # PROMOTION SALIENCE — deeper promos redeemed more often (Phase 3.2)
   # ================================================================

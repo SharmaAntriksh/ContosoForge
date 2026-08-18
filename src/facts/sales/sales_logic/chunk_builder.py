@@ -22,6 +22,7 @@ from .core import (
     _normalize_end_month,
     assign_orders_to_customers,
     build_month_customer_pool,
+    effective_customer_weights_for_month,
     apply_promotions,
     build_orders,
     compute_dates,
@@ -181,7 +182,8 @@ class _WorkerCaches:
       ``T``. The eligibility predicate depends only on the (worker-invariant)
       lifecycle arrays; the discovery schedule does NOT enter it, so caching by
       ``T`` alone is safe.
-    - ``prodweight``: per-calendar-month (1-12) product weights.
+    - ``prodweight``: per-relative-month product weights. Temporal category,
+      brand, and color factors make calendar month alone an incomplete key.
     - ``month_pool``: per-month distinct-customer ``(pool, cdf)``, keyed by month
       offset alone (per CLAUDE.md gotcha #27, ``m`` fully determines the value
       given the worker-constant inputs).
@@ -250,7 +252,7 @@ def _eligible_idx_by_month(T, is_active, start_month, end_month_norm) -> list:
 
 def _get_month_pool(
     m_offset, distinct_target, eligible_idx, customer_keys,
-    discovery_month, base_weight, end_month_norm, plan_seed,
+    discovery_month, base_weight, end_month_norm, plan_seed, month_start_day,
 ):
     """Return the cached ``(pool, cdf)`` for month ``m`` (build once per worker).
 
@@ -262,15 +264,35 @@ def _get_month_pool(
     cached = _CACHES.month_pool.get(m)
     if cached is not None:
         return cached
+    effective_weight = effective_customer_weights_for_month(
+        m_offset=m,
+        month_start_day=int(month_start_day),
+        eligible_idx=eligible_idx,
+        base_weight=base_weight,
+        country_id_by_pool=State.customer_country_id_by_pool,
+        gender_id_by_pool=State.customer_gender_id_by_pool,
+        country_factors=State.customer_country_factors,
+        gender_factors=State.customer_gender_factors,
+        customer_scd2_starts=(
+            State.customer_scd2_starts if State.customer_scd2_active else None
+        ),
+        customer_scd2_geography=(
+            State.customer_scd2_geography if State.customer_scd2_active else None
+        ),
+        geo_to_country_id=(
+            State.geo_to_customer_country_id if State.customer_scd2_active else None
+        ),
+    )
     pool, cdf = build_month_customer_pool(
         m_offset=m,
         distinct_target=int(distinct_target),
         eligible_idx=eligible_idx,
         customer_keys=customer_keys,
         discovery_month=discovery_month,
-        base_weight=base_weight,
+        base_weight=effective_weight,
         end_month_norm=end_month_norm,
         seed=int(plan_seed),
+        key_to_pool_idx=State.cust_key_to_pool_idx,
     )
     _CACHES.month_pool[m] = (pool, cdf)
     return pool, cdf
@@ -717,10 +739,9 @@ def _sample_products_per_store(
     store pool and brand bucket.  Otherwise sampling is weighted by
     ``product_weight`` (popularity) within each store's full pool.
 
-    Performance: per-(store, brand) intersection arrays and CDFs are
-    cached in ``_cdf_cache`` keyed by ``(store_key, brand, cal_month)`` — a
-    semantic key (the store's assortment pool is worker-constant), not an
-    ``id(pool)`` that a freed-then-reallocated array could collide on.
+    Performance: per-store CDFs are cached by relative month because temporal
+    factors differ across absolute months. The store key is semantic (the
+    assortment pool is worker-constant), avoiding ``id(pool)`` reuse hazards.
 
     The per-line product pick is counter-based, hashed on the line entity key
     ``(order_numbers, line_numbers)``; the store grouping only reorders which
@@ -789,7 +810,7 @@ def _sample_products_per_store(
                     order_numbers, line_numbers,
                 )
             elif _has_weight and pool_sz > 1:
-                cache_key = (int(_sk_list[i]), -1, _cal_month)
+                cache_key = (int(_sk_list[i]), -1, int(m_offset))
                 cached = _cache_get(cache_key) if _cache_get is not None else None
                 if cached is not None:
                     _, cdf = cached
@@ -891,30 +912,30 @@ def _build_product_weight_for_month(
     m_offset: int,
     cal_month: int = 0,
 ) -> np.ndarray | None:
-    """
-    Build a per-product-row weight array combining PopularityScore and
-    SeasonalityProfile for the current calendar month.
+    """Build popularity, seasonality, and hierarchical temporal weights.
 
-    Returns None if no profile data is available (uniform sampling fallback).
+    Category is the top-level layer; category-qualified brand and color are
+    residual layers centered within category by the coordinator. The combined
+    temporal factor is centered again over this month's base catalog weight.
     """
     pop = getattr(State, "product_popularity", None)
     sea = getattr(State, "product_seasonality", None)
+    category_ids = np.asarray(State.product_category_id_by_pool, dtype=np.int32)
+    brand_ids = np.asarray(State.product_brand_id_by_pool, dtype=np.int32)
+    color_ids = np.asarray(State.product_color_id_by_pool, dtype=np.int32)
+    month = int(m_offset)
 
-    if pop is None:
-        return None
-
-    # The result depends only on cal_month (the popularity base and seasonality
-    # arrays are bound once per worker), so memoize by cal_month — over a long
-    # horizon this avoids rebuilding the length-n_products array T times.
-    # Downstream consumers treat the weight as read-only (the CDF cache keyed by
-    # cal_month already relies on this), so returning the shared array is safe.
-    cached = _CACHES.prodweight.get(cal_month)
+    # Every dependency other than relative month is immutable worker State, so
+    # m_offset is the complete cache key. January in different years must not
+    # share a product vector.
+    cached = _CACHES.prodweight.get(month)
     if cached is not None:
         return cached
 
-    # Base weight: popularity (clamp to avoid zeros)
-    # np.maximum already returns a new array — no .copy() needed
-    w = np.maximum(pop, 1.0)
+    if pop is None:
+        w = np.ones(category_ids.size, dtype=np.float64)
+    else:
+        w = np.maximum(np.asarray(pop, dtype=np.float64), 1.0)
 
     # Seasonal boost for this calendar month
     if sea is not None and cal_month > 0:
@@ -925,7 +946,22 @@ def _build_product_weight_for_month(
                 if mask.any():
                     w[mask] *= 1.0 + boosts[cal_month]
 
-    _CACHES.prodweight[cal_month] = w
+    category_factors = np.asarray(State.product_category_factors, dtype=np.float64)
+    brand_factors = np.asarray(State.product_brand_factors, dtype=np.float64)
+    color_factors = np.asarray(State.product_color_factors, dtype=np.float64)
+    combined = (
+        category_factors[month, category_ids]
+        * brand_factors[month, brand_ids]
+        * color_factors[month, color_ids]
+    )
+    weighted_mean = float(np.dot(w, combined) / w.sum())
+    if not np.isfinite(weighted_mean) or weighted_mean <= 0.0:
+        raise SalesError("Product temporal factor normalization is invalid")
+    w *= combined / weighted_mean
+    if not np.all(np.isfinite(w)) or np.any(w <= 0.0):
+        raise SalesError("Effective product weights must be finite and positive")
+
+    _CACHES.prodweight[month] = w
     return w
 
 
@@ -1937,9 +1973,9 @@ def build_chunk_table(
     # coordinator); here it only gates whether the month pool honors the schedule.
     use_discovery = new_customer_share > 0.0
 
-    # Brand popularity is OFF if block absent. If present without enabled, default-on.
-    brand_cfg = State.models_cfg.get("brand_popularity", None)
-    use_brand_popularity = bool(brand_cfg) and bool(brand_cfg.get("enabled", True))
+    # Legacy rotating-winner brand probabilities are intentionally not stacked
+    # on the unified category-qualified brand residual.
+    use_brand_popularity = False
 
     # Closed-form discovery schedule: pool-aligned month each customer first
     # enters sales, static and broadcast read-only (Finding #5/#6).
@@ -2022,7 +2058,12 @@ def build_chunk_table(
         D_m = int(distinct_target_by_month[m_offset]) if distinct_target_by_month is not None else 0
         pool, pool_cdf = _get_month_pool(
             m_offset, D_m, eligible_idx, customer_keys,
-            discovery_month, base_weight, end_month_norm, plan_seed)
+            discovery_month, base_weight, end_month_norm, plan_seed,
+            np.asarray(month_date_pool)
+            .astype("datetime64[M]")
+            .astype("datetime64[D]")
+            .astype(np.int64)
+            .min())
         if pool.size == 0:
             continue
 

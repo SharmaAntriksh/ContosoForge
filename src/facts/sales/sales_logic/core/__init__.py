@@ -31,6 +31,7 @@ from .customer_sampling import (
     compute_discovery_months,
     compute_month_distinct_targets,
     build_month_customer_pool,
+    effective_customer_weights_for_month,
     assign_orders_to_customers,
 )
 
