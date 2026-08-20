@@ -42,15 +42,20 @@ def _classify_employee_keys(employees: pd.DataFrame):
 
     Opaque keys carry no tier/home-store, so classify by column: managers are
     ``Title == 'Store Manager'``; online reps have an online home store;
-    store-level is any employee with a real (non-zero) home StoreKey.
+    store-level is any employee with a real (non-zero) ``HomeStoreKey``.
     """
     ek = employees["EmployeeKey"].astype(np.int64)
     if "Title" in employees.columns:
         title = employees["Title"].astype(str)
     else:
         title = pd.Series("", index=employees.index)
-    if "StoreKey" in employees.columns:
-        sk = pd.to_numeric(employees["StoreKey"], errors="coerce").fillna(0)
+    # ``HomeStoreKey`` is the current employee-dimension contract. Accept the
+    # legacy ``StoreKey`` name as a fallback for older packaged datasets.
+    home_store_col = (
+        "HomeStoreKey" if "HomeStoreKey" in employees.columns else "StoreKey"
+    )
+    if home_store_col in employees.columns:
+        sk = pd.to_numeric(employees[home_store_col], errors="coerce").fillna(0)
     else:
         sk = pd.Series(0, index=employees.index)
     manager_keys = set(ek[title == "Store Manager"].tolist())
@@ -492,94 +497,95 @@ def check_esa(
         ].astype(int)
     )
 
-    # Pre-build employee → renovating store lookup (avoids per-call DataFrame scan)
-    _emp_to_reno_store: dict[int, int] = {}
-    if reno_store_keys:
-        esa_at_reno = esa[esa["StoreKey"].astype(int).isin(reno_store_keys)]
-        for ek_val, sk_val in zip(
-            esa_at_reno["EmployeeKey"].astype(int), esa_at_reno["StoreKey"].astype(int)
-        ):
-            _emp_to_reno_store.setdefault(ek_val, sk_val)
-
-    def _find_source_reno_store(ek: int) -> int:
-        """Find which renovating store an employee came from (via the bridge).
-
-        Opaque keys can't be decoded, so this relies on the ESA StoreKey cache;
-        an employee not currently mapped to a renovating store returns -1.
-        """
-        return _emp_to_reno_store.get(ek, -1)
-
     # --- Renovation Reassignment current-segment rules ---
-    # Temporary renovation (store reopens): IsCurrentAssignment must be False.
-    # Permanent closure renovation (store closed): IsCurrentAssignment must be True.
+    # A reassignment is current only when it is the employee's latest segment.
+    # Permanent renovation moves may legitimately become non-current after a
+    # later voluntary transfer, so source lifecycle alone cannot set this flag.
     rr = esa[esa["TransferReason"] == "Renovation Reassignment"]
     if len(rr) > 0:
-        rr_source = rr["EmployeeKey"].astype(int).apply(_find_source_reno_store)
-        rr_from_closed = rr_source.isin(closed_reno_keys)
-
-        # Temp reno (store reopens): IsCurrentAssignment must be False
-        temp_rr = rr[~rr_from_closed]
-        bad_temp = (
-            (temp_rr["IsCurrentAssignment"].astype(int) == 1).sum()
-            if len(temp_rr) > 0 else 0
-        )
-        # Permanent reno (store closed): IsCurrentAssignment must be True
-        perm_rr = rr[rr_from_closed]
-        bad_perm = (
-            (perm_rr["IsCurrentAssignment"].astype(int) == 0).sum()
-            if len(perm_rr) > 0 else 0
-        )
+        max_seq = esa.groupby("EmployeeKey")["AssignmentSequence"].max()
+        rr_latest = rr["AssignmentSequence"].eq(rr["EmployeeKey"].map(max_seq))
+        rr_current = rr["IsCurrentAssignment"].astype(bool)
+        bad_rr = int((rr_current != rr_latest).sum())
 
         _add(cat, "Renovation Reassignment current-segment rules",
-             bad_temp == 0 and bad_perm == 0,
-             f"{len(temp_rr)} temp (should be False): {bad_temp} violation(s), "
-             f"{len(perm_rr)} permanent (should be True): {bad_perm} violation(s)")
+             bad_rr == 0,
+             f"{len(rr)} reassignment segment(s), "
+             f"{bad_rr} latest/current mismatch(es)")
 
     # --- Renovation segment completeness ---
-    # Stores that reopened: employees need pre-reno + temp + return (3 segments).
-    # Stores that closed permanently: employees need pre-reno + temp (2 segments, no return).
+    # A temp segment that lasts through a reopening needs a return; one ending
+    # earlier may reflect termination. Permanently closed stores never return.
     reno_stores = set(reno_store_keys)  # reuse shared lookup
     if reno_stores:
         reopened_reno = reno_stores - closed_reno_keys
         closed_reno = reno_stores & closed_reno_keys
 
-        reassigned = set(
-            esa.loc[esa["TransferReason"] == "Renovation Reassignment", "EmployeeKey"].astype(int)
+        # Classify each reassignment from its immediately preceding segment.
+        # Employee-level membership is ambiguous because one employee can pass
+        # through multiple renovating stores over a multi-year dataset.
+        ordered = esa.sort_values(
+            ["EmployeeKey", "AssignmentSequence"]
+        ).reset_index(drop=True)
+        prev_emp = ordered["EmployeeKey"].shift(1)
+        prev_store = ordered["StoreKey"].shift(1)
+        next_emp = ordered["EmployeeKey"].shift(-1)
+        next_store = ordered["StoreKey"].shift(-1)
+        next_reason = ordered["TransferReason"].shift(-1)
+        next_start = _to_dt(ordered["StartDate"].shift(-1))
+
+        rr_mask = ordered["TransferReason"].eq("Renovation Reassignment")
+        same_prev_emp = ordered["EmployeeKey"].eq(prev_emp)
+        same_next_emp = ordered["EmployeeKey"].eq(next_emp)
+        return_candidate = same_next_emp & next_reason.eq("Renovation Return")
+
+        # Normal and permanent moves identify their source in the preceding
+        # segment. In overlapping lifecycle chains, however, closure processing
+        # can place an unrelated segment immediately before a reopened-store
+        # reassignment; its following Renovation Return is then authoritative.
+        source_store = prev_store.where(same_prev_emp & rr_mask)
+        source_store = source_store.where(~(rr_mask & return_candidate), next_store)
+        source_reopened = source_store.isin(reopened_reno)
+        source_closed = source_store.isin(closed_reno)
+        immediate_return = rr_mask & return_candidate & next_store.eq(source_store)
+
+        reno_end_by_store = {
+            int(sk): pd.Timestamp(end).normalize()
+            for sk, end in zip(stores["StoreKey"], stores["RenovationEndDate"])
+            if pd.notna(end)
+        }
+        expected_return_start = source_store.map(reno_end_by_store)
+        ended_for_return = _to_dt(ordered["EndDate"]).eq(
+            expected_return_start - pd.Timedelta(days=1)
         )
-        returned = set(
-            esa.loc[esa["TransferReason"] == "Renovation Return", "EmployeeKey"].astype(int)
+
+        # A reopened-store temp segment reaching the day before reopening must
+        # return immediately. Ending earlier can mean employment terminated.
+        # A permanently closed source must never be the immediate return target.
+        missing_return = int(
+            (rr_mask & source_reopened & ended_for_return & ~immediate_return).sum()
         )
-
-        # Classify each reassigned employee by source store
-        reopen_emps: set[int] = set()
-        closed_emps: set[int] = set()
-        for ek in reassigned:
-            src = _find_source_reno_store(ek)
-            if src in closed_reno:
-                closed_emps.add(ek)
-            elif src in reopened_reno:
-                reopen_emps.add(ek)
-
-        # Reopened stores: need reassign + return
-        miss_reassign_reopen = reopen_emps - reassigned
-        miss_return_reopen = reopen_emps - returned
-
-        # Closed stores: need reassign only, no return
-        miss_reassign_closed = closed_emps - reassigned
-        unexpected_return = closed_emps & returned
+        malformed_return = int(
+            (rr_mask & source_reopened & immediate_return
+             & ~next_start.eq(expected_return_start)).sum()
+        )
+        unexpected_return = int(
+            (rr_mask & source_closed & immediate_return).sum()
+        )
+        unclassified = int((rr_mask & ~source_store.isin(reno_stores)).sum())
 
         ok = (
-            len(miss_reassign_reopen) == 0
-            and len(miss_return_reopen) == 0
-            and len(miss_reassign_closed) == 0
-            and len(unexpected_return) == 0
+            missing_return == 0
+            and malformed_return == 0
+            and unexpected_return == 0
+            and unclassified == 0
         )
         _add(cat, "Renovation segments complete",
              ok,
-             f"Reopened stores ({len(reopened_reno)}): {len(reopen_emps)} emp(s), "
-             f"missing reassign={len(miss_reassign_reopen)}, missing return={len(miss_return_reopen)}. "
-             f"Closed stores ({len(closed_reno)}): {len(closed_emps)} emp(s), "
-             f"missing reassign={len(miss_reassign_closed)}, unexpected return={len(unexpected_return)}")
+             f"Reopened stores ({len(reopened_reno)}): "
+             f"missing return={missing_return}, malformed return={malformed_return}. "
+             f"Closed stores ({len(closed_reno)}): "
+             f"unexpected return={unexpected_return}. Unclassified={unclassified}")
 
     # --- No overlapping same-store assignments ---
     esa_sorted = esa.sort_values(["EmployeeKey", "StoreKey", "StartDate"]).reset_index(drop=True)
@@ -656,10 +662,11 @@ def check_esa(
     )
     if terminated_eks:
         term_esa = esa[esa["EmployeeKey"].astype(int).isin(terminated_eks)]
-        zombie = (term_esa["Status"].astype(str) == "Active").sum()
+        zombie = (term_esa["AssignmentStatus"].astype(str) == "Active").sum()
         _add(cat, "No Active assignments for terminated employees",
              zombie == 0,
-             f"{zombie} assignment(s) with Status=Active for terminated employees")
+             f"{zombie} assignment(s) with AssignmentStatus=Active "
+             "for terminated employees")
 
     # --- Assignment dates within employment window ---
     merged = esa.merge(
@@ -769,7 +776,13 @@ def _check_transfer_reason_consistency(
 
     transition_rows = sorted_esa.iloc[1:][transition_mask]
     reasons = transition_rows["TransferReason"].astype(str)
-    bad_mask = ~reasons.isin(_VALID_TRANSITION_REASONS)
+    # Closure labels include the configured store close reason (for example,
+    # ``Store Closure: Lease Ended``), so validate their structured prefix
+    # instead of maintaining a brittle list of every possible suffix.
+    closure_reason = reasons.str.startswith("Store Closure: ") & reasons.str.len().gt(
+        len("Store Closure: ")
+    )
+    bad_mask = ~(reasons.isin(_VALID_TRANSITION_REASONS) | closure_reason)
     bad_count = int(bad_mask.sum())
 
     detail = ""
@@ -1224,7 +1237,9 @@ def _check_post_transfer_leakage(
     """Employees must not appear in sales at a store after their LAST ESA
     window there has ended.  (The sales-to-ESA match covers this, but this
     check gives a more specific diagnostic.)"""
-    transferred = esa[esa["Status"].astype(str) == "Transferred"]
+    transferred = esa[
+        esa["AssignmentStatus"].astype(str) == "Transferred"
+    ]
     if transferred.empty:
         _add(cat, "No post-transfer sales leakage", True, "No transferred assignments")
         return
