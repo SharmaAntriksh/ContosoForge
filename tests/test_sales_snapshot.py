@@ -330,8 +330,13 @@ def test_golden_fingerprint(matrix):
         cell for cell in current if baseline.get(cell) != current.get(cell)
     )
     missing = sorted(cell for cell in baseline if cell not in current)
+    changed_fingerprints = {
+        cell: {"expected": baseline.get(cell), "actual": current[cell]}
+        for cell in mismatches
+    }
     assert not mismatches and not missing, (
         f"Sales fact changed vs golden baseline. Mismatched cells: {mismatches}. "
         f"Cells missing from this run: {missing}. If intended (an output-altering "
-        "change), rerun with REGEN_SALES_SNAPSHOT=1 to regenerate the baseline."
+        "change), rerun with REGEN_SALES_SNAPSHOT=1 to regenerate the baseline. "
+        f"Fingerprint differences: {json.dumps(changed_fingerprints, sort_keys=True)}"
     )

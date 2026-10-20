@@ -10,6 +10,7 @@ generators for parallel chunk processing.
 """
 from __future__ import annotations
 
+import multiprocessing
 import os
 import signal
 import time
@@ -91,7 +92,8 @@ def iter_imap_unordered(
     Generic multiprocessing runner.
 
     - 'tasks' must be pickleable (dict/tuple/list of primitives is ideal)
-    - 'task_fn' and 'initializer' must be top-level functions (importable) for Windows spawn
+    - Workers start with spawn on every platform, without inheriting parent caches.
+    - 'task_fn' and 'initializer' must be top-level, importable functions.
     - Yields results in completion order (unordered).
 
     Submission uses a bounded sliding window of ``2 × processes`` so that at
@@ -110,6 +112,11 @@ def iter_imap_unordered(
 
     executor_kwargs: Dict[str, Any] = {
         "max_workers": spec.processes,
+        # Linux's default fork inherits module state from earlier in-process
+        # runs/tests and forks after Arrow/NumPy may have started threads.
+        # Use the same clean worker boundary as Windows, also when recycling
+        # is disabled (max_tasks_per_child otherwise implicitly selects spawn).
+        "mp_context": multiprocessing.get_context("spawn"),
         "initializer": _worker_init_wrapper,
         "initargs": (initializer, initargs),
     }
