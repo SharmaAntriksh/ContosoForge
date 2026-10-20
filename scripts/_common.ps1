@@ -246,9 +246,9 @@ function Invoke-DriverSelfHeal {
     .SYNOPSIS
         Ensure $Module is importable in $PythonExe; if not, install its uv extra
         (uv sync --extra <Extra>) and re-check. Throws if it still can't be
-        imported. Optional DB-import drivers (pyodbc/psycopg) live in extras that
-        a bare `uv sync` prunes, so the import runners self-heal here rather than
-        failing deep inside the Python import.
+        imported. This repairs incomplete environments for the core database
+        drivers (the sql/postgres extras remain compatibility aliases), rather
+        than failing deep inside the Python import.
     #>
     param(
         [Parameter(Mandatory)][string]$PythonExe,
@@ -257,12 +257,23 @@ function Invoke-DriverSelfHeal {
         [Parameter(Mandatory)][string]$ProjectRoot
     )
 
+    # Windows PowerShell turns redirected native stderr into ErrorRecords.
+    # Under the launcher's 'Stop' preference, a missing-module traceback would
+    # abort this function before it can install the driver. Keep this preference
+    # local to the function and handle native failures via their exit codes.
+    $ErrorActionPreference = "Continue"
+    $PSNativeCommandUseErrorActionPreference = $false
+
     & $PythonExe -c "import $Module" 2>$null
     if ($LASTEXITCODE -eq 0) { return }
 
     Write-Step "$Module not found in this interpreter - auto-installing the '$Extra' extra via uv..." -Level warn
     Assert-UvAvailable
-    & uv sync --project $ProjectRoot --extra $Extra 2>&1 | Out-Null
+    $installOutput = & uv sync --project $ProjectRoot --extra $Extra 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("Failed to install the '$Extra' extra via uv (exit code $LASTEXITCODE):`n" +
+               ($installOutput -join "`n"))
+    }
     & $PythonExe -c "import $Module" 2>$null
     if ($LASTEXITCODE -ne 0) {
         throw "$Module is required but could not be installed automatically. Run:  uv sync --extra $Extra"

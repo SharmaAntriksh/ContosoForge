@@ -10,10 +10,11 @@
 #   .\scripts\create_venv.ps1
 #   .\scripts\create_venv.ps1 -Force
 #   .\scripts\create_venv.ps1 -Dev
-#   .\scripts\create_venv.ps1 -Minimal            # core deps only, no import drivers
-#   .\scripts\create_venv.ps1 -Extras sql         # only the SQL Server import driver
+#   .\scripts\create_venv.ps1 -Minimal            # core deps including both database drivers
+#   .\scripts\create_venv.ps1 -Extras sql         # core deps including both database drivers
 #
-# Extras (sql, postgres) install by default; -Minimal skips them. See README.
+# Both database drivers are core dependencies. The sql/postgres extras remain
+# compatibility aliases; -Minimal skips only optional extras. See README.
 # ------------------------------------------------------------
 
 [CmdletBinding()]
@@ -22,7 +23,7 @@ param(
     [switch]$Force,
     [switch]$Dev,
     # Optional-dependency extras to install (installed by default).
-    [string[]]$Extras = @("sql", "postgres"),
+    [string[]]$Extras = @(),
     [switch]$Minimal
 )
 

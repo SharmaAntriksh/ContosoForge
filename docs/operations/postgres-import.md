@@ -11,11 +11,11 @@ Load a CSV-format generated dataset into PostgreSQL in one step. The import scri
 ## Prerequisites
 
 - **PostgreSQL 12+** reachable from the import host (tested against Postgres 16 and 18 on Windows, Linux, and Docker).
-- **psycopg 3** installed in the Python environment (ships in the `postgres` extra):
+- **psycopg 3** installed in the Python environment (included by default):
   ```bash
-  uv sync --extra postgres
+  uv sync
   ```
-  The PS1 wrapper will fail fast if it's missing.
+  The PS1 wrapper also attempts to repair incomplete installations.
 - A role that can `CREATE DATABASE` on the target server (typically `postgres` or another superuser).
 
 ---
@@ -265,9 +265,9 @@ Then rerun the importer.
 **"psycopg is required for Postgres import."**
 The PS1 wrapper validates psycopg is importable before doing anything else. Install with:
 ```bash
-uv sync --extra postgres
+uv sync
 ```
-The `postgres` extra pulls `psycopg[binary]`, avoiding the C-compiler dependency.
+The default dependencies include `psycopg[binary]`, avoiding the C-compiler dependency.
 
 **`COPY into "public"."X" from <path> failed: ...`**
 The CSV is missing or unreadable. The importer reports the run-relative path; check the file exists under `<run>/dimensions/` or `<run>/facts/`. The most common cause is the run folder being moved or partially deleted between generation and import.

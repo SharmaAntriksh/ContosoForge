@@ -93,7 +93,8 @@ try {
         Write-Step "Python : $PythonExe (not resolved on PATH)" -Level warn
     }
 
-    # Preflight: ensure psycopg is importable, self-heal via the 'postgres' extra.
+    # Preflight: repair incomplete installs (postgres is a compatibility extra;
+    # psycopg[binary] is a core dependency).
     if ($pyResolvedPath) {
         Invoke-DriverSelfHeal -PythonExe $PythonExe -Module "psycopg" -Extra "postgres" -ProjectRoot $RepoRoot
     }

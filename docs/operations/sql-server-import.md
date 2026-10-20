@@ -4,6 +4,10 @@ Load a CSV-format generated dataset into SQL Server in one step. The import scri
 
 > Available only for `--format csv` runs. Parquet and Delta outputs do not generate SQL bootstrap scripts.
 
+`uv sync` installs the required Python driver (`pyodbc`) by default. The machine
+running the importer also needs Microsoft ODBC Driver 17 or 18 for SQL Server;
+that system driver is installed separately from Python dependencies.
+
 > If the target database already exists, the import is skipped automatically. Use a fresh database name per run, or drop the database first.
 
 ---

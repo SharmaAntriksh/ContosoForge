@@ -241,8 +241,10 @@ dependencies = [
     { name = "fastapi" },
     { name = "numpy" },
     { name = "pandas" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
     { name = "pydantic" },
+    { name = "pyodbc" },
     { name = "pyyaml" },
     { name = "uvicorn" },
     { name = "yfinance" },
@@ -256,12 +258,6 @@ dev = [
     { name = "pytest-timeout" },
     { name = "ruff" },
 ]
-postgres = [
-    { name = "psycopg", extra = ["binary"] },
-]
-sql = [
-    { name = "pyodbc" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -270,10 +266,10 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },
     { name = "numpy", specifier = ">=2.3.5,<3" },
     { name = "pandas", specifier = ">=2.3.3,<4" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1,<4" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1,<4" },
     { name = "pyarrow", specifier = ">=22.0.0,<24" },
     { name = "pydantic", specifier = ">=2.12.5,<3" },
-    { name = "pyodbc", marker = "extra == 'sql'", specifier = ">=5.3.0,<6" },
+    { name = "pyodbc", specifier = ">=5.3.0,<6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.0" },

@@ -122,7 +122,8 @@ try {
         Write-Step "Python : $PythonExe (not resolved on PATH)" -Level warn
     }
 
-    # Preflight: ensure pyodbc is importable, self-heal via the 'sql' extra.
+    # Preflight: repair incomplete installs ('sql' is a compatibility extra;
+    # pyodbc is now a core dependency).
     if ($pyResolvedPath) {
         Invoke-DriverSelfHeal -PythonExe $PythonExe -Module "pyodbc" -Extra "sql" -ProjectRoot $RepoRoot
     }

@@ -455,7 +455,7 @@ the locked environment:
 ```bash
 git clone https://github.com/SharmaAntriksh/ContosoForge.git
 cd ContosoForge
-uv sync --extra sql --extra postgres
+uv sync
 ```
 
 Generate data:
@@ -472,7 +472,8 @@ uv run python -m uvicorn web.api:app --port 8502
 
 Then open `http://127.0.0.1:8502`.
 
-The database drivers are optional. For a smaller core-only environment, use:
+Both SQL Server (`pyodbc`) and PostgreSQL (`psycopg[binary]`) Python drivers
+are included in the default dependencies:
 
 ```bash
 uv sync
