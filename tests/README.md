@@ -1,82 +1,99 @@
 # Tests
 
-Run the suite with the `dev` extra (pytest lives there; the `.venv` is uv-managed):
+Install the locked development tools from the repo root:
+
+```powershell
+uv sync --locked --extra dev
+.venv/Scripts/python.exe -m pytest
+```
+
+On POSIX use `.venv/bin/python`. `pyproject.toml` sets `-v --tb=short`.
+Use `--collect-only -q` to discover current tests; keep this guide focused on
+contracts rather than test counts or temporary implementation phases.
+`httpx` comes with the dev extra so web tests do not silently skip. Both database
+Python drivers are default dependencies. Importer unit tests use fake connections;
+live database connectivity, permissions, and server-side file access need a
+separate integration run when that is the task.
+
+## Choose checks by the changed behavior
+
+All filenames in the table are under `tests/`. Pass the relevant files to
+`.venv/Scripts/python.exe -m pytest`.
+
+| Change | Useful test groups |
+|---|---|
+| Config/coercion | `test_config_loader.py`, `test_schema.py`, `test_state.py` |
+| Sales worker boundary | `test_sales_contract.py`, `test_worker_cfg_validation.py`, `test_state.py` |
+| Sales sampling / determinism | `test_sales_determinism_workers.py`, `test_sales_determinism_chunksize.py`, `test_sales_snapshot.py` |
+| Temporal mix | `test_temporal_mix.py`, `test_customer_temporal_mix.py`, `test_product_temporal_mix.py`, `test_temporal_mix_calibration.py` |
+| Counter-based sampling | `test_product_sampling_counter.py`, `test_channel_time_counter.py`, `test_hashing.py` |
+| Sales output schemas / writers | `test_sales_schema_consistency.py`, `test_sales_writer.py`, `test_sales_writer_atomic.py`, `test_delta_writer_schema.py` |
+| Dates registry / calendars | `test_dates.py`, `test_dates_snapshot.py` |
+| Workforce / temporal coverage | `test_temporal_contracts.py`, `test_workforce_published_contract.py`, `test_store_warehouse_causality.py`, `test_coverage_preflight.py` |
+| SQL generation / casing | `test_dialect.py`, `test_dialect_postgres.py`, `test_constraint_generation.py`, `test_view_generation.py`, `test_identifier_case_e2e.py`, `test_reemit_sql.py` |
+| Importers / PowerShell | `test_sql_import_hardening.py`, `test_postgres_import.py`, `test_import_entrypoints.py`, `test_powershell_driver_preflight.py` |
+| Web routes / preview / import | `test_web_api.py`, `test_web_routes.py`, `test_web_data_preview.py`, `test_web_import_routes.py` |
+| Frontend build and serving | `test_web_frontend.py`; also `npm run build:check` from `web/frontend/` |
+| Packaging / published output | `test_package_output.py`, `test_packaging.py`, `test_published_data_conformance.py`, `test_analytical_quality.py` |
+| Benchmark / release tooling | `test_benchmark_release.py`, `test_release_manifest.py`, `test_release_validator.py` |
+
+Use the relevant area skill for additional focused tests; this table is not the
+entire suite. PowerShell tests run Windows PowerShell 5.1 and PowerShell 7 when
+available, skip unavailable shells, and mock installation rather than changing
+the developer's environment.
+
+## Sales determinism and stored snapshots
+
+These are different checks:
+
+- **Worker invariance:** fixed seed/config/chunk size, different worker counts,
+  identical canonical sales fingerprints. Keep the second seed `20250701` in
+  `test_sales_determinism_workers.py`; it exercises a cache path seed 1234 misses.
+- **Chunk-shape invariance:** row totals, monthly row totals, and monthly distinct
+  customer coverage agree across chunk sizes. Full row multiset identity is not
+  asserted; chunk-sharded order labels and chunk-local draws may differ.
+- **Absolute fingerprints:** `test_sales_snapshot.py` checks each fixture/worker/
+  chunk-size cell against `tests/_snapshots/sales_fact_fingerprints.json`.
+  The fingerprint covers schema, count, and key-sorted LF-normalized values;
+  it is not a hash of physical parquet files.
+
+Reuse `tests/sales_gen.py` (`small_config`, `run_pipeline_stage`, `load_sales`)
+for small pipeline tests. It reads the real YAML defaults, patches scale and
+paths, and supplies fixed seeds. Use temporary output/dimension directories and
+isolate `src.versioning.version_store.VERSION_DIR` when exercising versioning;
+do not overwrite the developer's dimension cache or generated datasets.
+
+A behavior-preserving edit must leave stored fingerprints unchanged. When an
+intentional generation change moves output, first inspect the affected cells
+and explain the change. Regenerate the sales baseline with:
+
+```powershell
+$env:REGEN_SALES_SNAPSHOT = "1"
+try { .venv/Scripts/python.exe -m pytest tests/test_sales_snapshot.py -q }
+finally { Remove-Item Env:REGEN_SALES_SNAPSHOT }
+```
+
+Restore the previous value instead if the caller already set that environment
+variable. POSIX equivalent:
 
 ```bash
-uv run --extra dev pytest                    # whole suite
-uv run --extra dev pytest tests/test_dates.py -k "iso"   # a subset
+REGEN_SALES_SNAPSHOT=1 .venv/bin/python -m pytest tests/test_sales_snapshot.py -q
 ```
 
-`pyproject.toml` sets `-v --tb=short`. Web-API tests need `httpx` (skipped otherwise);
-the `test_postgres_*` tests exercise the PostgreSQL dialect/import path.
+Commit the explained baseline diff with the behavior change. Dates and store
+cluster snapshots have their own fixture/regen mechanisms; inspect
+`test_dates_snapshot.py` and `test_store_cluster_snapshot.py` before updating
+`tests/golden/dates_snapshots.json` or
+`tests/_snapshots/store_cluster_fingerprints.json`.
 
----
+Some historical regressions used strict `xfail` markers. Inspect the current
+markers rather than assuming an old phase plan is still active. If a fixed
+behavior produces strict XPASS, remove that marker and retain the assertion.
 
-## Sales-fact determinism & schema guardrails (Phase 0 of the improvement plan)
+## Release checks versus working-tree checks
 
-These encode guarantees the project advertises but that were previously untested.
-
-| File | Asserts | Today | Flips green when |
-|---|---|---|---|
-| `test_sales_determinism_workers.py` | sales fact is identical regardless of `--workers` | **all pass** (multi-chunk now a hard guard) | ✅ **Phase 1.1 landed** (closed-form discovery) |
-| `test_sales_determinism_chunksize.py` | sales fact shape is independent of `chunk_size` | 1 pass, 1 **xfail** (per-month distinct) | **Phase 2** (global per-month plan) |
-| `test_sales_schema_consistency.py` | Arrow (parquet) and SQL (DDL) Sales schemas agree | 2 pass, 1 **xfail** (exact dtypes) ×params | **Phase 5.5** (one canonical schema) |
-
-`test_sales_determinism_workers.py` also carries `test_multi_chunk_worker_invariance_second_seed`
-(seed 20250701) — a second seed that exercises the worker-lifetime product-CDF cache path the
-Phase 1.1 stress uncovered (the cache was keyed by calendar month but its brand mix depends on the
-absolute month). Keep it: seed 1234 alone does not trigger that path.
-
-The `_workers`/`_chunksize` tests run the real pipeline on a tiny dataset (a few
-seconds each, spawn a worker pool). `test_sales_schema_consistency.py` is a fast
-pure-unit check (no generation).
-
-### The xfail → hard-assert protocol
-
-Each guardrail's *desired* behaviour is asserted directly, but the current (buggy)
-reality is marked `@pytest.mark.xfail(strict=True)`. `strict=True` means:
-
-- **Today:** the bug is present, the assertion fails, pytest reports `XFAIL` (green).
-- **After the fixing phase lands:** the assertion passes, pytest reports `XPASS`, and
-  because it is *strict* that XPASS is a **test failure**.
-
-That failure is the signal. When it fires, **delete the `@pytest.mark.xfail(...)`
-marker** (and its `reason`) so the test becomes a permanent hard regression guard.
-Do not weaken it to `strict=False` or delete the test. The marker's `reason` names the
-phase and finding responsible.
-
----
-
-## When a change intentionally alters generated output
-
-Phases 1–4 of the plan deliberately change the bytes of the generated sales fact
-(discovery scheduling, chunk planning, demand/pricing models). Expect:
-
-- The determinism guardrails above to **XPASS** as their phase lands → remove the
-  `xfail` marker (see protocol above).
-- No stored "golden" fixtures to update: the current guardrails compare two
-  *in-process* runs to each other (worker-count vs worker-count, chunk-size vs
-  chunk-size), so there is nothing on disk to regenerate.
-
-If a future test needs a **stored golden dataset** (e.g. a committed reference
-digest), build and regenerate it deterministically with the shared harness in
-[`tests/sales_gen.py`](sales_gen.py) rather than hand-rolling generation:
-
-```python
-# regenerate a reference sales fact + its canonical digest
-from pathlib import Path
-from tests import sales_gen
-
-base = Path("scratch_ref")
-dims = base / "dims"; dims.mkdir(parents=True, exist_ok=True)
-cfg = sales_gen.small_config(dims_dir=dims, scratch_dir=base / "s",
-                             final_dir=base / "f", workers=1, chunk_size=1000)
-sales_gen.run_pipeline_stage(base, cfg, only="dimensions")
-sales_gen.run_pipeline_stage(base, cfg, only="sales")
-df = sales_gen.load_sales(base / "f", base / "s")
-print(sales_gen.sales_digest(df))   # commit this as the new golden digest
-```
-
-`sales_gen` bases its config on the repo's real `config.yaml`/`models.yaml` (patched
-small) so it stays representative, and uses a fixed seed — the digest is stable as
-long as the generation logic is unchanged.
+`scripts/validate_web_release.py` validates an isolated archive of **committed
+HEAD**. Run local pytest/build checks to validate uncommitted work. The release
+validator can be useful after committing, but cannot certify pending edits.
+`scripts/benchmark_output_modes.py` defaults to a 20M-row workload; provide
+explicit small `--rows` and `--workers` values for a smoke benchmark.

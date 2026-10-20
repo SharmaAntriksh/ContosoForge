@@ -4,7 +4,7 @@ Analytics-ready retail data generator (dimensional model, inspired by ContosoRet
 
 ## Skills (load the relevant one before working in that area)
 
-Detailed, area-specific knowledge lives in on-demand skills under `.Codex/skills/` so this file stays a lean map. Load the skill that matches your task — its body carries the deep detail; the "danger index" below keeps only the one-line tripwire.
+Detailed, area-specific knowledge lives in on-demand skills under `.agents/skills/` so this file stays a lean map. Load the skill that matches your task — its body carries the deep detail; the "danger index" below keeps only the one-line tripwire.
 
 | Skill | Load it when you're… | Holds the detail for |
 |---|---|---|
@@ -13,6 +13,10 @@ Detailed, area-specific knowledge lives in on-demand skills under `.Codex/skills
 | **config-schema** | adding/changing a config field, or reading `cfg`/`models_cfg` | Pydantic spine, normalizer, coercion helpers |
 | **web-layer** | editing anything under `web/` | thread safety, route versioning, CORS/security/limits |
 | **sql-and-dialects** | editing `src/tools/sql/` or generated SQL | dialect classes, escaping, import runners |
+
+The `.agents/skills/` files are the canonical repo skills. `.claude/skills/` mirrors
+those files for Claude discovery; update both copies when changing a skill.
+`CLAUDE.md` imports this file so the shared repo guidance has one source.
 
 ## Tech Stack
 
@@ -36,30 +40,47 @@ directly:**
 .venv/bin/python -m pytest                # POSIX
 ```
 
-Human contributors instead activate the venv first — see README.md for full setup.
+Run commands from the repo root. For a fresh checkout or missing test tools:
+
+```powershell
+uv sync --locked --extra dev
+```
+
+Plain `uv sync` installs both database Python drivers (`pyodbc` and
+`psycopg[binary]`); `sql` and `postgres` extras are compatibility aliases.
+`pytest`, `httpx`, and `ruff` are in the `dev` extra. SQL Server also needs a
+separately installed Microsoft ODBC driver. Reuse the venv interpreter after
+syncing rather than relying on activation or bare `python`/`pytest`.
+
+Read and write repo text explicitly as UTF-8; Windows Python may otherwise use
+cp1252. When testing PowerShell scripts, check both Windows PowerShell 5.1
+(`powershell.exe`) and PowerShell 7 (`pwsh`) when available; native stderr handling
+differs. See `tests/test_powershell_driver_preflight.py`.
+
+Human contributors can activate the venv — see README.md for full setup.
 
 ## Commands
 
-```bash
+```powershell
 # Run generation (CLI) — full flag reference lives in the generate-dataset skill
-python main.py --format parquet --sales-rows 1000000
-python main.py --format csv --customers 5000 --sales-rows 100000
-python main.py --format deltaparquet --workers 8
+.venv/Scripts/python.exe main.py --format parquet --sales-rows 1000000
+.venv/Scripts/python.exe main.py --format csv --customers 5000 --sales-rows 100000
+.venv/Scripts/python.exe main.py --format deltaparquet --workers 8
 
 # Useful flags
-python main.py --dry-run                        # validate config, no generation
-python main.py --only dimensions                # generate dims only
-python main.py --only sales                     # generate sales only (dims must exist)
-python main.py --regen-dimensions products      # force-rebuild specific dim
-python main.py --regen-dimensions all           # force-rebuild all dims
-python main.py --refresh-fx-master              # top up FX rates via Yahoo Finance
+.venv/Scripts/python.exe main.py --dry-run                        # validate config, no generation
+.venv/Scripts/python.exe main.py --only dimensions                # generate dims only
+.venv/Scripts/python.exe main.py --only sales                     # generate sales only (dims must exist)
+.venv/Scripts/python.exe main.py --regen-dimensions products      # force-rebuild specific dim
+.venv/Scripts/python.exe main.py --regen-dimensions all           # force-rebuild all dims
+.venv/Scripts/python.exe main.py --refresh-fx-master              # top up FX rates via Yahoo Finance
 
 # Post-generation tools
-python scripts/optimize_delta.py "generated_datasets/..."   # compact small delta files
-python scripts/optimize_parquet.py "generated_datasets/..."  # re-compress parquet
+.venv/Scripts/python.exe scripts/optimize_delta.py "generated_datasets/..."   # compact small delta files
+.venv/Scripts/python.exe scripts/optimize_parquet.py "generated_datasets/..."  # re-compress parquet
 
 # Web UI
-python -m uvicorn web.api:app --port 8502
+.venv/Scripts/python.exe -m uvicorn web.api:app --port 8502
 ```
 
 ## Architecture
@@ -80,145 +101,28 @@ config.yaml + models.yaml --> Pipeline Runner
   |-- Package Output (final timestamped folder with dims, facts, SQL, Power BI project)
 ```
 
-## Directory Map
+## Code map
 
-```
-main.py                          # Entry point, calls src.cli.main()
-src/
-  cli.py                         # Argument parser, CLI overrides
-  defaults.py                    # Centralized hardcoded constants (stores, customers, promos, etc.)
-  exceptions.py                  # Custom exception hierarchy (PipelineError, ConfigError, etc.)
-  dimensions/                    # One generator per dimension table
-    customers/                   # Customer dimension package
-      __init__.py                # Re-exports run_customers, run_subscriptions
-      generator.py               # Main orchestrator: generate_synthetic_customers(), run_customers()
-      helpers.py                 # Date math, acquisition curves, income/phone/credit/address generation
-      org_profile.py             # OrganizationProfile constants + generate_org_profile()
-      households.py              # Household assignment (spouse/dependent matching)
-      scd2.py                    # SCD2 life event engine (career, marriage, relocation, etc.)
-      subscriptions/             # Plans + CustomerSubscriptions (many-to-many bridge) package
-        __init__.py              # Re-exports run_subscriptions
-        runner.py                # run_subscriptions() entry point
-        catalog.py               # Plan catalog definitions
-        helpers.py               # Subscription assignment helpers
-        bridge_serial.py         # Serial bridge builder
-        bridge_parallel.py       # Parallel (multiprocessing) bridge builder
-      worker.py                  # Multiprocessing chunk worker for parallel customer generation
-    dates/                       # Date dimension package — one module per calendar system
-      __init__.py                # Re-exports run_dates, generate_date_table, resolve_date_columns, WeeklyFiscalConfig, run_time_table
-      runner.py                  # run_dates() — config parsing, versioning, parquet write
-      generator.py               # Orchestrator: calls add_*_columns() subsystems in sequence
-      calendar.py                # add_calendar_columns() — base calendar + as-of relative offsets
-      iso.py                     # add_iso_columns() — ISO week fields + offsets
-      fiscal.py                  # add_fiscal_columns() — monthly fiscal system + offsets
-      weekly_fiscal.py           # WeeklyFiscalConfig + add_weekly_fiscal_columns() — 4-4-5 system
-      columns.py                 # resolve_date_columns() — builds ordered output column list per config
-      helpers.py                 # Shared constants (_EXCEL_EPOCH, _ISO_WEEK_REF) and utility functions
-      time.py                    # Time-of-day dimension (minute grain, 1440 rows)
-    employees/                   # Employee dimension package
-      __init__.py                # Re-exports run_employees, run_employee_store_assignments
-      generator.py               # Employee generation with role profiles, HR fields
-      employee_store_assignments.py  # Multi-store assignment with transfer reasons
-      transfers.py               # Transfer scheduling logic
-    exchange_rates/              # Currency + exchange rate dimensions
-      __init__.py                # Re-exports run_currency, run_exchange_rates
-      currency.py                # Currency dimension from defaults
-      exchange_rates.py          # Daily exchange rates (Yahoo Finance or synthetic)
-      monthly_rates.py           # Monthly aggregated rates
-      helpers.py                 # Triangulation, date alignment utilities
-    products/                    # Product dimension package
-      __init__.py                # Re-exports run_suppliers, generate_product_dimension, load_static_dimension
-      products.py                # Entry point: generate_product_dimension() (category + subcategory + products)
-      generator.py               # Orchestrator: load → expand → price → enrich → SCD2 → write
-      scd2.py                    # SCD2 price revision versioning (vectorized)
-      product_profile.py         # ProductProfile enrichment (analytical attributes)
-      pricing.py                 # Price grid: bands, margin, snap, brand normalization
-      contoso_loader.py          # Load product catalog (catalog: contoso | synthetic | all)
-      contoso_expander.py        # Stratified trim/expand of products
-      catalog_builder.py         # Offline script: generates synthetic products, writes split parquets
-      static_loader.py           # Generic static dimension loader (category, subcategory)
-      suppliers.py               # Supplier dimension generation
-      worker.py                  # Multiprocessing chunk worker for parallel product enrichment
-    stores/                      # Store dimension package
-      __init__.py                # Re-exports run_stores, generate_store_table, GeoContext
-      generator.py               # Store generation with geography, staffing, assortment
-    warehouses/                  # Warehouse dimension package
-      generator.py               # Warehouse generation (capacity, location, type)
-    geography.py                 # Geography dimension (countries, states, cities, population weighting)
-    promotions.py                # Promotions dimension (seasonal, clearance, BOGO, etc.)
-    lookups.py                   # Lookup dimensions (sales channels, loyalty tiers, acquisition channels)
-    return_reasons.py            # Return reason dimension
-  facts/
-    sales/                       # Core sales fact generation
-      sales.py                   # Entry point, orchestrates worker pool
-      prep/                      # Coordinator-side setup (main process, before the worker pool spawns)
-        sales_helpers.py         # Leaf helpers (stdlib/numpy/pandas; importable without importing sales.py)
-        dimension_loaders.py     # Load dimension parquet + promo-salience precompute
-        correlation_lookups.py   # Correlation lookups + _prebuild_shared_structures (SHM broadcast)
-        scd2_grid.py             # Shared SCD2 version-index grid helper
-        memory_model.py          # Chunk-size RAM budgeting (cap by available physical bytes)
-        worker_cfg_builder.py    # Assemble worker_cfg dict + streamed-fact accumulators
-        worker_cfg_schema.py     # Worker config dict schema (SalesWorkerCfg)
-        coverage_preflight.py    # Pre-run salesperson-coverage check (abort/skip/repair policy)
-      sales_logic/               # Business logic (orders, pricing, promos, allocation)
-        globals.py               # State class (per-worker; bound once, read-only thereafter) + schema bridge
-        chunk_builder.py         # Per-chunk row assembly (CDF sampling, ID arithmetic)
-        columns.py               # Sales column derivation (channel cache, etc.)
-        core/                    # customer_sampling, orders, promotions, allocation, pricing, delivery
-      sales_models/              # quantity model (Poisson), pricing pipeline (inflation+markdown+snap)
-      sales_worker/              # Multiprocessing pool, task definitions, schemas
-      sales_writer/              # Output writers (parquet merge, delta, CSV), encoding
-      output_paths.py            # Scratch/output path resolution
-      output_assembler.py        # Final output assembly (parquet merge / delta / csv dispatch)
-    budget/                      # Budget fact (Low/Medium/High scenarios): accumulator, engine, lookups, micro_agg, runner
-    inventory/                   # Inventory snapshots (monthly grain, ABC class, shrinkage): accumulator, engine, micro_agg, runner, worker
-    wishlists/                   # Customer wishlists (streamed): accumulator, constants, micro_agg, runner, scd2, selection, worker
-    complaints/                  # Customer complaints (streamed): accumulator, micro_agg, runner
-    shared/                      # Shared fact utilities
-      base_accumulator.py        # Base class for streamed fact accumulators
-      micro_agg_helpers.py       # Micro-aggregation helpers for fact generation
-      writers.py                 # Shared output writers for fact tables
-  engine/
-    config/                      # config_loader.py, config.py (normalizer registry), config_schema.py (Pydantic models)
-    packaging/                   # package_output (orchestrator), csv/parquet/delta packagers, paths, SQL script gen
-    runners/
-      pipeline_runner.py         # Main orchestrator (override precedence, config injection)
-      dimensions_runner.py       # Dependency-aware dim generation with version tracking
-      sales_runner.py            # Sales pipeline coordinator
-    quality_report.py            # Post-generation quality report (FK checks, stats, warnings)
-    dimension_loader.py          # Load dimension parquet files for pipeline use
-    powerbi_packaging.py         # Auto-generates .pbip project
-  integrations/
-    fx_yahoo.py                  # Yahoo Finance FX rate downloader
-  tools/sql/                     # Multi-dialect SQL script generators (CREATE TABLE, BULK INSERT/COPY)
-    dialect/                     # Pluggable SQL dialects: base.py, sqlserver.py, postgres.py
-    generate_create_table_scripts.py, generate_bulk_insert_sql.py  # DDL + bulk-load script gen
-    sql_server_import.py, postgres_import.py  # Live DB import runners (SQL Server + PostgreSQL)
-    sql_helpers.py, _import_common.py          # Shared escaping / import utilities
-  utils/
-    shared_arrays.py             # Numpy shared memory for dimension broadcasting to workers
-    static_schemas.py            # Column definitions for all output tables
-    trend_presets.py             # Trend presets: business shape (revenue, lifecycle, demand)
-    config_helpers.py            # Canonical type coercion helpers (bool_or, int_or, float_or, etc.)
-    config_precedence.py         # Standardized config resolution (resolve_seed, resolve_dates)
-    pool.py                      # Generic multiprocessing pool (PoolRunSpec, iter_imap_unordered)
-    config_merge.py              # Deep-merge helpers for config layering
-    promotion_buckets.py         # Promotion bucketing helpers
-    name_pools.py, output_utils.py, logging_utils.py
-  versioning/
-    version_store.py             # Hash-based dimension version tracking (writes data/versioning/<name>.version.json)
-web/
-  api.py                         # FastAPI app entry point (includes routers, serves frontend)
-  shared_state.py                # Shared mutable state and helpers for web layer
-  routes/                        # FastAPI routers (split from monolithic api.py)
-    config_routes.py             # /api/config endpoints
-    models_routes.py             # /api/models endpoints
-    generation_routes.py         # /api/generate, /api/validate endpoints
-    presets_routes.py            # /api/presets endpoints
-    data_routes.py               # /api/datasets endpoints (browse, preview generated data)
-    import_routes.py             # /api/import endpoints (SQL Server import management)
-  frontend/                      # React SPA (YAML editor, presets, log viewer)
-```
+| Area | Entry points / guidance |
+|---|---|
+| CLI and orchestration | `src/cli.py`, `src/engine/runners/` |
+| Config validation | `src/engine/config/`, `config-schema` skill |
+| Dimensions | `src/dimensions/`, dependency/version cascade in `dimensions_runner.py` |
+| Sales | `src/facts/sales/`, `sales-internals` skill |
+| Other facts | `src/facts/{budget,inventory,wishlists,complaints,shared}/` |
+| Output and Power BI | `src/engine/packaging/`, `src/engine/powerbi_packaging.py` |
+| SQL and live imports | `src/tools/sql/`, `scripts/sql/`, `sql-and-dialects` skill |
+| Web backend and SPA | `web/`, `web-layer` skill; frontend build in `web/frontend/README.md` |
+| Published schemas | `src/utils/static_schemas.py`, SQL roster `src/tools/sql/schema_model.py` |
+| Tests and fixtures | `tests/README.md`, `tests/sales_gen.py`, `tests/_snapshots/`, `tests/golden/` |
+| User-facing configuration and semantics | `docs/CONFIG_GUIDE.md`, `docs/MODELS_GUIDE.md`, `docs/ANALYTICAL_SEMANTICS.md` |
+
+For dimension changes, check the published schema and version key as well as the
+generator. Dates columns are registry-driven in `static_schemas.py`; the date
+resolver, DDL, and Power BI must agree (`tests/test_dates_snapshot.py`). Changes to
+store/employee assignments must preserve effective-date coverage and published
+workforce contracts (`tests/test_temporal_contracts.py`,
+`tests/test_workforce_published_contract.py`, `tests/test_store_warehouse_causality.py`).
 
 ## Config & Generation (summary — full detail in the generate-dataset skill)
 
@@ -245,7 +149,7 @@ One line per tripwire. Where a skill owns the detail, it's tagged `→ skill`; l
 - **Shared arrays:** update `SharedArrayGroup` init when adding a dimension column workers need. → sales-internals
 
 ### Config & generation — load **config-schema** / **generate-dataset**
-- **Both `cfg` and `models_cfg` are Pydantic, not dicts** — attribute access; copy with `model_copy(deep=True)`. → config-schema
+- **Pipeline `cfg` and `models_cfg` are Pydantic, not dicts** — attribute access; copy with `model_copy(deep=True)`. → config-schema
 - **Coercion helpers** (`bool_or`/`int_or`/`float_or`/`str_or`) come from `src.utils.config_helpers`; don't redefine. → config-schema
 - **Dimension versioning:** a SHA-256 of each dim's config section gates regen. If an edit "did nothing," the hash didn't change — force with `--regen-dimensions`. → generate-dataset
 - **Pricing injection:** editing `models.yaml` pricing bands requires `--regen-dimensions products` to resync the product dim. → generate-dataset
@@ -273,34 +177,35 @@ One line per tripwire. Where a skill owns the detail, it's tagged `→ skill`; l
 - **Log file descriptor thread safety:** `_ensure_log_file_open()` in `logging_utils.py` is guarded by `_LOG_FD_LOCK` to prevent races when multiple threads open the log file simultaneously.
 - **`Products.BaseProductID` references `ProductID`, not `ProductKey`, under SCD2:** SCD2 reassigns `ProductKey` to a fresh `1..total_rows` sequence, so `BaseProductID` no longer matches any current `ProductKey` — but it still matches `ProductID` (which SCD2 preserves). To group all SCD2 versions of a family use `ProductID`; to find variants filter `BaseProductID == <ProductID>`. A `BaseProductID = ProductKey` self-join only works with SCD2 off; with SCD2 on use `BaseProductID = ProductID`.
 
-## Testing
+## Testing and verification
 
-```bash
-# Run all tests (uses pyproject.toml defaults: -v --tb=short)
-pytest
+Use the venv interpreter directly; examples below are for Windows:
 
-# Single file
-pytest tests/test_geography.py
-
-# Single class
-pytest tests/test_config_loader.py::TestParseDate
-
-# Single test
-pytest tests/test_config_loader.py::TestParseDate::test_iso_string
-
-# Keyword filter (supports and/or/not)
-pytest -k "deterministic"
-pytest -k "geography and not key"
-
-# Useful flags
-pytest -x              # stop on first failure
-pytest -s              # show print() output
-pytest --tb=long       # full tracebacks
-pytest --lf            # rerun only last-failed tests
-pytest --co            # list tests without running
+```powershell
+.venv/Scripts/python.exe -m pytest tests/test_config_loader.py tests/test_schema.py
+.venv/Scripts/python.exe -m pytest -k "geography and not key"
+.venv/Scripts/python.exe -m pytest --collect-only -q
+.venv/Scripts/python.exe -m pytest
 ```
 
-Test files (`tests/`, 40 total): `test_chunk_id_integrity.py`, `test_complaints.py`, `test_config_loader.py`, `test_coverage_preflight.py`, `test_customer_profiles.py`, `test_dates.py`, `test_determinism.py`, `test_dialect.py`, `test_dialect_postgres.py`, `test_dimension_loader.py`, `test_dimensions.py`, `test_fact_writers.py`, `test_geography.py`, `test_gotchas_and_guards.py`, `test_integration.py`, `test_multi_event_returns.py`, `test_packaging.py`, `test_postgres_constraints.py`, `test_postgres_import.py`, `test_postgres_indexes.py`, `test_postgres_views_and_admin.py`, `test_pricing_pipeline.py`, `test_product_scd2.py`, `test_products.py`, `test_quality_report.py`, `test_quantity_model.py`, `test_salesperson_performance.py`, `test_sales_logic.py`, `test_sales_writer.py`, `test_schema.py`, `test_sql_tools.py`, `test_state.py`, `test_store_demand_weight.py`, `test_subscriptions.py`, `test_transfers.py`, `test_utils.py`, `test_version_store.py`, `test_warehouses.py`, `test_web_api.py`, `test_web_routes.py`, `test_wishlists.py`. Web API/route tests require `httpx` and are skipped without it; the Postgres tests (`test_postgres_*`, `test_dialect_postgres`) exercise the PostgreSQL dialect/import path.
+`pyproject.toml` defines pytest defaults (`-v --tb=short`). Choose checks for the
+changed area using `tests/README.md` and the relevant skill; avoid maintaining a
+fixed test count or exhaustive filename list here. The dev extra supplies `httpx`
+so web tests run instead of silently skipping. Importer unit tests use fake
+connections; passing them does not establish live SQL Server/PostgreSQL success.
+
+Frontend source changes require rebuilding and committing `web/frontend/dist/`
+with the source (`npm ci`, `npm run build`, `npm run build:check` from
+`web/frontend/`). See the web skill for offline assets and CSP constraints.
+
+Snapshot tests pin generated output. For an intentional output change, inspect
+which fixtures moved, explain why, then regenerate only the affected baseline.
+See the sales skill and `tests/README.md`; do not refresh snapshots to hide an
+unexplained failure.
+
+`scripts/validate_web_release.py` validates an isolated archive of **committed
+HEAD**, not uncommitted changes. `scripts/benchmark_output_modes.py` defaults to
+20M rows; supply a small explicit `--rows` when only a smoke run is intended.
 
 ## Output Formats
 

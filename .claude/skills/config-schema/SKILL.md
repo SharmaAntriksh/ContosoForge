@@ -1,15 +1,7 @@
 ---
 name: config-schema
 description: >-
-  How ContosoForge's configuration is typed and validated — the Pydantic spine in
-  src/engine/config/config_schema.py, the normalizer registry in config.py, and the
-  coercion helpers in src/utils/config_helpers.py. Load this when adding or changing a
-  config field, editing config validation/normalization, writing code that reads cfg
-  or models_cfg, or debugging a config validation error. Its single most important
-  point: BOTH cfg and models_cfg are Pydantic models, not dicts — access fields by
-  attribute. Use it whenever you see AttributeError/ValidationError on config, need to
-  add a new config.yaml or models.yaml key, or aren't sure whether to use dict or
-  attribute access on a config object.
+  Update or debug ContosoForge configuration schemas, normalization, and config consumers. Use for new YAML fields, validation errors, or cfg/models_cfg access. Distinguishes typed pipeline models from raw web editor dicts and the sales worker wire schema.
 ---
 
 # Config Schema: the Pydantic Spine
@@ -17,9 +9,9 @@ description: >-
 ContosoForge has two config files (`config.yaml` for shape/scale, `models.yaml` for
 behavior), and **both are parsed into Pydantic models**, not dicts. Getting this wrong
 is the single most common mistake in this codebase, so internalize the rules below
-before touching config-reading code.
+before touching pipeline config-reading code.
 
-## The one rule to remember
+## Pipeline models
 
 - `cfg` is an **`AppConfig`** instance.
 - `models_cfg` (aka `State.models_cfg`) is a **`ModelsInnerConfig`** instance.
@@ -41,12 +33,35 @@ attribute idiom:
 - **`.get()` shim:** `_MutationMixin.get(key, default)` delegates to `getattr()`, so
   existing `.get()` chains keep working on models. Intentional, for code that handles
   both dicts and models.
-- **Copy:** use `cfg.model_copy(deep=True)` — **not** `dict(cfg)` or
-  `copy.deepcopy(cfg)`.
-- **Hashing:** use the `_to_dict(obj)` helper (calls `model_dump()` on Pydantic,
-  pass-through for dicts) before `json.dumps()`.
+- **Copy typed pipeline models:** prefer `cfg.model_copy(deep=True)`.
+  `dict(cfg)` is not a deep conversion; use `model_dump()` for serialization.
+  Web snapshots intentionally use `copy.deepcopy()` for mixed dict/model state.
+- **Serialization/hashing:** use `model_dump()` at the boundary where a plain
+  dict is needed; reuse a local conversion helper when one already exists.
+
+## Boundaries: raw YAML, web state, and worker config
+
+The typed rule applies after pipeline validation. Raw `yaml.safe_load()` values
+and request payloads are dicts. In `web/shared_state.py`, `_cfg` is initialized as
+`AppConfig`, while `_models_cfg` holds the **raw root models dict**, including its
+`models` key. `models_routes.py` validates via `ModelsConfig.from_raw_dict()` but
+stores the raw dict for editing and serialization. Do not replace those web
+accesses with `ModelsInnerConfig` attribute access. Web snapshots use
+`copy.deepcopy()` under `_cfg_lock`; see the web-layer skill.
+
+The sales wire config is a dict, but its schema is the `SalesWorkerCfg`
+`TypedDict` in `src/facts/sales/prep/worker_cfg_schema.py`. Coordinator holders such
+as `SalesRunConfig` and `MonthPlan` are frozen dataclasses in `prep/run_config.py`,
+not Pydantic models. Check the boundary before choosing an access/copy idiom.
 
 ## Adding a new config field
+
+Update the relevant schema and normalizer, shipped YAML defaults/comments, and
+`docs/CONFIG_GUIDE.md` or `docs/MODELS_GUIDE.md` when the field is user-facing.
+If the web UI exposes it, trace form/preset/Quick Start mapping too. Fields that
+change dimension output must participate in the dimension version key; check
+`dimensions_runner.py` and the dimension runner before assuming a config edit
+will invalidate cached parquet.
 
 The sub-models reject unknown keys, so you can't just start reading a new YAML key —
 you must add it to the schema:
@@ -55,8 +70,9 @@ you must add it to the schema:
   schema class in `config_schema.py`, or validation will reject the key.
 - **`AppConfig` and `ModelsConfig` use `extra="allow"`** for runtime-injected keys only
   — don't rely on that for real config fields; type them properly on the sub-model.
-- **`_`-prefixed keys are stripped** before validation (`_strip_internal_keys()`), since
-  Pydantic v2 treats them as private. Normalizer metadata uses this.
+- **`AppConfig.from_raw_dict()` strips `_`-prefixed keys** using
+  `_strip_internal_keys()` before validation. Do not assume `ModelsConfig` uses
+  the same preprocessing; its constructor calls `model_validate()` directly.
 - Canonical constructors: `AppConfig.from_raw_dict(d)` and
   `ModelsConfig.from_raw_dict(d)`.
 
@@ -92,5 +108,5 @@ access there too. (The old `resolve_customer_profile` is deprecated.)
 ## Tests
 
 ```bash
-pytest tests/test_config_loader.py tests/test_schema.py tests/test_state.py
+.venv/Scripts/python.exe -m pytest tests/test_config_loader.py tests/test_schema.py tests/test_state.py
 ```

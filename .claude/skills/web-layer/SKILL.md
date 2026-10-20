@@ -1,14 +1,7 @@
 ---
 name: web-layer
 description: >-
-  Conventions and safety rules for the ContosoForge web layer — the FastAPI backend
-  (web/api.py, web/routes/, web/shared_state.py) and its React SPA (web/frontend/).
-  Load this when editing anything under web/ — adding or changing an API endpoint,
-  touching shared mutable state, or working on CORS/security/payload handling. It
-  covers the thread-safety locking discipline, the dual (/api + /v1/api) route
-  versioning, the CORS allowlist and security headers, and the request-size limits.
-  Use it for any "add an endpoint", "the web UI", "FastAPI route", or "why is the
-  API rejecting my request" work.
+  Read before editing web/. Covers FastAPI routes and editor state, locking, dual API mounting, generation/import subprocesses and SSE, React asset builds, offline serving, CSP, and payload limits.
 ---
 
 # Web Layer: FastAPI Backend + React SPA
@@ -22,7 +15,8 @@ routers are split by concern under `web/routes/`; mutable server state lives in
 ```
 web/
   api.py               # FastAPI app: mounts routers, CORS, security middleware, serves SPA
-  shared_state.py      # shared mutable state (_cfg, _models_cfg, ...) + _cfg_lock
+  shared_state.py      # mutable editor state + _cfg_lock and generation job state
+  process_control.py   # subprocess groups / Windows Job Objects and graceful stop
   routes/
     config_routes.py     # /api/config
     models_routes.py     # /api/models
@@ -58,25 +52,70 @@ hand-register a second copy.
   `127.0.0.1` on ports `8502` and `3000` by default; override via the `CORS_ORIGINS`
   env var (gotcha #19). Do not replace it with `allow_origins=["*"]`.
 - **`SecurityHeadersMiddleware`** adds `X-Content-Type-Options`, `X-Frame-Options`,
-  `X-XSS-Protection`, and `Referrer-Policy` to all responses. Keep new responses flowing
+  `X-XSS-Protection`, `Referrer-Policy`, and Content Security Policy to all responses. Keep new responses flowing
   through it.
 - **Payload size limits:** the YAML and models endpoints reject bodies **> 1 MB**
   (HTTP 413) to prevent memory exhaustion (gotcha #20). If you add an endpoint that
   accepts a large body, decide deliberately whether the same limit applies.
 
-## Config objects are Pydantic, not dicts
+## Editor state and generation snapshots
 
-Route handlers read/write `cfg` (`AppConfig`) and `models_cfg` (`ModelsInnerConfig`) —
-both Pydantic models. Use attribute access, and copy with `model_copy(deep=True)`. See
-the **config-schema** skill for the full rules; it matters here because handlers are a
-common place people accidentally treat these as plain dicts.
+`web.shared_state._cfg` starts as an `AppConfig`. `_models_cfg` is a **raw root
+YAML dict**, including the `models` key; models routes validate it using
+`ModelsConfig.from_raw_dict()` but retain the dict for editing. Do not assume
+both web globals are `ModelsInnerConfig` instances. Typed pipeline config after
+loading is a separate boundary; see the config-schema skill.
+
+Copy editor state while holding `_cfg_lock` (`copy.deepcopy()` handles either
+representation). Do not import a mutable singleton by value and then rebind it
+in a route: use `import web.shared_state as _state` and mutate `_state` under its
+lock. Use `_job_lock` for generation state and `_import_lock` in import routes;
+copy a job/log snapshot under the lock, then stream outside it.
+
+Quick Start, presets, and editor changes are kept in memory. Generation takes
+config/models snapshots and writes temporary configs for its child process;
+repo YAML files are not implicitly saved. Preserve this distinction in API
+changes and UI text.
+
+## Frontend source and committed assets
+
+FastAPI serves `web/frontend/dist/`, not JSX directly. React and CodeMirror are
+bundled locally with esbuild; the end user needs no Node.js or CDN access.
+After source changes, run from `web/frontend/`:
+
+```powershell
+npm ci
+npm run build
+npm run build:check
+```
+
+Commit the resulting content-hashed assets, index, and manifest with the source.
+Do not hand-edit `dist/`. `index.template.html` and `theme-init.js` participate in
+the build; keep the CSP compatible with local scripts (no executable inline JS
+or new remote runtime dependencies). See `web/frontend/README.md`.
+
+## Generation/import subprocesses
+
+Use `web/process_control.py` for process groups, Windows Job Objects, and stop
+handling. Killing only the launcher can orphan generation workers. SQL Server
+imports may temporarily change recovery mode; graceful stop must allow the
+importer's cleanup to run before the hard-kill fallback. Preserve interruption
+hints and bounded, cursor-based SSE logs; don't accumulate every log line or
+force the frontend to interpret raw terminal spinner updates.
+
+Import requests are built in `import_routes.py` and executed through
+`scripts/sql/run_*_import.py`. Test the request/argv/password-env mapping when
+adding an importer option, as well as its frontend control. Both Python drivers
+are default dependencies; the SQL Server system ODBC driver is separate.
 
 ## Running & testing
 
-```bash
-python -m uvicorn web.api:app --port 8502     # dev server
-pytest tests/test_web_api.py tests/test_web_routes.py
-```
+Use `.venv/Scripts/python.exe -m uvicorn web.api:app --port 8502` for the server
+(POSIX uses `.venv/bin/python`). Install test tooling with
+`uv sync --locked --extra dev`; without `httpx`, API tests may skip.
 
-The web API/route tests require `httpx` and are **skipped** without it — install it if
-you're changing endpoints so the tests actually run.
+Choose from `test_web_api.py`, `test_web_routes.py`, `test_web_import_routes.py`,
+`test_web_data_preview.py`, and `test_web_frontend.py` under `tests/` according to
+what changed. For frontend changes, also run `npm run build:check`.
+`scripts/validate_web_release.py` generates small release datasets in an archive
+of **committed HEAD**; it does not validate an uncommitted source edit.

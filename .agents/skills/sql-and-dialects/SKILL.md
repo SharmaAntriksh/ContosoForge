@@ -1,14 +1,7 @@
 ---
 name: sql-and-dialects
 description: >-
-  How ContosoForge generates multi-dialect SQL (SQL Server + PostgreSQL) and runs
-  live database imports. Load this when editing anything under src/tools/sql/ —
-  the pluggable dialect classes, CREATE TABLE / BULK INSERT / COPY / constraint /
-  view generators, or the sql_server_import.py / postgres_import.py runners. Also
-  use it when adding a new SQL dialect, changing generated DDL, debugging escaping
-  of paths or names in generated scripts, or working on the CSV-to-database load
-  path. Reach for it on any "the generated SQL is broken / wrong quoting / import
-  fails" question.
+  Edit or debug ContosoForge SQL generation and database imports: dialects, schema rosters, identifier casing, re-emission, CSV loading, Python entrypoints, and PowerShell launchers. Use for generated SQL or SQL Server/PostgreSQL import failures.
 ---
 
 # Multi-Dialect SQL Generation & Import
@@ -110,23 +103,48 @@ over inlining quote-handling in the dialect classes, so both dialects stay consi
 `sql_server_import.py` and `postgres_import.py` are the live-DB load paths (create
 schema, bulk-load the CSVs, apply constraints/indexes/views). They're driven from the
 web layer's `/api/import` endpoints (`web/routes/import_routes.py`) as well as
-standalone. The recent hardening pass (`3e18ebd`) tightened the CSV→SQL Server/Postgres
-import path — see `docs/SQL_IMPORT_REVIEW.md` if present for the review notes.
+standalone. The PowerShell wrappers are `scripts/run_sql_server_import.ps1` and
+`scripts/run_postgres_import.ps1`; the Python CLI entrypoints are under
+`scripts/sql/`. Operator references live in `docs/operations/sql-server-import.md`
+and `docs/operations/postgres-import.md`.
+
+Both `pyodbc` and `psycopg[binary]` are **default** project dependencies; a plain
+`uv sync` installs them. The `sql`/`postgres` extras are compatibility aliases.
+For tests use `uv sync --locked --extra dev`. SQL Server additionally needs a
+system Microsoft ODBC driver; the Python package does not install it.
+
+PowerShell preflight/repair is shared in `scripts/_common.ps1`. Windows
+PowerShell 5.1 can promote native stderr to a terminating error under
+`$ErrorActionPreference = "Stop"`, even with `2>$null`. Scope native error
+preferences locally and inspect exit codes so a missing-driver probe reaches
+the repair path; do not suppress installer failures. Regression coverage:
+`tests/test_powershell_driver_preflight.py` runs both shells when available.
+
+The packaged PostgreSQL SQL uses server-file COPY, but the live Python importer
+streams local CSV bytes with `COPY ... FROM STDIN`; PostgreSQL need not share the
+client filesystem. SQL Server BULK INSERT reads from the SQL Server service's
+filesystem/security context. Path/access failures have different remedies.
+
+Both live importers reject an existing target database. Use a fresh name for a
+new import. An interrupted import may leave a partial database, and SQL Server
+may need its recovery model restored. Keep graceful stop/finally cleanup intact;
+`web/process_control.py` owns web-child lifecycle. A passing fake-connection unit
+test does not establish a successful import against a live server.
 
 ## Tests
 
 The dialect and import paths are well covered — run these when you change anything here:
 
-```bash
-pytest tests/test_dialect.py tests/test_dialect_postgres.py tests/test_sql_tools.py
-pytest tests/test_postgres_import.py tests/test_postgres_constraints.py \
-       tests/test_postgres_indexes.py tests/test_postgres_views_and_admin.py
+```powershell
+.venv/Scripts/python.exe -m pytest tests/test_dialect.py tests/test_dialect_postgres.py tests/test_sql_tools.py
+.venv/Scripts/python.exe -m pytest tests/test_postgres_import.py tests/test_postgres_constraints.py tests/test_postgres_indexes.py tests/test_postgres_views_and_admin.py
 # Roster rendering + identifier casing + import-time re-emit:
-pytest tests/test_constraint_generation.py tests/test_view_generation.py \
-       tests/test_identifier_case.py tests/test_name_map.py \
-       tests/test_identifier_case_wiring.py tests/test_identifier_case_e2e.py \
-       tests/test_verification_gating.py tests/test_reemit_sql.py
+.venv/Scripts/python.exe -m pytest tests/test_constraint_generation.py tests/test_view_generation.py tests/test_identifier_case.py tests/test_name_map.py tests/test_identifier_case_wiring.py tests/test_identifier_case_e2e.py tests/test_verification_gating.py tests/test_reemit_sql.py
 ```
+
+For importer or wrapper changes, also select `test_sql_import_hardening.py`,
+`test_import_entrypoints.py`, `test_powershell_driver_preflight.py`, and
+`test_web_import_routes.py` from `tests/` as appropriate.
 
 The Postgres tests exercise the PostgreSQL dialect/import path specifically; keep them
 green when touching `postgres.py` or `postgres_import.py`.

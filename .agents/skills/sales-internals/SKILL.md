@@ -1,38 +1,23 @@
 ---
 name: sales-internals
 description: >-
-  The determinism, parallelism, and numeric-safety contract for the sales fact
-  generator (src/facts/sales/). Load this BEFORE editing anything under
-  src/facts/sales/ — chunk building, the worker pool, customer sampling, pricing,
-  promotions, allocation, delivery, or the State object. It explains why the sales
-  fact must be byte-identical regardless of --workers and --chunk-size, the rules
-  for worker-lifetime caches and hash-seeded draws, the ID-arithmetic and numpy
-  pitfalls that silently corrupt output, and the golden-snapshot test workflow.
-  Use it whenever you touch sales generation, see a determinism/snapshot test fail,
-  add a correlated-fact feature, or need to regenerate the sales fingerprint baseline.
+  Read before editing src/facts/sales/. Covers worker invariance, chunk-shape guarantees, temporal mix, counter sampling, State/shared-memory boundaries, numeric safety, and golden fingerprint updates. Use for sales determinism failures and correlated-fact changes.
 ---
 
 # Sales-Fact Internals: the Determinism Contract
 
-The sales fact is the crown jewel of ContosoForge's "deterministic & idempotent"
-promise. Its output must be **byte-identical** no matter how many workers run or
-how the rows are chunked. `chunk_size` and `--workers` are **pure performance
-knobs** — they must never change the shape *or the bytes* of the data. Everything
-below exists to protect that invariant. Violate it and you break the product's
-core guarantee, usually silently.
+Preserve the guarantees actually tested by the sales suite:
 
-If you are editing under `src/facts/sales/`, read this first.
-
-## The three invariants and why they hold
-
-1. **Worker-invariance** — `--workers 1` and `--workers 4` at the same chunk size
-   produce identical bytes. `imap_unordered` scheduling must not leak into output.
-2. **Chunk-shape invariance** — the *row multiset* and the per-month distinct-customer
-   set are identical across chunk sizes. (Surrogate `OrderNumber` labels legitimately
-   differ across chunk sizes, since IDs are sharded by chunk index — chunk size changes
-   the *labels*, not the *shape*.)
-3. **Absolute byte-identity** — a behavior-preserving change reproduces the recorded
-   golden fingerprint exactly.
+1. **Worker invariance:** at fixed config, seed, and chunk size, changing worker
+   count must preserve the canonical key-sorted output fingerprint. Physical
+   parquet bytes or file ordering are not the fingerprint contract.
+2. **Chunk-shape invariance:** changing chunk size preserves requested row count,
+   per-month row totals, and per-month distinct-customer coverage. The tests do
+   not promise an identical full row multiset across chunk sizes. Order labels
+   are chunk-sharded, and some line draws consume chunk-local RNG streams.
+3. **Golden fingerprints:** behavior-preserving changes must match the stored
+   baseline for each fixture/worker/chunk-size cell. Intentional output changes
+   need an explained baseline update, not weakened assertions.
 
 These are enforced by **design**, not runtime locks:
 
@@ -73,8 +58,8 @@ in each.
   `rng` (fine — chunks own fixed bands seeded by `chunk_idx`) OR, when a value is
   recomputed in a different pass, **hash-seeded on a globally-unique emitted key**
   (e.g. SplitMix64 of `(OrderNumber, OrderLineNumber)`) so it's identical regardless of
-  chunk/worker. Every `models.*` feature is default-on with a zero/off path that
-  reproduces the pre-feature bytes. Applies to: elasticity (`models.quantity.elasticity`),
+  chunk/worker. The following features have zero/off compatibility paths; check their tests
+  rather than assuming every new model has a legacy toggle: elasticity (`models.quantity.elasticity`),
   promo salience (`models.promotions`), basket theme (`models.basket`), fulfillment
   friction (`models.fulfillment`), markdown reconcile
   (`models.pricing.markdown.reconcile_promotions`). The friction hash is recomputed
@@ -88,6 +73,28 @@ in each.
   legacy per-row snap byte-for-byte. Guards:
   `tests/test_pricing_pipeline.py::TestDeterministicPostedPrice` and
   `tests/test_sales_phase3_fidelity.py`.
+
+## Temporal mix and counter-based sampling
+
+`prep/temporal_mix_plan.py` builds compact customer country/gender and product
+category/brand/color plans from the existing macro trend. The pure factor engine
+is `sales_models/temporal_mix.py`; calibration constants are code-owned, not new
+YAML knobs. Preserve factor stability across group ordering, worker scheduling,
+and an extended end month; factor draws use relative month offsets and stable
+hash/counter inputs. Never use Python's process-randomized `hash()` for seeds.
+
+Customer, product, and channel/time sampling have dedicated counter guards:
+`test_customer_temporal_mix.py`, `test_product_temporal_mix.py`,
+`test_temporal_mix.py`, `test_product_sampling_counter.py`, and
+`test_channel_time_counter.py`. Use those alongside the worker/chunk/snapshot
+checks when changing sampling. Do not replace counter draws with chunk RNG draws
+merely because a worker-invariance test still passes.
+
+The worker boundary is typed: coordinator holders in `prep/run_config.py`,
+`SalesWorkerCfg` in `prep/worker_cfg_schema.py`, then a dict on the wire and
+`State` binding in each worker. New worker inputs must traverse the builder,
+schema/validation, shared-memory setup where applicable, and State binding.
+`test_worker_cfg_validation.py` and `test_sales_contract.py` cover those seams.
 
 ## Numeric tripwires (silent corruption)
 
@@ -114,9 +121,15 @@ Some changes intentionally move the bytes (a tuning change, a new default). Then
 golden fingerprint test `tests/test_sales_snapshot.py::test_golden_fingerprint` will
 fail across the affected cells — that's correct. To regenerate the baseline:
 
-```bash
-REGEN_SALES_SNAPSHOT=1 python -m pytest tests/test_sales_snapshot.py -q
+```powershell
+$env:REGEN_SALES_SNAPSHOT = "1"
+try { .venv/Scripts/python.exe -m pytest tests/test_sales_snapshot.py -q }
+finally { Remove-Item Env:REGEN_SALES_SNAPSHOT }
 ```
+
+POSIX equivalent: `REGEN_SALES_SNAPSHOT=1 .venv/bin/python -m pytest tests/test_sales_snapshot.py -q`.
+If the variable was already set by the caller, restore its previous value instead
+of removing it.
 
 Before you regenerate, **confirm the change was intentional**: check that the set of
 failing cells matches the surface you changed, and that the cause traces to a
@@ -145,3 +158,17 @@ src/facts/sales/
   sales_worker/                # pool, task defs, init_sales_worker
   sales_writer/                # parquet merge / delta / csv writers
 ```
+
+## Focused validation
+
+Use the repo venv (install test tools with `uv sync --locked --extra dev`).
+For sales behavior changes, run the relevant units plus worker invariance,
+chunk-shape invariance, and golden fingerprints:
+
+```powershell
+.venv/Scripts/python.exe -m pytest tests/test_sales_determinism_workers.py tests/test_sales_determinism_chunksize.py tests/test_sales_snapshot.py
+```
+
+See `tests/README.md` for schema, temporal, and output-writer test groups. Shared
+small-pipeline fixtures live in `tests/sales_gen.py`; reuse them instead of
+running the developer's full dataset or overwriting its scratch/version files.

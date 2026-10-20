@@ -1,16 +1,7 @@
 ---
 name: generate-dataset
 description: >-
-  How to generate and tune a ContosoForge dataset — running main.py, choosing
-  output format, sizing rows/customers/stores, picking the business shape (trend
-  preset), setting the date range, and selecting the product catalog. Use this
-  whenever the user wants to produce data, change the scale or row counts, make
-  the charts look a certain way (spikier/smoother/growing/declining/seasonal),
-  adjust the date range, choose contoso vs synthetic products, or understand the
-  config.yaml-vs-models.yaml split. Also use for "why do my charts look flat",
-  "how many customers should I use", "--only sales", "--regen-dimensions", or any
-  question about tuning generation output. Reach for it even when the user doesn't
-  say "generate" explicitly but is clearly trying to shape the output data.
+  Run and tune ContosoForge datasets: scale, dates, formats, trend presets, catalog selection, and chart density. Use for generation commands and output-shaping questions; sales implementation changes belong to sales-internals.
 ---
 
 # Generating & Tuning a ContosoForge Dataset
@@ -37,7 +28,10 @@ Pipeline runs **Dimensions** (sequential, ~22 tables) then **Sales facts**
 
 ## Running it (authoritative CLI)
 
-Entry point is `python main.py`. The full flag set (from `src/cli.py`):
+Use `.venv/Scripts/python.exe main.py` in agent shells (POSIX:
+`.venv/bin/python main.py`). The examples below use `python` as shorthand for
+that interpreter. Run `main.py --help` for the current flag set; `src/cli.py`
+and `docs/cli-reference.md` are the source and user reference.
 
 ```bash
 # Core run
@@ -57,7 +51,7 @@ python main.py --refresh-fx-master       # top up FX master to today, then exit
 # Format is one of: csv | parquet | delta | deltaparquet  (delta == deltaparquet)
 ```
 
-**Every override flag** (all one-time, not persisted; CLI > config.yaml):
+**Common override flags** (all one-time, not persisted; CLI > config.yaml):
 
 | Flag | Overrides |
 |---|---|
@@ -77,7 +71,7 @@ python main.py --refresh-fx-master       # top up FX master to today, then exit
 | `--customers-scd2 {true,false}` | `customers.scd2.enabled` |
 | `--config PATH` / `--models-config PATH` | config file locations |
 | `--only {dimensions,sales}` / `--regen-dimensions ...` | stage control |
-| `--clean` / `--dry-run` / `--no-report` / `-q`/`--quiet` | run control |
+| `--clean` / `--dry-run` / `--no-report` / `-q`/`--quiet` / `-v`/`--verbose` | run control |
 
 ## Choosing the business shape (trend presets)
 
@@ -118,10 +112,27 @@ Resolved by `resolve_trend_preset()` in `src/utils/trend_presets.py`. The old
 `customers.profile` key is deprecated but still maps to a preset via
 `_PROFILE_TO_TREND` for backward compatibility.
 
+## Temporal mix follows the trend
+
+The existing trend also derives month-varying customer country/gender and product
+category/brand/color factors. There is no separate `temporal_mix` YAML section;
+coefficients are code-owned in `src/facts/sales/sales_models/temporal_mix.py` and
+`prep/temporal_mix_plan.py`. Country and category are parent layers; brand/color
+vary within category. Do not add an independent user setting just to tune this
+existing behavior.
+
+For annual entity-rank diagnostics on an existing packaged parquet dataset, use
+`.venv/Scripts/python.exe scripts/calibrate_temporal_mix.py "<dataset>"`.
+It reads the dataset without changing it or the config. Changes to the factor
+engine/sampling belong to the sales-internals workflow.
+
 ## Sizing: the customers ↔ rows ratio (this is what makes charts look good)
 
 Chart quality depends on the ratio of customers to sales rows over the date range.
-**Target ~1.5 orders per customer per month** for spiky, interesting charts.
+**Starting heuristic: ~1.5 sales rows per customer per month** for spiky, interesting charts.
+
+This is a row-density heuristic, not a promise of order frequency: orders may
+have multiple lines and participation varies by lifecycle and trend.
 
 - **Formula:** `customers ≈ sales_rows / months / 1.5`
 - **Too few customers** vs rows → each customer averages many orders, variance
@@ -190,7 +201,9 @@ Post-generation compaction: `python scripts/optimize_delta.py <path>` /
 - Split the loop: `--only dimensions` once, then iterate sales with `--only sales`
   (dims are reused, so you're not rebuilding ~22 tables each time).
 - `chunk_size` is a pure performance knob (default 1M is good): too small = overhead,
-  too large = memory pressure. It **never** changes the data.
+  too large = memory pressure. Row totals and monthly customer coverage stay
+  invariant; surrogate order labels and chunk-dependent line values need not be
+  byte-identical across chunk sizes. See `sales-internals` for the tested contract.
 - Output lands in a timestamped folder under `generated_datasets/`.
 
 ## Gotchas that bite during generation
@@ -215,5 +228,9 @@ Post-generation compaction: `python scripts/optimize_delta.py <path>` /
 ## Web UI alternative
 
 `python -m uvicorn web.api:app --port 8502` — React SPA with YAML editors,
-presets, and a log viewer. This is the only way to edit `models.yaml` (including the
-trend preset) without hand-editing the file, since it isn't CLI-overridable.
+Quick Start, presets, YAML editors, data preview, and database import.
+Edits and Quick Start choices live in memory; generation snapshots them into the
+child process config. Do not assume a UI change rewrites the repo YAML files.
+Both database Python drivers ship in the default dependencies (`uv sync`);
+SQL Server still needs its system ODBC driver. See the web-layer and
+sql-and-dialects skills for implementation and import details.
