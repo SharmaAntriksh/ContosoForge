@@ -25,6 +25,7 @@ All filenames in the table are under `tests/`. Pass the relevant files to
 | Config/coercion | `test_config_loader.py`, `test_schema.py`, `test_state.py` |
 | Sales worker boundary | `test_sales_contract.py`, `test_worker_cfg_validation.py`, `test_state.py` |
 | Sales sampling / determinism | `test_sales_determinism_workers.py`, `test_sales_determinism_chunksize.py`, `test_sales_snapshot.py` |
+| CPU-independent generation / tied ranks | `test_cpu_determinism.py` (fresh processes with native and baseline NumPy CPU dispatch) |
 | Temporal mix | `test_temporal_mix.py`, `test_customer_temporal_mix.py`, `test_product_temporal_mix.py`, `test_temporal_mix_calibration.py` |
 | Counter-based sampling | `test_product_sampling_counter.py`, `test_channel_time_counter.py`, `test_hashing.py` |
 | Sales output schemas / writers | `test_sales_schema_consistency.py`, `test_sales_writer.py`, `test_sales_writer_atomic.py`, `test_delta_writer_schema.py` |

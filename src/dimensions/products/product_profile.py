@@ -793,7 +793,7 @@ def apply_post_merge_enrichment(df: pd.DataFrame, seed: int) -> pd.DataFrame:
     up_arr = pd.to_numeric(out.get("ListPrice", 0.0), errors="coerce").to_numpy(dtype=np.float64, copy=False)
     velocity_est = np.clip(PopularityScore / 100.0, 0.01, 1.0)
     abc_value = up_arr * velocity_est
-    abc_rank = np.argsort(np.argsort(-abc_value))
+    abc_rank = np.argsort(np.argsort(-abc_value, kind="stable"), kind="stable")
     abc_n = len(abc_rank)
     abc_class = np.where(
         abc_rank < abc_n * 0.20, "A",
@@ -848,7 +848,9 @@ def apply_post_merge_enrichment(df: pd.DataFrame, seed: int) -> pd.DataFrame:
     )
 
     # IsBestseller (rank-based on PopularityScore)
-    pop_rank = np.argsort(np.argsort(-PopularityScore))
+    # Preserve product order when popularity scores tie, including when a tie
+    # straddles the bestseller cutoff. SIMD quicksort can reorder those ties.
+    pop_rank = np.argsort(np.argsort(-PopularityScore, kind="stable"), kind="stable")
     out["IsBestseller"] = pd.Series(
         pop_rank < N * 0.15, index=out.index, dtype=bool
     )

@@ -247,7 +247,7 @@ def generate_org_profile(
     )
     AvgOrderValueUSD = np.clip(AvgOrderValueUSD, 100, 500_000)
 
-    revenue_rank = np.argsort(np.argsort(-AnnualRevenue))
+    revenue_rank = np.argsort(np.argsort(-AnnualRevenue, kind="stable"), kind="stable")
     top_10_pct = int(max(M * 0.10, 1))
     IsStrategicAccount = revenue_rank < top_10_pct
 

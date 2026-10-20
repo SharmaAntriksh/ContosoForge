@@ -125,7 +125,9 @@ def assign_households(
 
         # Sort heads by age
         h_ages = ages_f64[head_indices[h_local]]
-        h_order = np.argsort(h_ages)
+        # Equal ages retain their seeded input order. Quicksort tie ordering
+        # varies between NumPy's CPU-specific implementations.
+        h_order = np.argsort(h_ages, kind="stable")
         h_sorted_local = h_local[h_order]
         h_sorted_ages = h_ages[h_order]
 
@@ -134,7 +136,7 @@ def assign_households(
         if len(c_idx) == 0:
             continue
         c_ages = ages_f64[c_idx]
-        c_order = np.argsort(c_ages)
+        c_order = np.argsort(c_ages, kind="stable")
         c_sorted = c_idx[c_order]
         c_sorted_ages = c_ages[c_order]
 
@@ -176,7 +178,7 @@ def assign_households(
         if len(dep_pool_idx) > 0:
             dep_ages = ages_f64[dep_pool_idx]
             # Sort descending (oldest first)
-            dep_order = np.argsort(-dep_ages)
+            dep_order = np.argsort(-dep_ages, kind="stable")
             dep_sorted = dep_pool_idx[dep_order]
             dep_sorted_ages = dep_ages[dep_order]
 
@@ -187,7 +189,7 @@ def assign_households(
             hwd_hh = hh_ids[heads_wanting]
 
             # Sort heads by max_dep_age descending
-            hwd_order = np.argsort(-hwd_max_dep_age)
+            hwd_order = np.argsort(-hwd_max_dep_age, kind="stable")
 
             # Collect assignments in bulk arrays
             assign_dep = []

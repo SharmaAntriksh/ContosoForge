@@ -124,6 +124,11 @@ store/employee assignments must preserve effective-date coverage and published
 workforce contracts (`tests/test_temporal_contracts.py`,
 `tests/test_workforce_published_contract.py`, `tests/test_store_warehouse_causality.py`).
 
+Use stable sorting when tied ages, scores, or ranks determine entity assignments.
+NumPy's default quicksort can order ties differently across CPU dispatch paths,
+changing downstream sales even with a fixed seed. `tests/test_cpu_determinism.py`
+compares dimensions and sales with optional CPU features enabled and disabled.
+
 ## Config & Generation (summary — full detail in the generate-dataset skill)
 
 Two config files drive everything:

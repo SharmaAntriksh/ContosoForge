@@ -441,7 +441,8 @@ def _version_key(p: dict, seed: int) -> dict:
         # MarginCategory refresh after SCD2 drift. v11: MarginCategory bucket
         # thresholds (20/30/40), subcategory-driven AgeGroup/TargetGender,
         # realistic ReorderPoint/SafetyStock units.
-        "enrichment_v": 11,
+        # v12: CPU-independent tie ordering for ABC and bestseller ranks.
+        "enrichment_v": 12,
         # Auto-detect edits to enrichment data tables (archetypes + gender/age
         # profiles) so they trigger regen without a manual enrichment_v bump.
         "enrichment_constants_hash": _enrichment_constants_hash(),

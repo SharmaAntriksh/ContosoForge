@@ -1694,7 +1694,7 @@ def run_customers(cfg: Dict, parquet_folder: Path):
     cust_cfg = cfg.customers
 
     version_cfg = dict(cust_cfg)
-    version_cfg["_schema_version"] = 8
+    version_cfg["_schema_version"] = 9  # Stable household/revenue tie ordering
     version_cfg["_has_loyalty_tier"] = True
     version_cfg["_has_acquisition_channel"] = True
     version_cfg["_has_customer_profile"] = True
