@@ -34,6 +34,14 @@ dev = [
 [project.scripts]
 syndata = "src.cli:main"
 
+[tool.uv]
+# Security floors for transitive FastAPI/httpx and yfinance dependencies.
+constraint-dependencies = [
+    "anyio>=4.14.2",    # TLS hostname validation and process-pool stderr fixes
+    "urllib3>=2.8.0",   # HTTPS proxy TLS and chunked-response fixes
+    "soupsieve>=2.9",   # Selector-parser ReDoS fixes
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
