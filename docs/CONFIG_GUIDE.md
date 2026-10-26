@@ -231,7 +231,7 @@ Store dimension: physical and online store configuration.
 |-----|-------------|---------|
 | `stores.online_stores` | Number of online-only stores carved from the total store count (`scale.stores`). These get StoreType "Online" instead of physical store types. | `5` |
 | `stores.ensure_iso_coverage` | When `true`, ensures at least one store exists per ISO currency code used in exchange rates. Prevents missing-store gaps in cross-currency analytics. | `true` |
-| `stores.staffing_ranges` | `[min, max]` employee count per physical store type. Online stores always have 1 employee. | `{ Supermarket: [8, 20], Hypermarket: [15, 40], Convenience: [2, 6] }` |
+| `stores.staffing_ranges` | `[min, max]` planned headcount per physical store type, including the manager. Online stores have a planned headcount of 1. Actual assigned headcount/FTE can differ after transfers and closures. | `{ Supermarket: [8, 20], Hypermarket: [15, 40], Convenience: [2, 6] }` |
 | `stores.closing.enabled` | Master toggle for store closures. When `false`, all stores remain open for the entire date range. | `true` |
 | `stores.closing.close_share` | Fraction of physical stores that close. Closing dates are distributed across the simulation period. | `0.20` |
 
@@ -254,10 +254,17 @@ Employee dimension: HR configuration and inter-store transfers.
 | Key | Description | Example |
 |-----|-------------|---------|
 | `employees.hr.email_domain` | Domain suffix for generated employee email addresses. | `"contoso.com"` |
-| `employees.transfers.enabled` | Enable inter-store staff transfers. Creates EmployeeStoreAssignment records showing transfer history. | `true` |
+| `employees.transfers.enabled` | Enable voluntary inter-store staff transfers in `EmployeeStoreAssignments`. Closure and renovation reassignments are separate lifecycle operations. Transfers preserve the employee's original `HomeStoreKey` and home reporting hierarchy. | `true` |
 | `employees.transfers.annual_rate` | Fraction of eligible staff that transfer per year. | `0.40` |
 | `employees.transfers.min_tenure_months` | Minimum months at current store before an employee is eligible for transfer. | `6` |
 | `employees.transfers.same_region_pref` | Probability that a transfer stays within the same geographic region. | `0.70` |
+
+Use the assignment bridge's inclusive `StartDate`/`EndDate` interval to find
+where an employee worked on a date. `IsCurrentAssignment` identifies the latest
+segment, including a terminated employee's completed segment; it does not alone
+establish active employment. Dataset-end staffing views also filter for active
+assignments. See [Stores and workforce](ANALYTICAL_SEMANTICS.md#stores-and-workforce)
+for grain, date boundaries, planned versus actual staffing, and manager limits.
 
 ---
 

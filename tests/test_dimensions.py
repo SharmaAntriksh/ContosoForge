@@ -1119,14 +1119,15 @@ class TestGenerateEmployeeDimension:
         sa_open = sa[sa["TerminationDate"].isna()]
         assert len(sa_open) > 0, "No active SAs found"
 
-    def test_store_closure_retains_reason_specific_share(self, people_pools):
+    @pytest.mark.parametrize("seed", [0, 1, 42, 100])
+    def test_store_closure_retains_reason_specific_share(self, people_pools, seed):
         """Planned closures retain the configured share for reassignment."""
-        stores = self._make_stores(n=1)
+        stores = self._make_stores(n=2)
         stores["StoreType"] = "Supermarket"
         stores["EmployeeCount"] = 10
         df = generate_employee_dimension(
             stores=stores,
-            seed=42,
+            seed=seed,
             global_start=pd.Timestamp("2021-01-01"),
             global_end=pd.Timestamp("2025-12-31"),
             people_pools=people_pools,
@@ -1139,6 +1140,29 @@ class TestGenerateEmployeeDimension:
         terminated = store_emp[~store_emp["IsActive"]]
         assert len(terminated) == 2
         assert (terminated["TerminationReason"] == "Store Closure").all()
+        managers = store_emp[store_emp["Title"] == "Store Manager"]
+        assert len(managers) == 1
+        assert not managers["IsActive"].any()
+        assert managers["TerminationDate"].eq(pd.Timestamp("2024-06-30")).all()
+        from src.dimensions.employees.employee_store_assignments import (
+            _apply_store_closure_reassignments,
+        )
+
+        stores["OpeningDate"] = pd.Timestamp("2020-01-01")
+        stores["ClosingDate"] = pd.to_datetime(["2024-07-01", None])
+        bridge = generate_employee_store_assignments(
+            df, pd.Timestamp("2021-01-01"), pd.Timestamp("2025-12-31"),
+        )
+        bridge = _apply_store_closure_reassignments(bridge, stores, seed=seed)
+        effective = bridge[
+            (bridge["StartDate"] <= pd.Timestamp("2024-07-01"))
+            & (bridge["EndDate"] >= pd.Timestamp("2024-07-01"))
+        ]
+        assert not effective["StoreKey"].eq(1).any()
+        assert effective["RoleAtStore"].eq("Store Manager").sum() == 1
+        retained_keys = set(store_emp.loc[store_emp["IsActive"], "EmployeeKey"])
+        assert set(effective.loc[effective["EmployeeKey"].isin(retained_keys), "StoreKey"]) == {2}
+        assert store_emp["HomeStoreKey"].eq(1).all()
 
     def test_every_store_has_sa_hired_before_start(self, people_pools):
         """Every store should have at least one SA hired at or before global_start."""

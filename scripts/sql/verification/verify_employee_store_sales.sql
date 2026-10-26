@@ -1,6 +1,6 @@
 -- ============================================================================
 -- VERIFY EMPLOYEE -> EMPLOYEE_STORE_ASSIGNMENTS -> SALES RELATIONSHIP
--- 41 checks matching scripts/verify_employee_store_sales.py
+-- Workforce checks over employee attributes and effective-dated assignments
 --
 -- Run after loading generated data into SQL Server.
 -- Supports both sales_output modes:
@@ -148,7 +148,7 @@ INSERT INTO #R VALUES ('Employees', 'Employee hierarchy valid',
 -- 14. No managers flagged as salespeople
 DECLARE @mgr_sp INT;
 SELECT @mgr_sp = COUNT(*) FROM dbo.Employees
-WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000
+WHERE Title = 'Store Manager'
   AND IsSalesperson = 1;
 INSERT INTO #R VALUES ('Employees', 'No managers flagged as salespeople',
     CASE WHEN @mgr_sp = 0 THEN 'PASS' ELSE 'FAIL' END,
@@ -332,7 +332,7 @@ INSERT INTO #R VALUES ('ESA-Bridge', 'All ESA StoreKeys exist in Stores',
 -- 25. Every store-level employee has an assignment
 DECLARE @no_assign INT;
 SELECT @no_assign = COUNT(*) FROM dbo.Employees e
-WHERE e.EmployeeKey >= 30000000
+WHERE e.HomeStoreKey IS NOT NULL
   AND NOT EXISTS (
     SELECT 1 FROM dbo.EmployeeStoreAssignments esa WHERE esa.EmployeeKey = e.EmployeeKey
   );
@@ -383,47 +383,77 @@ INSERT INTO #R VALUES ('ESA-Bridge', 'No ESA rows start after store ClosingDate'
     CASE WHEN @past_close = 0 THEN 'PASS' ELSE 'FAIL' END,
     CAST(@past_close AS VARCHAR) + ' violation(s)');
 
--- 30. Salesperson coverage (every open non-renovating store-month)
---     Uses a months table crossed with physical stores, then checks for
---     at least 1 Sales Associate assignment covering the 1st of each month.
+-- Salesperson coverage: union of eligible intervals on every operating day.
+-- Include online stores, partial months, and adjacent handoffs. No status flags.
 DECLARE @coverage_gaps INT;
 DECLARE @cov_start DATE, @cov_end DATE;
-SELECT @cov_start = CAST(DATEADD(MONTH, DATEDIFF(MONTH, 0, MIN(StartDate)), 0) AS DATE),
-       @cov_end   = CAST(MAX(EndDate) AS DATE)
+SELECT @cov_start = MIN(StartDate), @cov_end = MAX(EndDate)
 FROM dbo.EmployeeStoreAssignments;
-;WITH Months AS (
-    SELECT @cov_start AS dt
+;WITH OperatingWindows AS (
+    SELECT s.StoreKey, s.RenovationStartDate, s.RenovationEndDate,
+           CASE WHEN s.OpeningDate > @cov_start THEN s.OpeningDate ELSE @cov_start END AS FirstDay,
+           CASE WHEN s.ClosingDate <= @cov_end THEN DATEADD(DAY, -1, s.ClosingDate) ELSE @cov_end END AS LastDay
+    FROM dbo.Stores s
+    WHERE s.OpeningDate IS NOT NULL
+), WindowParts AS (
+    SELECT StoreKey, FirstDay, LastDay FROM OperatingWindows
+    WHERE RenovationStartDate IS NULL OR RenovationEndDate IS NULL
+       OR RenovationStartDate >= RenovationEndDate
     UNION ALL
-    SELECT DATEADD(MONTH, 1, dt) FROM Months
-    WHERE DATEADD(MONTH, 1, dt) <= @cov_end
-),
-PhysStores AS (
-    SELECT StoreKey, OpeningDate, ClosingDate, RenovationStartDate, RenovationEndDate
-    FROM dbo.Stores WHERE StoreKey < 10000
-),
-StoreMonths AS (
-    SELECT s.StoreKey, m.dt
-    FROM PhysStores s CROSS JOIN Months m
-    WHERE (s.OpeningDate IS NULL OR m.dt >= s.OpeningDate)
-      AND (s.ClosingDate IS NULL OR m.dt < s.ClosingDate)
-      AND NOT (s.RenovationStartDate IS NOT NULL
-               AND s.RenovationEndDate IS NOT NULL
-               AND m.dt >= s.RenovationStartDate
-               AND m.dt < s.RenovationEndDate)
+    SELECT StoreKey, FirstDay,
+           CASE WHEN RenovationStartDate <= LastDay THEN DATEADD(DAY, -1, RenovationStartDate) ELSE LastDay END
+    FROM OperatingWindows
+    WHERE RenovationStartDate < RenovationEndDate
+    UNION ALL
+    SELECT StoreKey,
+           CASE WHEN RenovationEndDate > FirstDay THEN RenovationEndDate ELSE FirstDay END, LastDay
+    FROM OperatingWindows
+    WHERE RenovationStartDate < RenovationEndDate
+), RequiredWindows AS (
+    SELECT StoreKey, FirstDay, LastDay FROM WindowParts WHERE FirstDay <= LastDay
+), EligibleIntervals AS (
+    SELECT a.StoreKey,
+           CASE WHEN e.HireDate > a.StartDate THEN e.HireDate ELSE a.StartDate END AS FirstDay,
+           CASE WHEN e.TerminationDate < a.EndDate THEN e.TerminationDate ELSE a.EndDate END AS LastDay
+    FROM dbo.EmployeeStoreAssignments a
+    JOIN dbo.Employees e ON e.EmployeeKey = a.EmployeeKey
+    JOIN dbo.Stores s ON s.StoreKey = a.StoreKey
+    WHERE e.IsSalesperson = 1 AND e.Title <> 'Store Manager' AND a.RoleAtStore = e.Title
+      AND e.HireDate IS NOT NULL AND a.StartDate IS NOT NULL AND a.EndDate IS NOT NULL
+      AND ((a.RoleAtStore = 'Online Sales Representative' AND s.StoreType = 'Online')
+        OR (a.RoleAtStore <> 'Online Sales Representative' AND s.StoreType <> 'Online'))
+), Coverage AS (
+    SELECT DISTINCT w.StoreKey, w.FirstDay, w.LastDay,
+           CASE WHEN a.FirstDay > w.FirstDay THEN a.FirstDay ELSE w.FirstDay END AS CoveredStart,
+           CASE WHEN a.LastDay < w.LastDay THEN a.LastDay ELSE w.LastDay END AS CoveredEnd
+    FROM RequiredWindows w
+    JOIN EligibleIntervals a ON a.StoreKey = w.StoreKey
+        AND a.FirstDay <= a.LastDay
+        AND a.FirstDay <= w.LastDay AND a.LastDay >= w.FirstDay
+), Boundaries AS (
+    SELECT *, MAX(CoveredEnd) OVER (
+        PARTITION BY StoreKey, FirstDay, LastDay ORDER BY CoveredStart, CoveredEnd
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ) AS PreviousEnd
+    FROM Coverage
 )
-SELECT @coverage_gaps = COUNT(*) FROM StoreMonths sm
-WHERE NOT EXISTS (
-    SELECT 1 FROM dbo.EmployeeStoreAssignments esa
-    WHERE esa.StoreKey = sm.StoreKey
-      AND esa.RoleAtStore = 'Sales Associate'
-      AND esa.StartDate <= sm.dt
-      AND (esa.EndDate IS NULL OR esa.EndDate >= sm.dt)
-)
-OPTION (MAXRECURSION 0);
-INSERT INTO #R VALUES ('ESA-Bridge', 'Salesperson coverage (every open store-month)',
+SELECT @coverage_gaps = COUNT(*) FROM (
+    SELECT DISTINCT StoreKey, FirstDay, LastDay FROM RequiredWindows w
+    WHERE NOT EXISTS (SELECT 1 FROM Coverage c WHERE c.StoreKey = w.StoreKey
+                      AND c.FirstDay = w.FirstDay AND c.LastDay = w.LastDay)
+       OR EXISTS (SELECT 1 FROM Boundaries b WHERE b.StoreKey = w.StoreKey
+                  AND b.FirstDay = w.FirstDay AND b.LastDay = w.LastDay
+                  AND ((b.PreviousEnd IS NULL AND b.CoveredStart > w.FirstDay)
+                    OR b.CoveredStart > DATEADD(DAY, 1, b.PreviousEnd)))
+       OR (SELECT MAX(c.CoveredEnd) FROM Coverage c WHERE c.StoreKey = w.StoreKey
+           AND c.FirstDay = w.FirstDay AND c.LastDay = w.LastDay) < w.LastDay
+) gaps;
+SELECT @coverage_gaps = @coverage_gaps + COUNT(*) FROM dbo.Stores WHERE OpeningDate IS NULL;
+IF @cov_start IS NULL OR @cov_end IS NULL
+    SELECT @coverage_gaps = COUNT(*) FROM dbo.Stores;
+INSERT INTO #R VALUES ('ESA-Bridge', 'Salesperson coverage (every operating day)',
     CASE WHEN @coverage_gaps = 0 THEN 'PASS' ELSE 'FAIL' END,
-    CAST(@coverage_gaps AS VARCHAR) + ' store-month gap(s)');
-
+    CAST(@coverage_gaps AS VARCHAR) + ' operating window(s) with gaps');
 
 -- ############################################################################
 -- SALES ALIGNMENT (uses dynamic table name via IF/ELSE)
@@ -485,14 +515,16 @@ INSERT INTO #R VALUES ('Sales', 'Sales EmployeeKey exists in ESA bridge',
     CASE WHEN @orphan_s_ek = 0 THEN 'PASS' ELSE 'FAIL' END,
     CAST(@orphan_s_ek AS VARCHAR) + ' unknown EmployeeKey(s)');
 
--- 35. No manager keys in sales (30M-40M range)
+-- 35. No managers in sales (employee attributes)
 DECLARE @mgr_sales INT;
 IF @has_sales = 1
-    SELECT @mgr_sales = COUNT(*) FROM dbo.Sales
-    WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000;
+    SELECT @mgr_sales = COUNT(*) FROM dbo.Sales f
+    JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
+    WHERE e.Title = 'Store Manager';
 ELSE
-    SELECT @mgr_sales = COUNT(*) FROM dbo.OrderHeader
-    WHERE EmployeeKey >= 30000000 AND EmployeeKey < 40000000;
+    SELECT @mgr_sales = COUNT(*) FROM dbo.OrderHeader f
+    JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
+    WHERE e.Title = 'Store Manager';
 INSERT INTO #R VALUES ('Sales', 'No manager keys in sales',
     CASE WHEN @mgr_sales = 0 THEN 'PASS' ELSE 'FAIL' END,
     CAST(@mgr_sales AS VARCHAR) + ' sale(s) with manager EmployeeKey');
@@ -501,17 +533,29 @@ INSERT INTO #R VALUES ('Sales', 'No manager keys in sales',
 DECLARE @phys_at_online INT = 0, @online_at_phys INT = 0;
 IF @has_sales = 1
 BEGIN
-    SELECT @phys_at_online = COUNT(*) FROM dbo.Sales
-    WHERE StoreKey >= 10000 AND EmployeeKey < 50000000 AND EmployeeKey > 0;
-    SELECT @online_at_phys = COUNT(*) FROM dbo.Sales
-    WHERE StoreKey < 10000 AND EmployeeKey >= 50000000;
+    SELECT @phys_at_online = COUNT(*) FROM dbo.Sales f
+    JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
+    JOIN dbo.Stores home ON home.StoreKey = e.HomeStoreKey
+    JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
+    WHERE s.StoreType = 'Online' AND home.StoreType <> 'Online';
+    SELECT @online_at_phys = COUNT(*) FROM dbo.Sales f
+    JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
+    JOIN dbo.Stores home ON home.StoreKey = e.HomeStoreKey
+    JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
+    WHERE s.StoreType <> 'Online' AND home.StoreType = 'Online';
 END
 ELSE
 BEGIN
-    SELECT @phys_at_online = COUNT(*) FROM dbo.OrderHeader
-    WHERE StoreKey >= 10000 AND EmployeeKey < 50000000 AND EmployeeKey > 0;
-    SELECT @online_at_phys = COUNT(*) FROM dbo.OrderHeader
-    WHERE StoreKey < 10000 AND EmployeeKey >= 50000000;
+    SELECT @phys_at_online = COUNT(*) FROM dbo.OrderHeader f
+    JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
+    JOIN dbo.Stores home ON home.StoreKey = e.HomeStoreKey
+    JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
+    WHERE s.StoreType = 'Online' AND home.StoreType <> 'Online';
+    SELECT @online_at_phys = COUNT(*) FROM dbo.OrderHeader f
+    JOIN dbo.Employees e ON e.EmployeeKey = f.EmployeeKey
+    JOIN dbo.Stores home ON home.StoreKey = e.HomeStoreKey
+    JOIN dbo.Stores s ON s.StoreKey = f.StoreKey
+    WHERE s.StoreType <> 'Online' AND home.StoreType = 'Online';
 END
 INSERT INTO #R VALUES ('Sales', 'Online/physical channel alignment',
     CASE WHEN @phys_at_online = 0 AND @online_at_phys = 0 THEN 'PASS' ELSE 'FAIL' END,
@@ -614,6 +658,59 @@ INSERT INTO #R VALUES ('Sales', 'No post-transfer sales leakage',
     CASE WHEN @leaked = 0 THEN 'PASS' ELSE 'FAIL' END,
     CAST(@leaked AS VARCHAR) + ' sale(s) after last ESA EndDate');
 
+-- Check both attribution sources without copying transaction tables to tempdb.
+-- Dataset-end status flags must not filter historical transactions.
+DECLARE @invalid_sales BIGINT = 0, @invalid_header BIGINT = 0, @ineligible BIGINT;
+IF @has_sales = 1
+    SELECT @invalid_sales = COUNT_BIG(*) FROM dbo.Sales f
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM dbo.EmployeeStoreAssignments esa
+    JOIN dbo.Employees e ON e.EmployeeKey = esa.EmployeeKey
+    JOIN dbo.Stores s ON s.StoreKey = esa.StoreKey
+    WHERE esa.EmployeeKey = f.EmployeeKey AND esa.StoreKey = f.StoreKey
+      AND f.EmployeeKey > 0
+      AND e.IsSalesperson = 1 AND e.Title <> 'Store Manager'
+      -- IsSalesperson is generated using the configured primary role plus online reps.
+      AND esa.RoleAtStore = e.Title
+      AND ((esa.RoleAtStore = 'Online Sales Representative' AND s.StoreType = 'Online')
+        OR (esa.RoleAtStore <> 'Online Sales Representative' AND s.StoreType <> 'Online'))
+      AND f.OrderDate >= e.HireDate
+      AND (e.TerminationDate IS NULL OR f.OrderDate <= e.TerminationDate)
+      AND f.OrderDate >= esa.StartDate AND f.OrderDate <= esa.EndDate
+      AND f.OrderDate >= s.OpeningDate
+      AND (s.ClosingDate IS NULL OR f.OrderDate < s.ClosingDate)
+      AND NOT (s.RenovationStartDate IS NOT NULL AND s.RenovationEndDate IS NOT NULL
+               AND f.OrderDate >= s.RenovationStartDate AND f.OrderDate < s.RenovationEndDate)
+);
+
+IF @has_header = 1
+    SELECT @invalid_header = COUNT_BIG(*) FROM dbo.OrderHeader f
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM dbo.EmployeeStoreAssignments esa
+    JOIN dbo.Employees e ON e.EmployeeKey = esa.EmployeeKey
+    JOIN dbo.Stores s ON s.StoreKey = esa.StoreKey
+    WHERE esa.EmployeeKey = f.EmployeeKey AND esa.StoreKey = f.StoreKey
+      AND f.EmployeeKey > 0
+      AND e.IsSalesperson = 1 AND e.Title <> 'Store Manager'
+      -- IsSalesperson is generated using the configured primary role plus online reps.
+      AND esa.RoleAtStore = e.Title
+      AND ((esa.RoleAtStore = 'Online Sales Representative' AND s.StoreType = 'Online')
+        OR (esa.RoleAtStore <> 'Online Sales Representative' AND s.StoreType <> 'Online'))
+      AND f.OrderDate >= e.HireDate
+      AND (e.TerminationDate IS NULL OR f.OrderDate <= e.TerminationDate)
+      AND f.OrderDate >= esa.StartDate AND f.OrderDate <= esa.EndDate
+      AND f.OrderDate >= s.OpeningDate
+      AND (s.ClosingDate IS NULL OR f.OrderDate < s.ClosingDate)
+      AND NOT (s.RenovationStartDate IS NOT NULL AND s.RenovationEndDate IS NOT NULL
+               AND f.OrderDate >= s.RenovationStartDate AND f.OrderDate < s.RenovationEndDate)
+);
+
+SET @ineligible = @invalid_sales + @invalid_header;
+INSERT INTO #R VALUES ('Sales', 'Salesperson eligible on OrderDate',
+    CASE WHEN @ineligible = 0 THEN 'PASS' ELSE 'FAIL' END,
+    CAST(@ineligible AS VARCHAR) + ' invalid row(s) across Sales and OrderHeader');
 
 -- ############################################################################
 -- RESULTS

@@ -37,6 +37,57 @@ from src.dimensions.employees.assignment_core import (
 ROLE = ["Sales Associate"]
 
 
+def test_assignment_runner_classifies_understaffed_destination_as_backfill(tmp_path, monkeypatch):
+    from src.dimensions.employees import employee_store_assignments as runner
+    from src.engine.config.config_schema import AppConfig
+
+    # Ten physical stores exercise the normal runner (below ten skips transfers).
+    # Every destination is below its plan, independent of which RNG draw wins.
+    stores = _stores(range(1, 11))
+    stores["StoreType"] = "Supermarket"
+    stores["Status"] = "Open"
+    stores["StoreRegionId"] = 1
+    stores["CloseReason"] = None
+    stores["EmployeeCount"] = 5
+    stores.to_parquet(tmp_path / "stores.parquet", index=False)
+    employees = pd.DataFrame({
+        "EmployeeKey": range(1, 12),
+        "HomeStoreKey": [*range(1, 11), 1],
+        "Title": ["Sales Associate"] * 10 + ["Cashier"],
+        "HireDate": [pd.Timestamp("2020-01-01")] * 11,
+        "TerminationDate": [pd.NaT] * 11,
+        "FTE": [1.0] * 11,
+        "IsActive": [True] * 11,
+    })
+    employees.to_parquet(tmp_path / "employees.parquet", index=False)
+    employees_before = (tmp_path / "employees.parquet").read_bytes()
+    cfg = AppConfig.from_raw_dict({
+        "defaults": {"seed": 42, "dates": {"start": "2024-01-01", "end": "2024-12-31"}},
+        "employees": {"transfers": {
+            "enabled": True, "annual_rate": 1.0, "min_tenure_months": 0,
+            "eligible_roles": ["Cashier"],
+        }},
+    })
+    # Isolate the shared version cache; generation and transfer selection are real.
+    versions = []
+    monkeypatch.setattr(runner, "should_regenerate", lambda *args: True)
+    monkeypatch.setattr(runner, "save_version", lambda name, version, path: versions.append(version))
+    runner.run_employee_store_assignments(cfg, tmp_path)
+    out = pd.read_parquet(tmp_path / "employee_store_assignments.parquet")
+    cashier = out[out["EmployeeKey"] == 11].sort_values("StartDate")
+    assert len(cashier) == 2
+    destination = cashier.iloc[-1]
+    assert int(destination["StoreKey"]) != 1
+    assert destination["TransferReason"] == "Backfill"
+    assert cashier.iloc[0]["EndDate"] + pd.Timedelta(days=1) == destination["StartDate"]
+    # A staffing plan edit must invalidate the bridge's dependency signature.
+    stores["EmployeeCount"] = 6
+    stores.to_parquet(tmp_path / "stores.parquet", index=False)
+    runner.run_employee_store_assignments(cfg, tmp_path)
+    assert versions[0]["_stores_sig"] != versions[1]["_stores_sig"]
+    assert (tmp_path / "employees.parquet").read_bytes() == employees_before
+
+
 def test_transfer_destination_preserves_completed_employee_status() -> None:
     end_date = pd.Timestamp("2025-07-07")
 

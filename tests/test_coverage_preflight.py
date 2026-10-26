@@ -22,6 +22,14 @@ ROLES = ["Sales Associate", "Online Sales Representative"]
 SA = 40_001_001  # staff-band EmployeeKey
 
 
+def _employees(hire="2020-01-01", termination=None):
+    return pd.DataFrame({
+        "EmployeeKey": [SA],
+        "HireDate": [pd.Timestamp(hire)],
+        "TerminationDate": [pd.Timestamp(termination) if termination else pd.NaT],
+    })
+
+
 def _stores(closing=None, reno=(None, None)):
     return pd.DataFrame({
         "StoreKey": [1],
@@ -111,10 +119,87 @@ class TestAnalyzeCoverage:
 
 
 class TestRepair:
+    @pytest.mark.parametrize("hire,termination,interval", [
+        ("2021-03-15", None, ("2021-03-15", "2021-06-30")),
+        ("2020-01-01", "2021-03-15", ("2021-01-01", "2021-03-15")),
+    ])
+    def test_repair_does_not_invent_employment(self, hire, termination, interval):
+        bridge = _bridge([interval])
+        employees = _employees(hire, termination)
+        before = employees.copy(deep=True)
+        report = analyze_coverage(_stores(), bridge, *WIN, ROLES)
+        out, n = repair_bridge(bridge, report, ROLES, employees)
+        assert n == 0
+        pd.testing.assert_frame_equal(out, bridge)
+        pd.testing.assert_frame_equal(employees, before)
+
+    def test_repair_accepts_inclusive_employment_boundaries(self):
+        bridge = _bridge([("2021-02-01", "2021-05-31")])
+        report = analyze_coverage(_stores(), bridge, *WIN, ROLES)
+        out, n = repair_bridge(bridge, report, ROLES, _employees(*WIN))
+        assert n == 2
+        assert out.iloc[0]["StartDate"] == WIN[0]
+        assert out.iloc[0]["EndDate"] == WIN[1]
+
+    @pytest.mark.parametrize("metadata", ["unknown", "missing_hire", "bad_term"])
+    def test_repair_refuses_unverifiable_employment(self, metadata):
+        bridge = _bridge([("2021-02-01", "2021-05-31")])
+        employees = _employees()
+        if metadata == "unknown":
+            employees["EmployeeKey"] = SA + 1
+        elif metadata == "missing_hire":
+            employees["HireDate"] = pd.NaT
+        else:
+            employees["TerminationDate"] = "invalid"
+        report = analyze_coverage(_stores(), bridge, *WIN, ROLES)
+        out, n = repair_bridge(bridge, report, ROLES, employees)
+        assert n == 0
+        pd.testing.assert_frame_equal(out, bridge)
+
+    def test_repair_respects_overlapping_non_sales_job(self):
+        bridge = _bridge([("2021-02-01", "2021-06-30")])
+        other = bridge.iloc[0].copy()
+        other["StoreKey"] = 2
+        other["RoleAtStore"] = "Cashier"
+        other["StartDate"] = WIN[0]
+        other["EndDate"] = pd.Timestamp("2021-01-31")
+        bridge = pd.concat([bridge, other.to_frame().T], ignore_index=True)
+        report = analyze_coverage(_stores(), bridge, *WIN, ROLES)
+        out, n = repair_bridge(bridge, report, ROLES, _employees())
+        assert n == 0
+        pd.testing.assert_frame_equal(out, bridge)
+
+    def test_repair_tries_another_employee_with_valid_employment(self):
+        bridge = _bridge([("2021-02-01", "2021-06-30")])
+        alternative = bridge.copy()
+        alternative["EmployeeKey"] = SA + 1
+        bridge = pd.concat([bridge, alternative], ignore_index=True)
+        employees = pd.concat([
+            _employees("2021-02-01"),
+            _employees().assign(EmployeeKey=SA + 1),
+        ], ignore_index=True)
+        report = analyze_coverage(_stores(), bridge, *WIN, ROLES)
+        out, n = repair_bridge(bridge, report, ROLES, employees)
+        assert n == 1
+        assert out.loc[out["EmployeeKey"] == SA, "StartDate"].iloc[0] == pd.Timestamp("2021-02-01")
+        assert out.loc[out["EmployeeKey"] == SA + 1, "StartDate"].iloc[0] == WIN[0]
+
+    @pytest.mark.parametrize("invalid", ["missing_dates", "duplicate_identity"])
+    def test_repair_rejects_ambiguous_employment_metadata(self, invalid):
+        bridge = _bridge([("2021-02-01", "2021-06-30")])
+        employees = _employees()
+        if invalid == "missing_dates":
+            employees = employees.drop(columns="HireDate")
+        else:
+            employees = pd.concat([employees, employees], ignore_index=True)
+        report = analyze_coverage(_stores(), bridge, *WIN, ROLES)
+        with pytest.raises(SalesError, match="requires unique employee identities"):
+            repair_bridge(bridge, report, ROLES, employees)
+
     def test_repair_closes_gap(self):
         b = _bridge([("2020-06-01", "2021-02-28"), ("2021-05-01", "2021-12-31")])
         rep = analyze_coverage(_stores(), b, *WIN, ROLES)
-        repaired, n = repair_bridge(b, rep, ROLES)
+        repaired, n = repair_bridge(b, rep, ROLES, _employees())
         assert n > 0
         recheck = analyze_coverage(_stores(), repaired, *WIN, ROLES)
         assert recheck.n_gap_cells == 0
@@ -144,7 +229,7 @@ class TestRepair:
         win = (pd.Timestamp("2021-01-01"), pd.Timestamp("2021-12-31"))
         rep = analyze_coverage(stores, bridge, *win, ROLES)
         assert rep.has_avoidable_loss  # both stores have half-year gaps
-        repaired, _n = repair_bridge(bridge, rep, ROLES)
+        repaired, _n = repair_bridge(bridge, rep, ROLES, _employees())
         # no employee may hold two assignments that overlap in time
         g = repaired.sort_values(["EmployeeKey", "StartDate"])
         for ek, grp in g.groupby("EmployeeKey"):
@@ -161,11 +246,11 @@ class TestRepair:
 
         b = _bridge([("2020-06-01", "2021-02-28"), ("2021-05-01", "2021-12-31")])
         rep_a = analyze_coverage(_stores(), b, *WIN, ROLES)
-        repaired_a, n_a = repair_bridge(b, rep_a, ROLES)
+        repaired_a, n_a = repair_bridge(b, rep_a, ROLES, _employees())
 
         rep_b = analyze_coverage(_stores(), b, *WIN, ROLES)
         random.Random(20260701).shuffle(rep_b.gap_cells)
-        repaired_b, n_b = repair_bridge(b, rep_b, ROLES)
+        repaired_b, n_b = repair_bridge(b, rep_b, ROLES, _employees())
 
         assert n_a == n_b > 0
         cols = ["EmployeeKey", "StoreKey", "StartDate", "EndDate", "TransferReason"]
@@ -178,7 +263,7 @@ class TestRepair:
         # keep their original reason.
         b = _bridge([("2020-06-01", "2021-02-28"), ("2021-05-01", "2021-12-31")])
         rep = analyze_coverage(_stores(), b, *WIN, ROLES)
-        repaired, n = repair_bridge(b, rep, ROLES)
+        repaired, n = repair_bridge(b, rep, ROLES, _employees())
         assert n > 0
         reasons = set(repaired["TransferReason"])
         assert "Coverage Gap Repair" in reasons
@@ -188,7 +273,7 @@ class TestRepair:
         # A clean bridge is returned untouched (no tag, original object).
         clean = _bridge([("2020-06-01", "2021-12-31")])
         clean_rep = analyze_coverage(_stores(), clean, *WIN, ROLES)
-        out, n0 = repair_bridge(clean, clean_rep, ROLES)
+        out, n0 = repair_bridge(clean, clean_rep, ROLES, _employees())
         assert n0 == 0
         assert "Coverage Gap Repair" not in set(out["TransferReason"])
 
@@ -204,6 +289,7 @@ class TestPolicies:
     def _write(self, tmp_path, bridge):
         _stores().to_parquet(tmp_path / "stores.parquet", index=False)
         bridge.to_parquet(tmp_path / "employee_store_assignments.parquet", index=False)
+        _employees().to_parquet(tmp_path / "employees.parquet", index=False)
 
     def test_abort_raises(self, tmp_path):
         self._write(tmp_path, _bridge([("2020-06-01", "2021-02-28"), ("2021-05-01", "2021-12-31")]))
@@ -220,6 +306,15 @@ class TestPolicies:
         fixed = pd.read_parquet(tmp_path / "employee_store_assignments.parquet")
         rep = analyze_coverage(_stores(), fixed, *WIN, ROLES)
         assert not rep.has_avoidable_loss
+
+    def test_repair_requires_employee_file_without_rewriting_bridge(self, tmp_path):
+        bridge = _bridge([("2021-02-01", "2021-06-30")])
+        self._write(tmp_path, bridge)
+        (tmp_path / "employees.parquet").unlink()
+        before = (tmp_path / "employee_store_assignments.parquet").read_bytes()
+        with pytest.raises(SalesError, match="requires employees.parquet"):
+            run_coverage_preflight(self._cfg("repair"), tmp_path, *WIN)
+        assert (tmp_path / "employee_store_assignments.parquet").read_bytes() == before
 
     def test_clean_config_no_raise_under_abort(self, tmp_path):
         self._write(tmp_path, _bridge([("2020-06-01", "2021-12-31")]))

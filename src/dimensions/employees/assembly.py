@@ -559,12 +559,17 @@ def assign_employment_dates_status(
             # Use index labels rather than mask positions so this remains correct
             # if assembly ever supplies a non-RangeIndex frame.
             store_idx = df.index.to_numpy()[mask]
+            # Keep the closure retention target based on the full planned roster,
+            # but never move a manager into an already managed destination.
+            eligible_idx = df.index.to_numpy()[
+                mask & (df["Title"].astype(str).to_numpy() != "Store Manager")
+            ]
             n_retain = min(
-                len(store_idx),
+                len(eligible_idx),
                 max(0, int(round(len(store_idx) * retain_share))),
             )
             if n_retain > 0:
-                retained_idx = rng.choice(store_idx, size=n_retain, replace=False)
+                retained_idx = rng.choice(eligible_idx, size=n_retain, replace=False)
                 df.loc[retained_idx, "TerminationDate"] = pd.NaT
                 df.loc[retained_idx, "IsActive"] = True
                 df.loc[retained_idx, "TerminationReason"] = pd.NA

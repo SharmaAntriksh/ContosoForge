@@ -704,6 +704,8 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("OrgUnitType", VARCHAR(20, not_null=True)),
         ("RegionId", INT_NULL),
         ("DistrictId", INT_NULL),
+        # Original generated home organization; transfers do not update it.
+        # Effective work location comes from EmployeeStoreAssignments dates.
         ("HomeStoreKey", INT_NULL),
         ("GeographyKey", INT_NULL),
         ("HireDate", DATE_NN),
@@ -743,6 +745,8 @@ DIM_SCHEMAS: Dict[str, Schema] = {
         ("EndDate", DATE_NN),
         ("FTE", DECIMAL(3, 2, not_null=True)),
         ("RoleAtStore", VARCHAR(100, not_null=True)),
+        # Latest segment, including a terminated employee's completed segment.
+        # This flag alone does not identify active dataset-end staffing.
         ("IsCurrentAssignment", BIT(not_null=True)),
         ("TransferReason", VARCHAR(50, not_null=True)),
         ("AssignmentStatus", VARCHAR(20, not_null=True)),

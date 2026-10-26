@@ -253,6 +253,7 @@ def repair_bridge(
     bridge_df: pd.DataFrame,
     report: CoverageReport,
     salesperson_roles,
+    employees: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, int]:
     """Extend salesperson assignments to cover fully-open gap store-months.
 
@@ -261,7 +262,11 @@ def repair_bridge(
     definition of ``fully_open``). The candidate is chosen so the extended window
     does NOT overlap any of that employee's other assignments — i.e. it never
     places one employee at two stores on the same day, preserving the bridge's
-    per-employee temporal-exclusivity invariant. If no store salesperson is free
+    per-employee temporal-exclusivity invariant. The full extended segment must
+    also fall within the employee's inclusive hire/termination dates; missing or
+    invalid employment metadata makes that candidate ineligible. Employment
+    dates and employee attributes are never changed by repair.
+    If no store salesperson is free
     across the gap, it is left unrepaired (those orders are dropped downstream;
     still no ``-1``). Boundary gaps (store opens/closes mid-month) are skipped.
 
@@ -274,6 +279,17 @@ def repair_bridge(
     ``TransferReason = "Coverage Gap Repair"`` so the synthetic fills are
     auditable in the packaged bridge.
     """
+    required = {"EmployeeKey", "HireDate", "TerminationDate"}
+    missing = sorted(required - set(employees.columns))
+    if missing or employees["EmployeeKey"].duplicated().any():
+        raise SalesError(
+            "Coverage repair requires unique employee identities and employment "
+            f"dates; missing columns: {missing}"
+        )
+    employment = employees.set_index("EmployeeKey")
+    hires = pd.to_datetime(employment["HireDate"], errors="coerce")
+    terms = pd.to_datetime(employment["TerminationDate"], errors="coerce")
+    invalid_terms = employment["TerminationDate"].notna() & terms.isna()
     roles = set(salesperson_roles)
     df = bridge_df.copy()
     df["StartDate"] = pd.to_datetime(df["StartDate"])
@@ -284,9 +300,9 @@ def repair_bridge(
     start = df["StartDate"].to_numpy().copy()  # writable (parquet-backed views are read-only)
     end = df["EndDate"].to_numpy().copy()
 
-    # employee -> their salesperson row indices, for overlap checks
+    # Check every role: extending a sales assignment must not overlap another job.
     emp_rows: dict[int, List[int]] = {}
-    for ri in np.where(is_sp)[0]:
+    for ri in range(len(df)):
         emp_rows.setdefault(int(emp[ri]), []).append(int(ri))
 
     def _overlaps_other(e: int, r: int, ns, ne) -> bool:
@@ -329,6 +345,18 @@ def repair_bridge(
             r = int(r)
             ns = min(start[r], fd_ts)
             ne = max(end[r], ld_ts)
+            employee_key = int(emp[r])
+            if employee_key not in employment.index:
+                continue
+            hire = hires.loc[employee_key]
+            term = terms.loc[employee_key]
+            if (
+                pd.isna(hire)
+                or invalid_terms.loc[employee_key]
+                or pd.Timestamp(ns) < hire
+                or (pd.notna(term) and pd.Timestamp(ne) > term)
+            ):
+                continue  # a repair cannot invent employment before hire/after exit
             days_added = int(((start[r] - ns) + (ne - end[r])).astype("timedelta64[D]").astype(np.int64))
             cand.append((days_added, emp_load[int(emp[r])], int(emp[r]), r, ns, ne))
         cand.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
@@ -409,7 +437,13 @@ def run_coverage_preflight(cfg, parquet_dims: Path, global_start, global_end) ->
         return
 
     if policy == "repair":
-        repaired, n = repair_bridge(bridge_df, report, roles)
+        employees_path = parquet_dims / "employees.parquet"
+        if not employees_path.exists():
+            raise SalesError("Coverage repair requires employees.parquet employment dates")
+        employees = pd.read_parquet(
+            employees_path, columns=["EmployeeKey", "HireDate", "TerminationDate"],
+        )
+        repaired, n = repair_bridge(bridge_df, report, roles, employees)
         if n > 0:
             from src.utils.output_utils import write_parquet_with_date32
             write_parquet_with_date32(
@@ -425,8 +459,8 @@ def run_coverage_preflight(cfg, parquet_dims: Path, global_start, global_end) ->
             info(f"Coverage pre-flight (repair): closed {n} gap store-month(s); "
                  f"remaining avoidable gaps: {recheck.n_fully_open_gaps}.")
             if recheck.has_avoidable_loss:
-                warn("Coverage pre-flight (repair): some gaps remain (stores with no "
-                     "salesperson to extend); those store-months' sales will be dropped "
+                warn("Coverage pre-flight (repair): some gaps remain (no eligible, "
+                     "unoccupied employee within employment dates); those store-months' sales will be dropped "
                      "(EmployeeKey=-1 still prevented).")
         else:
             warn("Coverage pre-flight (repair): no repairable gaps found; "

@@ -97,9 +97,8 @@ def run_employees(cfg: AppConfig, parquet_folder: Path) -> None:
         )
 
     version_cfg = as_dict(emp_cfg)
-    # v20: publish a readable pay-frequency label while retaining the numeric
-    # compatibility code in the raw operational table.
-    version_cfg["schema_version"] = 20
+    # v21: closure retention excludes store managers.
+    version_cfg["schema_version"] = 21
     version_cfg["seed"] = int(seed)
     version_cfg["_stores_sig"] = _stores_signature(stores)
     version_cfg["_stores_cfg"] = as_dict(cfg.stores)

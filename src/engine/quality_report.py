@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from src.defaults import ONLINE_SALES_REP_ROLE
 from src.utils.logging_utils import info, stage
 
 
@@ -709,6 +710,10 @@ def _load_available_columns(
             if parquet_files:
                 import pyarrow.parquet as pq
                 available = set(pq.read_schema(str(parquet_files[0])).names)
+            else:
+                csv_files = sorted(path.glob("*.csv"))
+                if csv_files:
+                    available = set(pd.read_csv(csv_files[0], nrows=0).columns)
         elif path.is_file() and path.suffix == ".csv":
             available = set(pd.read_csv(path, nrows=0).columns)
     except (OSError, ValueError, KeyError, TypeError):
@@ -1508,8 +1513,11 @@ def _check_salesperson_assignment_integrity(
     assignments: pd.DataFrame,
     *,
     chunk_size: int = 1_000_000,
+    employees: Optional[pd.DataFrame] = None,
+    stores: Optional[pd.DataFrame] = None,
+    salesperson_roles: Optional[Sequence[str]] = None,
 ) -> None:
-    """Check each sale against the employee's inclusive assignment interval.
+    """Check inclusive assignment intervals and, when supplied, business eligibility.
 
     The lookup uses compact integer codes and bounded chunks so the check remains
     practical for the repository's 20M-row benchmark without materializing a
@@ -1519,12 +1527,85 @@ def _check_salesperson_assignment_integrity(
     assignment_required = [
         "EmployeeKey", "StoreKey", "StartDate", "EndDate",
     ]
+    if sales.empty:
+        return
     if (
         not _has_columns(sales, sales_required)
         or not _has_columns(assignments, assignment_required)
-        or sales.empty
     ):
+        if salesperson_roles is not None:
+            report.checks.append(CheckResult(
+                name="Salesperson effective assignment matches sale",
+                passed=False,
+                message="Cannot verify salesperson eligibility: missing sales or assignment columns",
+                category="Analytical Integrity",
+            ))
         return
+
+    # The packaged report supplies the business dimensions and configured roles.
+    # Direct callers may still use the interval-only check. Never infer historical
+    # eligibility from IsActive, IsCurrentAssignment, or AssignmentStatus.
+    if salesperson_roles is not None:
+        employee_columns = [
+            "EmployeeKey", "HireDate", "TerminationDate", "IsSalesperson", "Title",
+        ]
+        store_columns = [
+            "StoreKey", "StoreType", "OpeningDate", "ClosingDate",
+            "RenovationStartDate", "RenovationEndDate",
+        ]
+        if (
+            not _has_columns(employees, employee_columns)
+            or not _has_columns(stores, store_columns)
+            or not _has_columns(assignments, ["RoleAtStore"])
+        ):
+            report.checks.append(CheckResult(
+                name="Salesperson effective assignment matches sale",
+                passed=False,
+                message="Cannot verify salesperson eligibility: missing role, employment, or store lifecycle columns",
+                category="Analytical Integrity",
+            ))
+            return
+
+        # Clip each segment to its employee's employment and store's operating
+        # window, then subtract the half-open renovation interval. This keeps the
+        # existing bounded lookup independent of the generator's sampling code.
+        eligible = assignments.merge(
+            employees[employee_columns].drop_duplicates("EmployeeKey"),
+            on="EmployeeKey", how="inner", validate="many_to_one",
+        ).merge(
+            stores[store_columns].drop_duplicates("StoreKey"),
+            on="StoreKey", how="inner", validate="many_to_one",
+        )
+        eligible = eligible.loc[
+            eligible["RoleAtStore"].isin(salesperson_roles)
+            & _as_boolean_mask(eligible["IsSalesperson"])
+            & eligible["RoleAtStore"].eq(eligible["Title"])
+            & eligible["Title"].ne("Store Manager")
+            & eligible["RoleAtStore"].eq(ONLINE_SALES_REP_ROLE).eq(eligible["StoreType"].eq("Online"))
+        ].copy()
+        for column in ["StartDate", "EndDate", *employee_columns[1:3], *store_columns[2:]]:
+            eligible[column] = pd.to_datetime(eligible[column], errors="coerce").dt.normalize()
+        eligible = eligible.loc[
+            eligible["StartDate"].notna() & eligible["EndDate"].notna()
+            & eligible["HireDate"].notna() & eligible["OpeningDate"].notna()
+        ].copy()
+        eligible["StartDate"] = eligible[["StartDate", "HireDate", "OpeningDate"]].max(axis=1)
+        eligible["EndDate"] = pd.concat([
+            eligible["EndDate"], eligible["TerminationDate"],
+            eligible["ClosingDate"] - pd.Timedelta(days=1),
+        ], axis=1).min(axis=1)
+        renovation = (
+            eligible["RenovationStartDate"].notna()
+            & eligible["RenovationEndDate"].notna()
+            & eligible["RenovationStartDate"].lt(eligible["RenovationEndDate"])
+        )
+        before = eligible.loc[renovation].copy()
+        after = before.copy()
+        before["EndDate"] = pd.concat([
+            before["EndDate"], before["RenovationStartDate"] - pd.Timedelta(days=1),
+        ], axis=1).min(axis=1)
+        after["StartDate"] = after[["StartDate", "RenovationEndDate"]].max(axis=1)
+        assignments = pd.concat([eligible.loc[~renovation], before, after], ignore_index=True)
 
     assignment_employee = pd.to_numeric(
         assignments["EmployeeKey"], errors="coerce",
@@ -1628,7 +1709,9 @@ def _check_salesperson_assignment_integrity(
         name="Salesperson effective assignment matches sale",
         passed=mismatch_count == 0,
         message=(
-            f"All {len(sales)} sale rows match employee, store, and effective date"
+            f"All {len(sales)} sale rows match "
+            + ("eligible role, employment, store operation, and assignment dates"
+               if salesperson_roles is not None else "employee, store, and effective date")
             if mismatch_count == 0
             else f"{mismatch_count} sale row(s) do not match an effective assignment"
         ),
@@ -2183,7 +2266,7 @@ def _check_analytical_integrity(
             "EmployeeKey", "ParentEmployeeKey", "Title", "OrgLevel",
             "OrgUnitType", "RegionId", "DistrictId", "HomeStoreKey",
             "GeographyKey", "HireDate", "TerminationDate", "IsActive",
-            "EmploymentType", "FTE", "DepartmentName",
+            "EmploymentType", "FTE", "DepartmentName", "IsSalesperson",
         ],
     )
 
@@ -2191,7 +2274,7 @@ def _check_analytical_integrity(
         cache,
         _find_table(dims_folder, "stores"),
         [
-            "StoreKey", "Status", "GeographyKey", "StoreZone",
+            "StoreKey", "StoreType", "Status", "GeographyKey", "StoreZone",
             "StoreDistrict", "StoreRegion", "StoreDistrictId",
             "StoreRegionId", "OpeningDate", "ClosingDate", "CloseReason",
             "RevenueClass", "OwnershipType", "SuccessorStoreKey",
@@ -2220,7 +2303,7 @@ def _check_analytical_integrity(
         _find_table(dims_folder, "employee_store_assignments"),
         [
             "EmployeeKey", "StoreKey", "StartDate", "EndDate",
-            "IsCurrentAssignment", "AssignmentStatus",
+            "IsCurrentAssignment", "AssignmentStatus", "RoleAtStore",
         ],
     )
     if assignments is not None:
@@ -2246,11 +2329,33 @@ def _check_analytical_integrity(
         if warehouses is not None:
             _check_inventory_turnover_alignment(report, inventory, warehouses)
 
+    # Workforce attribution is on OrderHeader in split output. Check both sources
+    # when both are published, so a valid flat table cannot hide a broken header.
+    header = _load_available_columns(
+        cache, _find_table(facts_folder, "order_header"),
+        ["EmployeeKey", "StoreKey", "OrderDate"],
+    )
+    primary_role = _config_value(
+        cfg, "employees", "store_assignments", "primary_sales_role",
+    )
+    roles = [primary_role, ONLINE_SALES_REP_ROLE] if primary_role else []
+    if not roles and _has_columns(employees, ["Title", "IsSalesperson"]):
+        # Standalone reports may have no cfg. The generated employee flag already
+        # records the configured role policy; do not assume the default title.
+        roles = employees.loc[_as_boolean_mask(employees["IsSalesperson"]), "Title"].unique().tolist()
+    for source, attribution in (("sales", sales), ("order_header", header)):
+        if attribution is not None:
+            first_check = len(report.checks)
+            _check_salesperson_assignment_integrity(
+                report, attribution,
+                assignments if assignments is not None else pd.DataFrame(), employees=employees,
+                stores=stores, salesperson_roles=roles,
+            )
+            for check in report.checks[first_check:]:
+                check.details = f"Source: {source}. {check.details}".strip()
+
     if sales is None:
         return
-
-    if assignments is not None:
-        _check_salesperson_assignment_integrity(report, sales, assignments)
 
     returns = _load_available_columns(
         cache,

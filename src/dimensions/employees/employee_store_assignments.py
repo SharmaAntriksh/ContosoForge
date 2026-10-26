@@ -550,7 +550,7 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
     stores_df = None
     _stores_cols = [
         "StoreKey", "StoreType", "Status", "StoreRegion", "StoreRegionId",
-        "OpeningDate", "ClosingDate", "CloseReason",
+        "OpeningDate", "ClosingDate", "CloseReason", "EmployeeCount",
         "RenovationStartDate", "RenovationEndDate",
     ]
     if stores_path.exists():
@@ -573,8 +573,8 @@ def run_employee_store_assignments(cfg: AppConfig, parquet_folder: Path, out_pat
     version_cfg = dict(sa_cfg)
     # Closure and renovation moves run through the shared split primitive:
     # superseded segments are Transferred and key columns stay int32.
-    # v25: configurable role mobility and causally classified transfer reasons.
-    version_cfg["schema_version"] = 25
+    # v26: consume planned headcount for causal transfer classification.
+    version_cfg["schema_version"] = 26
     version_cfg["seed"] = int(base_seed)
     version_cfg["_stores_cfg"] = dict(cfg.stores)
     version_cfg["_transfers"] = as_dict(transfers_cfg)

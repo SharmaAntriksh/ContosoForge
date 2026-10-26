@@ -704,8 +704,8 @@ def check_esa(
     # --- Opening-aware assignments + mid-window opening feature ---
     _check_bridge_opening_and_midwindow(esa, stores, cat, ds_start)
 
-    # --- Salesperson coverage per open physical store-month ---
-    _check_salesperson_coverage(esa, stores, cat)
+    # --- Salesperson coverage across every operating interval ---
+    _check_salesperson_coverage(esa, stores, cat, employees)
 
 
 def _check_no_assignment_gaps(
@@ -885,78 +885,57 @@ def _check_salesperson_coverage(
     esa: pd.DataFrame,
     stores: pd.DataFrame,
     cat: str,
+    employees: pd.DataFrame,
 ) -> None:
-    """Every open, non-renovating physical store must have >= 1 salesperson
-    active *throughout* every month (StartDate <= month_start AND EndDate >=
-    month_end). The last month_end is clamped to the latest ESA EndDate to
-    handle mid-month dataset ends. Mirrors the contract of the transfer
-    engine's coverage budget.
-    """
-    sp = esa[esa["RoleAtStore"].astype(str) == "Sales Associate"]
-    if sp.empty:
-        _add(cat, "Salesperson coverage", True, "No Sales Associate assignments (skipped)")
-        return
+    """Independently sweep interval unions over each store's operating window."""
+    from src.engine.quality_report import _as_boolean_mask
+    from src.defaults import ONLINE_SALES_REP_ROLE
 
-    phys = stores[stores["StoreKey"].astype(int) < ONLINE_STORE_KEY_BASE]
-    sp_start = _to_dt(sp["StartDate"]).values.astype("datetime64[ns]")
-    sp_end = _to_dt(sp["EndDate"]).values.astype("datetime64[ns]")
-    sp_sk = sp["StoreKey"].astype(int).values
-
-    phys_c = phys[["StoreKey", "OpeningDate", "ClosingDate",
-                    "RenovationStartDate", "RenovationEndDate"]].copy()
-    phys_c["StoreKey"] = phys_c["StoreKey"].astype(int)
-    for col in ["OpeningDate", "ClosingDate", "RenovationStartDate", "RenovationEndDate"]:
-        phys_c[col] = _to_dt(phys_c[col])
-
-    open_dates = dict(phys_c.dropna(subset=["OpeningDate"])[["StoreKey", "OpeningDate"]].values)
-    close_dates = dict(phys_c.dropna(subset=["ClosingDate"])[["StoreKey", "ClosingDate"]].values)
-    reno_both = phys_c.dropna(subset=["RenovationStartDate", "RenovationEndDate"])
-    reno_start_dates = dict(reno_both[["StoreKey", "RenovationStartDate"]].values)
-    reno_end_dates = dict(reno_both[["StoreKey", "RenovationEndDate"]].values)
-
-    all_starts = _to_dt(esa["StartDate"])
-    all_ends = _to_dt(esa["EndDate"])
-    global_start = all_starts.min()
-    global_end = all_ends.max()
-
-    months = pd.date_range(global_start.replace(day=1), global_end, freq="MS")
-    if len(months) == 0:
-        _add(cat, "Salesperson coverage (every open store-month)", True, "No months to check (skipped)")
-        return
-    month_ends_raw = months + pd.offsets.MonthEnd(0)
-    month_ends_clamped = pd.DatetimeIndex(
-        list(month_ends_raw[:-1]) + [min(month_ends_raw[-1], global_end)]
+    sp = esa.merge(
+        employees[["EmployeeKey", "Title", "IsSalesperson", "HireDate", "TerminationDate"]],
+        on="EmployeeKey", how="inner", validate="many_to_one",
     )
+    sp = sp[_as_boolean_mask(sp["IsSalesperson"]) & sp["RoleAtStore"].eq(sp["Title"]) & sp["Title"].ne("Store Manager")].copy()
+    for column in ("StartDate", "EndDate", "HireDate", "TerminationDate"):
+        sp[column] = _to_dt(sp[column])
+    sp = sp[sp["HireDate"].notna() & sp["StartDate"].notna() & sp["EndDate"].notna()].copy()
+    sp["StartDate"] = sp[["StartDate", "HireDate"]].max(axis=1)
+    sp["EndDate"] = sp[["EndDate", "TerminationDate"]].min(axis=1)
+    observed_start, observed_end = _to_dt(esa["StartDate"]).min(), _to_dt(esa["EndDate"]).max()
+    if pd.isna(observed_start) or pd.isna(observed_end):
+        _add(cat, "Salesperson coverage (every operating day)", False, "No assignment observation window")
+        return
 
-    phys_sks = phys["StoreKey"].astype(int).to_numpy()
-    violations: list[tuple[int, str]] = []
-
-    for month_start, month_end in zip(months, month_ends_clamped):
-        ms_ns = np.datetime64(month_start, "ns")
-        me_ns = np.datetime64(month_end, "ns")
-        active_mask = (sp_start <= ms_ns) & (sp_end >= me_ns)
-        covered = set(sp_sk[active_mask])
-
-        for sk in phys_sks:
-            sk = int(sk)
-            od = open_dates.get(sk)
-            if od is not None and month_start < od:
-                continue
-            cd = close_dates.get(sk)
-            if cd is not None and month_end >= cd:
-                continue
-            rs = reno_start_dates.get(sk)
-            re = reno_end_dates.get(sk)
-            if rs is not None and re is not None and month_start < re and month_end >= rs:
-                continue
-
-            if sk not in covered:
-                violations.append((sk, month_start.strftime("%Y-%m")))
-
-    _add(cat, "Salesperson coverage (every open store-month, full-month)",
-         len(violations) == 0,
-         f"{len(violations)} store-month gap(s)",
-         "\n".join(f"  Store {sk}, {ym}" for sk, ym in violations[:15]))
+    one_day = pd.Timedelta(days=1)
+    violations = []
+    for store in stores.itertuples(index=False):
+        opened, closed = pd.to_datetime(store.OpeningDate), pd.to_datetime(store.ClosingDate)
+        if pd.isna(opened):
+            violations.append(f"Store {store.StoreKey}: missing OpeningDate")
+            continue
+        first = max(observed_start, opened)
+        last = min(observed_end, closed - one_day) if pd.notna(closed) else observed_end
+        rs, re = pd.to_datetime(store.RenovationStartDate), pd.to_datetime(store.RenovationEndDate)
+        windows = [(first, last)]
+        if pd.notna(rs) and pd.notna(re) and rs < re:
+            windows = [(first, min(last, rs - one_day)), (max(first, re), last)]
+        store_sp = sp[sp["StoreKey"].eq(store.StoreKey)
+                      & sp["RoleAtStore"].eq(ONLINE_SALES_REP_ROLE).eq(store.StoreType == "Online")]
+        intervals = store_sp.sort_values(["StartDate", "EndDate"])
+        for start, end in windows:
+            cursor = start
+            for row in intervals.itertuples(index=False):
+                if row.EndDate < cursor:
+                    continue
+                if row.StartDate > cursor:
+                    break
+                cursor = max(cursor, row.EndDate + one_day)
+                if cursor > end:
+                    break
+            if cursor <= end:
+                violations.append(f"Store {store.StoreKey}: uncovered from {cursor.date()} through {end.date()}")
+    _add(cat, "Salesperson coverage (every operating day)", not violations,
+         f"{len(violations)} operating window(s) with gaps", "\n".join(violations[:15]))
 
 
 # ============================================================================
@@ -1025,6 +1004,18 @@ def check_sales(
         _add(cat, "Quantity > 0 and UnitPrice > 0",
              bad_qty == 0 and bad_price == 0,
              f"{bad_qty} zero/negative qty, {bad_price} zero/negative price")
+
+    # Employment, role and store operation must agree with the bridge too.
+    from src.engine.quality_report import (
+        QualityReport, _as_boolean_mask, _check_salesperson_assignment_integrity,
+    )
+    roles = employees.loc[_as_boolean_mask(employees["IsSalesperson"]), "Title"].unique().tolist()
+    eligibility = QualityReport()
+    _check_salesperson_assignment_integrity(
+        eligibility, sales, esa, employees=employees, stores=stores, salesperson_roles=roles,
+    )
+    for check in eligibility.checks:
+        _add(cat, "Salesperson eligible on OrderDate", check.passed, check.message, check.details)
 
     # --- 100% sales-to-ESA bridge match ---
     _check_sales_esa_match(sales, esa, cat)

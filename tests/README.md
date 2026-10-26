@@ -30,7 +30,7 @@ All filenames in the table are under `tests/`. Pass the relevant files to
 | Counter-based sampling | `test_product_sampling_counter.py`, `test_channel_time_counter.py`, `test_hashing.py` |
 | Sales output schemas / writers | `test_sales_schema_consistency.py`, `test_sales_writer.py`, `test_sales_writer_atomic.py`, `test_delta_writer_schema.py` |
 | Dates registry / calendars | `test_dates.py`, `test_dates_snapshot.py` |
-| Workforce / temporal coverage | `test_temporal_contracts.py`, `test_workforce_published_contract.py`, `test_store_warehouse_causality.py`, `test_coverage_preflight.py` |
+| Workforce / temporal coverage | `test_workforce_acceptance.py`, `test_workforce_verification.py`, `test_workforce_sql_examples.py`, `test_temporal_contracts.py`, `test_workforce_published_contract.py`, `test_store_warehouse_causality.py`, `test_coverage_preflight.py` |
 | SQL generation / casing | `test_dialect.py`, `test_dialect_postgres.py`, `test_constraint_generation.py`, `test_view_generation.py`, `test_identifier_case_e2e.py`, `test_reemit_sql.py` |
 | Importers / PowerShell | `test_sql_import_hardening.py`, `test_postgres_import.py`, `test_import_entrypoints.py`, `test_powershell_driver_preflight.py` |
 | Web routes / preview / import | `test_web_api.py`, `test_web_routes.py`, `test_web_data_preview.py`, `test_web_import_routes.py` |
@@ -44,6 +44,39 @@ available, skip unavailable shells, and mock installation rather than changing
 the developer's environment.
 
 ## Sales determinism and stored snapshots
+
+Workforce checks establish different kinds of evidence:
+
+- `test_workforce_acceptance.py` runs the real pipeline in temporary directories,
+  with a separate version directory and FX-master copy. Its oracle enumerates
+  every operating day and evaluates every emitted employee/store/date tuple
+  without calling the generator's workforce lookup or quality-report helpers.
+  The scenario requires openings, closures, renovation reassignments, and
+  transfers to occur. It checks flat sales and split-order attribution,
+  employment boundaries, primary-assignment exclusivity, original hierarchy,
+  and dataset-end staffing. This is sampled end-to-end evidence, not a proof
+  over every seed/configuration.
+- `test_workforce_verification.py` injects independently specified invalid and
+  valid cases into diagnostics. It checks whether the diagnostics detect errors;
+  passing it alone does not prove the generator avoids those errors.
+- `test_coverage_preflight.py` and `test_transfers.py` isolate repair and transfer
+  rules. The runner-level backfill case additionally detects omitted input
+  columns that direct helper tests cannot expose.
+- `test_workforce_sql_examples.py` executes published example queries and the
+  retained workforce view bodies on hand-built data. It checks relational
+  results: visitors versus home managers, fractional FTE, historical eligibility,
+  and order-level averages. SQLite execution is not live SQL Server/PostgreSQL
+  compilation or deployment evidence.
+- Roster, schema, rendering, and TMDL visibility assertions establish published
+  shape and wiring. They do not independently establish business correctness,
+  effective-date filtering in Power BI measures, or reporting authority.
+
+Snapshots establish reproducibility against accepted output. Worker/CPU
+comparisons establish invariance across execution settings. Neither establishes
+that the accepted output is business-correct: sibling runs can share a bug.
+Use the independent workforce cases alongside them. Live database execution,
+Power BI measure evaluation, additional seeds, and other configured sales roles
+remain separate integration/coverage questions.
 
 These are different checks:
 

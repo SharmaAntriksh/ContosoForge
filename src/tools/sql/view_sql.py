@@ -59,12 +59,10 @@ PASS_THROUGH_VIEWS: tuple[str, ...] = (
     "BudgetYearly", "BudgetMonthly", "InventorySnapshot",
 )
 
-# Business-facing workforce views. Unlike pass-through views, these expose the
-# effective-dated bridge semantics analysts otherwise have to reconstruct.
+# Default workforce views. Historical joins and store transaction aggregates
+# are query examples in docs/WORKFORCE_SQL_EXAMPLES.md, not extra model objects.
 WORKFORCE_VIEWS: tuple[str, ...] = (
-    "EmployeeAssignmentHistory",
     "CurrentEmployeesByStore",
-    "EffectiveSalespersonAssignment",
     "CurrentStoreManager",
     "StoreStaffingActualVsPlan",
 )
@@ -345,19 +343,7 @@ class _ViewWriter:
         def output_alias(expression: str, alias: str) -> str:
             return f"{expression} AS {self.q(self.resolve_view(alias))}"
 
-        if view_base == "EmployeeAssignmentHistory":
-            columns = (
-                ("a", "AssignmentKey"), ("a", "EmployeeKey"),
-                ("e", "EmployeeName"), ("e", "Title"),
-                ("a", "StoreKey"),
-                ("s", "StoreName"), ("s", "StoreRegion"),
-                ("a", "StartDate"), ("a", "EndDate"), ("a", "FTE"),
-                ("a", "RoleAtStore"), ("a", "IsCurrentAssignment"),
-                ("a", "TransferReason"), ("a", "AssignmentStatus"),
-            )
-            exprs = [self.col_ref(alias, column) for alias, column in columns]
-            where = None
-        elif view_base == "CurrentEmployeesByStore":
+        if view_base == "CurrentEmployeesByStore":
             columns = (
                 ("a", "EmployeeKey"), ("e", "EmployeeName"),
                 ("e", "Title"), ("a", "StoreKey"), ("s", "StoreName"),
@@ -370,15 +356,6 @@ class _ViewWriter:
                 f"{self.col_ref('a', 'IsCurrentAssignment')} = {bool_true} AND "
                 f"{self.col_ref('a', 'AssignmentStatus')} = {active}"
             )
-        elif view_base == "EffectiveSalespersonAssignment":
-            columns = (
-                ("a", "EmployeeKey"), ("e", "EmployeeName"),
-                ("a", "StoreKey"), ("s", "StoreName"),
-                ("a", "StartDate"), ("a", "EndDate"),
-                ("a", "RoleAtStore"), ("a", "FTE"),
-            )
-            exprs = [self.col_ref(alias, column) for alias, column in columns]
-            where = f"{self.col_ref('e', 'IsSalesperson')} = {bool_true}"
         elif view_base == "CurrentStoreManager":
             exprs = [
                 self.col_ref("s", "StoreKey"),
@@ -391,7 +368,9 @@ class _ViewWriter:
             where = (
                 f"{self.col_ref('a', 'IsCurrentAssignment')} = {bool_true} AND "
                 f"{self.col_ref('a', 'AssignmentStatus')} = {active} AND "
-                f"{self.col_ref('a', 'RoleAtStore')} = {store_manager}"
+                f"{self.col_ref('a', 'RoleAtStore')} = {store_manager} AND "
+                f"{self.col_ref('e', 'Title')} = {store_manager} AND "
+                f"{self.col_ref('e', 'HomeStoreKey')} = {self.col_ref('a', 'StoreKey')}"
             )
         elif view_base == "StoreStaffingActualVsPlan":
             planned_count = self.col_ref("s", "EmployeeCount")
@@ -432,65 +411,6 @@ class _ViewWriter:
             body += f"\nWHERE {where}"
         if group_by:
             body += "\nGROUP BY " + ", ".join(group_by)
-        return self._block(guards, body)
-
-    def store_sales_actuals(
-        self,
-        *,
-        mode: str,
-        skip_order_cols: bool,
-    ) -> str | None:
-        """Render fact-derived store order value metrics when order grain exists."""
-        self._current_base = "StoreSalesActuals"
-        use_order_split = mode == "sales_order" or (mode == "both" and skip_order_cols)
-        if not use_order_split and skip_order_cols:
-            return None
-
-        store_key = self.q(self.resolve("StoreKey"))
-        order_number = self.q(self.resolve("OrderNumber"))
-        net_price = self.q(self.resolve("NetPrice"))
-        quantity = self.q(self.resolve("Quantity"))
-        transaction_amount = self.q(self.resolve_view("TransactionAmount"))
-
-        if use_order_split:
-            header = f"{self.table_ref('OrderHeader')} AS h"
-            detail = f"{self.table_ref('OrderDetail')} AS d"
-            line_source = (
-                f"{header}\nJOIN {detail}\n"
-                f"  ON h.{order_number} = d.{order_number}"
-            )
-            key_ref = f"h.{store_key}"
-            order_ref = f"h.{order_number}"
-            amount_ref = f"d.{net_price} * d.{quantity}"
-            guards = ["OrderHeader", "OrderDetail"]
-        else:
-            line_source = f"{self.table_ref('Sales')} AS f"
-            key_ref = f"f.{store_key}"
-            order_ref = f"f.{order_number}"
-            amount_ref = f"f.{net_price} * f.{quantity}"
-            guards = ["Sales"]
-
-        order_rollup = (
-            "SELECT\n"
-            f"    {key_ref} AS {store_key},\n"
-            f"    {order_ref} AS {order_number},\n"
-            f"    SUM({amount_ref}) AS {transaction_amount}\n"
-            f"FROM {line_source}\n"
-            f"GROUP BY {key_ref}, {order_ref}"
-        )
-        order_count = self.q(self.resolve_view("OrderCount"))
-        gross_sales = self.q(self.resolve_view("GrossSalesAmount"))
-        average_transaction = self.q(self.resolve_view("AvgTransactionValue"))
-        body = (
-            f"{self.cfg['create']} {self.view_ref('StoreSalesActuals')} AS\n"
-            "SELECT\n"
-            f"    o.{store_key},\n"
-            f"    COUNT(*) AS {order_count},\n"
-            f"    SUM(o.{transaction_amount}) AS {gross_sales},\n"
-            f"    AVG(o.{transaction_amount}) AS {average_transaction}\n"
-            f"FROM (\n{order_rollup}\n) AS o\n"
-            f"GROUP BY o.{store_key}"
-        )
         return self._block(guards, body)
 
 
@@ -554,13 +474,5 @@ def render_views_sql(
         parts.append(w.sales_from_join())
     else:
         parts.append(w.sales_from_flat(include_order_cols=not skip_order_cols))
-
-    store_actuals = w.store_sales_actuals(
-        mode=mode,
-        skip_order_cols=skip_order_cols,
-    )
-    if store_actuals:
-        parts.append("-- Fact-derived store actuals")
-        parts.append(store_actuals)
 
     return "\n\n".join(parts) + "\n"

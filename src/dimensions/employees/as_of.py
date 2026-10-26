@@ -39,7 +39,11 @@ def assignments_as_of(
 
 
 def current_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
-    """Return rows explicitly marked as the dataset-end current assignment."""
+    """Return each employee's latest segment, including completed employment.
+
+    This flag alone does not establish dataset-end staffing. Historical callers
+    should use ``assignments_as_of``; current staffing also needs active status.
+    """
     required = {"EmployeeKey", "IsCurrentAssignment"}
     missing = sorted(required - set(assignments.columns))
     if missing:
