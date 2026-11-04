@@ -33,7 +33,7 @@ models:
     truncate_at_max: true
     max_redraw_attempts: 8
 
-    # Phase 3.1 — quantity depends on price + product propensity (elasticity),
+    # Quantity depends on price + product propensity (elasticity),
     # so cheap staples sell in larger baskets than expensive durables.
     elasticity:
       enabled: true
@@ -75,7 +75,7 @@ models:
       max_pct_of_price: 0.40
       min_net_price: 0.01
       allow_negative_margin: false
-      reconcile_promotions: true    # discounts only on promoted lines (Phase 3.5);
+      reconcile_promotions: true    # discounts only on promoted lines;
                                     # false = legacy independent markdown lottery
 
       ladder:
@@ -124,7 +124,7 @@ models:
           - { max: 1000, step: 25 }
           - { max: 1e18, step: 50 }
   # ================================================================
-  # PROMOTION SALIENCE — deeper promos redeemed more often (Phase 3.2)
+  # PROMOTION SALIENCE — deeper promos redeemed more often
   # ================================================================
   promotions:
     enabled: true
@@ -135,7 +135,7 @@ models:
 
 
   # ================================================================
-  # BASKET THEME — co-purchase correlation within an order (Phase 3.3)
+  # BASKET THEME — co-purchase correlation within an order
   # ================================================================
   # Each order is assigned a hash-seeded theme (a group of subcategories);
   # a share of its off-theme lines are redirected into that theme so multi-line
@@ -147,7 +147,7 @@ models:
 
 
   # ================================================================
-  # CUSTOMER / ORGANIZATION SEGMENTS (Phase 4.1)
+  # CUSTOMER / ORGANIZATION SEGMENTS
   # ================================================================
   # These correlations change product, channel, and quantity behavior only.
   # They do not change sales row counts or which customer receives an order.
@@ -167,7 +167,7 @@ models:
 
 
   # ================================================================
-  # FULFILLMENT FRICTION — delivery timing ↔ returns (Phase 3.4)
+  # FULFILLMENT FRICTION — delivery timing ↔ returns
   # ================================================================
   # One per-line friction latent (hash-seeded on OrderNumber+OrderLineNumber)
   # drives delivery bucketing AND return behavior, so late deliveries yield

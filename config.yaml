@@ -6,12 +6,12 @@
 # SCALE — row/entity counts for each table (start here)
 # ------------------------------------------------------------------
 scale:
-  sales_rows: 20032950
+  sales_rows: 1003295
   products:
     catalog: all                    # contoso (original 2517) | synthetic (5633) | all (combined - 7930)
     rows: 7930                      # target product count (trims or expands to fit)
-  customers: 142851
-  stores: 500
+  customers: 48285
+  stores: 200
   promotions: { seasonal: 11, clearance: 4, limited: 5, flash: 6, volume: 4, loyalty: 3, bundle: 3, new_customer: 3 }
 
 # ------------------------------------------------------------------
